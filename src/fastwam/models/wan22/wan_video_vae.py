@@ -342,6 +342,152 @@ class AttentionBlock(nn.Module):
         return x + identity
 
 
+class SpatioTemporalAttentionBlock(nn.Module):
+    """MEM-style space-time separable attention, drop-in replacement for
+    ``AttentionBlock``.
+
+    The spatial branch is byte-for-byte identical to the original
+    ``AttentionBlock`` (same ``norm`` / ``to_qkv`` / ``proj`` parameter names),
+    so a pretrained Wan VAE checkpoint loads into it with ``strict=False`` and
+    behaves exactly like the original at step 0.
+
+    On top of that it adds a causal temporal attention branch that lets every
+    spatial location attend along the time axis (current can see past/current,
+    never future). The branch reuses ``to_qkv`` (shared visual token space) but
+    has its own output projection ``temporal_proj`` and a scalar gate
+    ``temporal_gate`` that is zero-initialised, so the temporal contribution is
+    exactly 0 until training opens the gate.
+
+    IMPORTANT: the temporal branch only fires when the time dimension > 1, which
+    means the VAE must be run with a *non-chunked* full-clip encode
+    (``VideoVAE38_.encode_memory``). The default 4-frame chunked ``encode`` feeds
+    one latent timestep at a time, so this block degrades gracefully to pure
+    spatial attention there.
+    """
+
+    def __init__(self, dim, max_temporal_len=64, use_temporal_pos=True):
+        super().__init__()
+        self.dim = dim
+
+        # --- original (spatial) parameters: keep names for checkpoint loading ---
+        self.norm = RMS_norm(dim)
+        self.to_qkv = nn.Conv2d(dim, dim * 3, 1)
+        self.proj = nn.Conv2d(dim, dim, 1)
+        nn.init.zeros_(self.proj.weight)
+
+        # --- new temporal parameters ---
+        self.temporal_proj = nn.Conv2d(dim, dim, 1)
+        # zero-init so the branch is a no-op even before init_temporal_from_spatial
+        nn.init.zeros_(self.temporal_proj.weight)
+        if self.temporal_proj.bias is not None:
+            nn.init.zeros_(self.temporal_proj.bias)
+
+        # scalar gate, zero-init -> tanh(0) = 0 -> temporal contribution starts at 0
+        self.temporal_gate = nn.Parameter(torch.zeros(()))
+
+        # learnable temporal position embedding, zero-init -> inert at start
+        self.use_temporal_pos = use_temporal_pos
+        if use_temporal_pos:
+            self.temporal_pos = nn.Parameter(torch.zeros(max_temporal_len, dim))
+        else:
+            self.register_parameter("temporal_pos", None)
+
+    def spatial_attn(self, x):
+        """Identical to the original ``AttentionBlock.forward`` (incl. residual)."""
+        identity = x
+        b, c, t, h, w = x.size()
+        x = rearrange(x, 'b c t h w -> (b t) c h w')
+        x = self.norm(x)
+        q, k, v = self.to_qkv(x).reshape(b * t, 1, c * 3, -1).permute(
+            0, 1, 3, 2).contiguous().chunk(3, dim=-1)
+        x = F.scaled_dot_product_attention(q, k, v)
+        x = x.squeeze(1).permute(0, 2, 1).reshape(b * t, c, h, w)
+        x = self.proj(x)
+        x = rearrange(x, '(b t) c h w -> b c t h w', t=t)
+        return x + identity
+
+    def temporal_attn(self, x):
+        """Causal self-attention along the time axis for every spatial location."""
+        b, c, t, h, w = x.shape
+
+        x_2d = rearrange(x, 'b c t h w -> (b t) c h w')
+        x_2d = self.norm(x_2d)
+
+        qkv = self.to_qkv(x_2d)                                 # [(b t), 3c, h, w]
+        # group tokens by spatial position, time last-but-one
+        qkv = rearrange(qkv, '(b t) c3 h w -> b (h w) t c3', b=b, t=t)
+        q, k, v = qkv.chunk(3, dim=-1)                          # each [b, hw, t, c]
+
+        if self.use_temporal_pos:
+            if t > self.temporal_pos.shape[0]:
+                raise ValueError(
+                    f"temporal length {t} exceeds max_temporal_len "
+                    f"{self.temporal_pos.shape[0]}; increase max_temporal_len."
+                )
+            pos = self.temporal_pos[:t].to(dtype=q.dtype)       # [t, c]
+            q = q + pos.view(1, 1, t, c)
+            k = k + pos.view(1, 1, t, c)
+
+        q = rearrange(q, 'b n t c -> (b n) 1 t c')
+        k = rearrange(k, 'b n t c -> (b n) 1 t c')
+        v = rearrange(v, 'b n t c -> (b n) 1 t c')
+
+        # causal: position i can attend to <= i
+        causal_mask = torch.ones(t, t, device=x.device, dtype=torch.bool).tril()
+        causal_mask = causal_mask[None, None, :, :]
+
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=causal_mask)
+        out = out.squeeze(1)                                    # [(b n), t, c]
+        out = rearrange(out, '(b n) t c -> (b t) c n', b=b)     # n = h * w
+        out = out.reshape(b * t, c, h, w)
+
+        out = self.temporal_proj(out)
+        out = rearrange(out, '(b t) c h w -> b c t h w', b=b, t=t)
+        return out
+
+    def forward(self, x):
+        x = self.spatial_attn(x)
+        if x.shape[2] > 1:
+            temp = self.temporal_attn(x)
+            x = x + torch.tanh(self.temporal_gate) * temp
+        return x
+
+
+def init_temporal_from_spatial(model):
+    """Copy the pretrained spatial output projection into the temporal one.
+
+    Call this *after* ``load_state_dict(..., strict=False)`` so that ``proj`` holds
+    the pretrained weights. The temporal branch then starts as a warm copy of the
+    spatial projection (but is still gated to 0 by ``temporal_gate``).
+    """
+    for m in model.modules():
+        if isinstance(m, SpatioTemporalAttentionBlock):
+            m.temporal_proj.weight.data.copy_(m.proj.weight.data)
+            if m.proj.bias is not None and m.temporal_proj.bias is not None:
+                m.temporal_proj.bias.data.copy_(m.proj.bias.data)
+    return model
+
+
+# parameter-name fragments that identify the newly-added memory parameters
+MEMORY_PARAM_KEYS = ("temporal_proj", "temporal_gate", "temporal_pos")
+
+
+def set_vae_memory_trainable(vae):
+    """Freeze the whole VAE except the new memory (temporal) parameters.
+
+    Use this for stage-1 finetuning: the original conv / resblock / spatial
+    attention stay frozen, only ``temporal_proj`` / ``temporal_gate`` /
+    ``temporal_pos`` are trained. Returns the list of trainable parameters.
+    """
+    vae.requires_grad_(False)
+    trainable = []
+    for name, p in vae.named_parameters():
+        if any(k in name for k in MEMORY_PARAM_KEYS):
+            p.requires_grad_(True)
+            trainable.append(p)
+    return trainable
+
+
 class AvgDown3D(nn.Module):
     def __init__(
         self,
@@ -625,7 +771,8 @@ class Encoder3d_38(nn.Module):
                  num_res_blocks=2,
                  attn_scales=[],
                  temperal_downsample=[False, True, True],
-                 dropout=0.0):
+                 dropout=0.0,
+                 use_temporal_attention=False):
         super().__init__()
         self.dim = dim
         self.z_dim = z_dim
@@ -633,6 +780,7 @@ class Encoder3d_38(nn.Module):
         self.num_res_blocks = num_res_blocks
         self.attn_scales = attn_scales
         self.temperal_downsample = temperal_downsample
+        self.use_temporal_attention = use_temporal_attention
 
         # dimensions
         dims = [dim * u for u in [1] + dim_mult]
@@ -661,9 +809,14 @@ class Encoder3d_38(nn.Module):
         self.downsamples = nn.Sequential(*downsamples)
 
         # middle blocks
+        middle_attn = (
+            SpatioTemporalAttentionBlock(out_dim)
+            if use_temporal_attention
+            else AttentionBlock(out_dim)
+        )
         self.middle = nn.Sequential(
             ResidualBlock(out_dim, out_dim, dropout),
-            AttentionBlock(out_dim),
+            middle_attn,
             ResidualBlock(out_dim, out_dim, dropout),
         )
 
@@ -1277,7 +1430,8 @@ class VideoVAE38_(VideoVAE_):
                  num_res_blocks=2,
                  attn_scales=[],
                  temperal_downsample=[False, True, True],
-                 dropout=0.0):
+                 dropout=0.0,
+                 use_temporal_attention=False):
         super(VideoVAE_, self).__init__()
         self.dim = dim
         self.z_dim = z_dim
@@ -1286,12 +1440,16 @@ class VideoVAE38_(VideoVAE_):
         self.attn_scales = attn_scales
         self.temperal_downsample = temperal_downsample
         self.temperal_upsample = temperal_downsample[::-1]
+        self.use_temporal_attention = use_temporal_attention
 
         # modules
         self.encoder = Encoder3d_38(dim, z_dim * 2, dim_mult, num_res_blocks,
-                                    attn_scales, self.temperal_downsample, dropout)
+                                    attn_scales, self.temperal_downsample, dropout,
+                                    use_temporal_attention=use_temporal_attention)
         self.conv1 = CausalConv3d(z_dim * 2, z_dim * 2, 1)
         self.conv2 = CausalConv3d(z_dim, z_dim, 1)
+        # decoder keeps the original spatial-only AttentionBlock: history is
+        # injected on the encode side, the decoder is unchanged.
         self.decoder = Decoder3d_38(dec_dim, z_dim, dim_mult, num_res_blocks,
                                     attn_scales, self.temperal_upsample, dropout)
 
@@ -1324,6 +1482,55 @@ class VideoVAE38_(VideoVAE_):
         return mu
 
 
+    def encode_memory(self, x, scale, num_current_frames):
+        """MEM-style encode of a ``[history + current]`` clip.
+
+        Unlike ``encode`` (which streams the clip in 4-frame chunks and would feed
+        the spatio-temporal attention block only one latent timestep at a time),
+        this runs the encoder over the **whole clip in a single forward pass** so
+        the temporal attention can actually attend across history and current.
+
+        Args:
+            x: ``[B, 3, T, H, W]`` with ``T = T_history + T_current`` and
+               ``T % 4 == 1``. History frames come first, current frames last.
+            scale: the VAE ``[mean, 1/std]`` scale, same as ``encode``.
+            num_current_frames: number of trailing (current) frames; must satisfy
+               ``num_current_frames % 4 == 1``. The returned latent has exactly the
+               same temporal length it would have if the current clip were encoded
+               on its own, i.e. ``1 + (num_current_frames - 1) // 4`` timesteps.
+
+        Returns:
+            ``z_cur``: ``[B, z_dim, T_cur_latent, H/16, W/16]`` — only the current
+            latents, but each now carries history information via temporal attention.
+        """
+        assert num_current_frames % 4 == 1, (
+            f"num_current_frames must satisfy %4==1, got {num_current_frames}"
+        )
+        self.clear_cache()
+        x = patchify(x, patch_size=2)
+
+        # single full-clip forward (NOT chunked); feat_cache is a fresh all-None
+        # list so every CausalConv3d falls back to plain causal padding while
+        # still returning the (tensor, cache, idx) tuples the encoder expects.
+        self._enc_conv_idx = [0]
+        out, self._enc_feat_map, self._enc_conv_idx = self.encoder(
+            x, feat_cache=self._enc_feat_map, feat_idx=self._enc_conv_idx
+        )
+        mu, log_var = self.conv1(out).chunk(2, dim=1)
+        if isinstance(scale[0], torch.Tensor):
+            scale = [s.to(dtype=mu.dtype, device=mu.device) for s in scale]
+            mu = (mu - scale[0].view(1, self.z_dim, 1, 1, 1)) * scale[1].view(
+                1, self.z_dim, 1, 1, 1)
+        else:
+            scale = scale.to(dtype=mu.dtype, device=mu.device)
+            mu = (mu - scale[0]) * scale[1]
+        self.clear_cache()
+
+        # keep only the trailing (current) latents
+        num_current_latents = 1 + (num_current_frames - 1) // 4
+        return mu[:, :, -num_current_latents:]
+
+
     def decode(self, z, scale):
         self.clear_cache()
         if isinstance(scale[0], torch.Tensor):
@@ -1354,7 +1561,7 @@ class VideoVAE38_(VideoVAE_):
 
 class WanVideoVAE38(WanVideoVAE):
 
-    def __init__(self, z_dim=48, dim=160):
+    def __init__(self, z_dim=48, dim=160, use_temporal_attention=False):
         super(WanVideoVAE, self).__init__()
 
         mean = [
@@ -1378,7 +1585,30 @@ class WanVideoVAE38(WanVideoVAE):
         self.scale = [self.mean, 1.0 / self.std]
 
         # init model
-        self.model = VideoVAE38_(z_dim=z_dim, dim=dim).eval().requires_grad_(False)
+        self.use_temporal_attention = use_temporal_attention
+        self.model = VideoVAE38_(
+            z_dim=z_dim, dim=dim, use_temporal_attention=use_temporal_attention
+        ).eval().requires_grad_(False)
         self.upsampling_factor = 16
         self.temporal_downsample_factor = 4
         self.z_dim = z_dim
+
+    def encode_memory(self, videos, num_current_frames, device):
+        """MEM-style memory encode wrapper, mirroring ``encode``.
+
+        ``videos`` is an iterable of ``[3, T, H, W]`` clips, each being
+        ``history + current`` concatenated along time. Returns stacked current
+        latents ``[B, z_dim, T_cur_latent, H/16, W/16]``.
+
+        Note: unlike ``encode`` this is intentionally NOT wrapped in
+        ``torch.no_grad()`` so the temporal parameters can receive gradients
+        during finetuning. The caller decides whether to wrap it.
+        """
+        hidden_states = []
+        for video in videos:
+            video = video.unsqueeze(0).to(device)
+            z = self.model.encode_memory(
+                video, self.scale, num_current_frames=num_current_frames
+            )
+            hidden_states.append(z.squeeze(0))
+        return torch.stack(hidden_states)
