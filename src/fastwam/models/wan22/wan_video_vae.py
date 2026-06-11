@@ -876,7 +876,7 @@ class Encoder3d_38(nn.Module):
         """
         ## middle
         for layer in self.middle:
-            if isinstance(layer, ResidualBlock) and feat_cache is not None:
+            if isinstance(layer, ResidualBlock):
                 x, feat_cache, feat_idx = layer(x, feat_cache, feat_idx)
             else:
                 x = layer(x)
