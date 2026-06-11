@@ -65,6 +65,18 @@ def test_encode_memory_shape():
     print("[ok] encode_memory current-latent shape:", tuple(z.shape))
 
 
+def test_encode_memory_conditioning_frame():
+    # The actual train/infer conditioning path (decision B): history K frames + a
+    # single current frame -> exactly ONE current latent, enriched with history.
+    model = VideoVAE38_(dim=16, z_dim=4, dec_dim=16, use_temporal_attention=True).eval()
+    scale = [torch.zeros(4), torch.ones(4)]
+    K = 16                              # history video frames, multiple of 4
+    x = torch.randn(1, 3, K + 1, 32, 32)  # total 17, %4 == 1
+    z = model.encode_memory(x, scale, num_current_frames=1)
+    assert z.shape[0] == 1 and z.shape[1] == 4 and z.shape[2] == 1, z.shape
+    print("[ok] conditioning-frame (history+1) encode_memory shape:", tuple(z.shape))
+
+
 def test_init_and_trainable():
     model = VideoVAE38_(dim=16, z_dim=4, dec_dim=16, use_temporal_attention=True)
     # set a recognizable proj weight, then copy
@@ -112,6 +124,7 @@ if __name__ == "__main__":
     test_shape_preserved()
     test_equivalent_to_spatial_at_init()
     test_encode_memory_shape()
+    test_encode_memory_conditioning_frame()
     test_init_and_trainable()
     test_grad_flows()
     print("\nAll memory-VAE sanity checks passed.")

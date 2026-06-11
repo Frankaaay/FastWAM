@@ -56,3 +56,12 @@ action_scheduler:
 
 loss:
   lambda_action: 1.0
+
+# MEM-style spatio-temporal memory in the Wan VAE.
+# When enabled, the conditioning (first-frame) latent is produced by
+# `vae.encode_memory([history + current_frame])` so it carries real past frames.
+# Requires `data.train.history_video_frames > 0` to actually supply history.
+vae_memory:
+  enabled: false            # set true to turn on the memory VAE
+  warm_start: true          # copy pretrained spatial proj -> temporal_proj after load
+  train_temporal_only: true # freeze base VAE, train only temporal_proj/gate/pos

@@ -358,11 +358,12 @@ class SpatioTemporalAttentionBlock(nn.Module):
     ``temporal_gate`` that is zero-initialised, so the temporal contribution is
     exactly 0 until training opens the gate.
 
-    IMPORTANT: the temporal branch only fires when the time dimension > 1, which
-    means the VAE must be run with a *non-chunked* full-clip encode
-    (``VideoVAE38_.encode_memory``). The default 4-frame chunked ``encode`` feeds
-    one latent timestep at a time, so this block degrades gracefully to pure
-    spatial attention there.
+    IMPORTANT: the temporal branch only fires when the time dimension > 1. This is
+    the case under ``VideoVAE38_.encode_memory``, which streams the compression in
+    4-frame chunks (memory-safe, shape-correct) but then runs this block ONCE over
+    the concatenated full latent timeline, so the temporal attention attends across
+    all chunks. The default ``encode`` runs the block per chunk (one latent
+    timestep at a time), so it degrades gracefully to pure spatial attention there.
     """
 
     def __init__(self, dim, max_temporal_len=64, use_temporal_pos=True):
@@ -376,11 +377,16 @@ class SpatioTemporalAttentionBlock(nn.Module):
         nn.init.zeros_(self.proj.weight)
 
         # --- new temporal parameters ---
+        # NOTE: do NOT zero-init temporal_proj. Identity-at-start is provided by
+        # temporal_gate=0 alone (out = x + tanh(0)*temp = x). If temporal_proj were
+        # ALSO zero, gate and proj would have zero gradient simultaneously
+        # (d/dgate = temp = 0 and d/dproj = tanh(gate) = 0) -> permanent deadlock,
+        # only escapable by calling init_temporal_from_spatial(). Keeping the
+        # default (non-zero) Conv2d init makes temp != 0, so the gate receives a
+        # live gradient and unsticks; temporal_proj then unsticks once the gate
+        # leaves zero. init_temporal_from_spatial() is now an OPTIONAL warm-start
+        # (copy the pretrained spatial proj) rather than a liveness requirement.
         self.temporal_proj = nn.Conv2d(dim, dim, 1)
-        # zero-init so the branch is a no-op even before init_temporal_from_spatial
-        nn.init.zeros_(self.temporal_proj.weight)
-        if self.temporal_proj.bias is not None:
-            nn.init.zeros_(self.temporal_proj.bias)
 
         # scalar gate, zero-init -> tanh(0) = 0 -> temporal contribution starts at 0
         self.temporal_gate = nn.Parameter(torch.zeros(()))
@@ -828,8 +834,13 @@ class Encoder3d_38(nn.Module):
         )
 
 
-    def forward(self, x, feat_cache=None, feat_idx=[0]):
+    def encode_downsamples(self, x, feat_cache=None, feat_idx=[0]):
+        """conv1 + downsample tower (the time/space compression).
 
+        Safe to call per 4-frame chunk in streaming mode (this is exactly what the
+        original chunked ``encode`` does), so each chunk maps to one latent frame.
+        Returns the *pre-middle* feature map (channels = out_dim, NOT yet z_dim).
+        """
         if feat_cache is not None:
             idx = feat_idx[0]
             cache_x = x[:, :, -CACHE_T:, :, :].clone()
@@ -854,6 +865,15 @@ class Encoder3d_38(nn.Module):
             else:
                 x = layer(x)
 
+        return x, feat_cache, feat_idx
+
+    def encode_middle_head(self, x, feat_cache=None, feat_idx=[0]):
+        """middle (ResBlock, attn, ResBlock) + head, over whatever time axis ``x``
+        carries. Run this ONCE over the full latent timeline so the temporal
+        attention in ``middle`` can attend across all chunks. With ``feat_cache=None``
+        the causal convs simply do plain causal padding over the full sequence,
+        which is the correct full-clip behaviour.
+        """
         ## middle
         for layer in self.middle:
             if isinstance(layer, ResidualBlock) and feat_cache is not None:
@@ -882,6 +902,13 @@ class Encoder3d_38(nn.Module):
             else:
                 x = layer(x)
 
+        return x, feat_cache, feat_idx
+
+    def forward(self, x, feat_cache=None, feat_idx=[0]):
+        # Unchanged behaviour: downsamples then middle+head share the same
+        # feat_idx counter, so the per-chunk streaming ``encode`` path is identical.
+        x, feat_cache, feat_idx = self.encode_downsamples(x, feat_cache, feat_idx)
+        x, feat_cache, feat_idx = self.encode_middle_head(x, feat_cache, feat_idx)
         return x, feat_cache, feat_idx
 
 
@@ -1485,10 +1512,13 @@ class VideoVAE38_(VideoVAE_):
     def encode_memory(self, x, scale, num_current_frames):
         """MEM-style encode of a ``[history + current]`` clip.
 
-        Unlike ``encode`` (which streams the clip in 4-frame chunks and would feed
-        the spatio-temporal attention block only one latent timestep at a time),
-        this runs the encoder over the **whole clip in a single forward pass** so
-        the temporal attention can actually attend across history and current.
+        The compression (conv1 + downsamples) is run **chunked / streaming** exactly
+        like ``encode`` -- this is the memory-safe, shape-correct path that turns
+        every 4-frame chunk into one latent frame. The pre-middle features of all
+        chunks are then concatenated along time and the **middle (temporal
+        attention) + head run ONCE over the full latent timeline**, so the temporal
+        attention attends across history and current. Finally only the trailing
+        (current) latents are returned.
 
         Args:
             x: ``[B, 3, T, H, W]`` with ``T = T_history + T_current`` and
@@ -1500,7 +1530,7 @@ class VideoVAE38_(VideoVAE_):
                on its own, i.e. ``1 + (num_current_frames - 1) // 4`` timesteps.
 
         Returns:
-            ``z_cur``: ``[B, z_dim, T_cur_latent, H/16, W/16]`` — only the current
+            ``z_cur``: ``[B, z_dim, T_cur_latent, H/16, W/16]`` -- only the current
             latents, but each now carries history information via temporal attention.
         """
         assert num_current_frames % 4 == 1, (
@@ -1508,14 +1538,34 @@ class VideoVAE38_(VideoVAE_):
         )
         self.clear_cache()
         x = patchify(x, patch_size=2)
-
-        # single full-clip forward (NOT chunked); feat_cache is a fresh all-None
-        # list so every CausalConv3d falls back to plain causal padding while
-        # still returning the (tensor, cache, idx) tuples the encoder expects.
-        self._enc_conv_idx = [0]
-        out, self._enc_feat_map, self._enc_conv_idx = self.encoder(
-            x, feat_cache=self._enc_feat_map, feat_idx=self._enc_conv_idx
+        t = x.shape[2]
+        # The current-latent slice below assumes the whole clip splits cleanly into
+        # a 1-frame first chunk + 4-frame chunks (history % 4 == 0). Enforce it.
+        assert t % 4 == 1, (
+            f"total frames after patchify must satisfy %4==1, got {t}"
+            f" (history frames must be a multiple of 4)"
         )
+
+        # --- phase 1: chunked / streaming compression (conv1 + downsamples) ---
+        # identical chunking to ``encode``; each chunk -> one pre-middle latent frame
+        iter_ = 1 + (t - 1) // 4
+        feats = []
+        for i in range(iter_):
+            self._enc_conv_idx = [0]
+            if i == 0:
+                chunk = x[:, :, :1, :, :]
+            else:
+                chunk = x[:, :, 1 + 4 * (i - 1):1 + 4 * i, :, :]
+            feat, self._enc_feat_map, self._enc_conv_idx = self.encoder.encode_downsamples(
+                chunk, feat_cache=self._enc_feat_map, feat_idx=self._enc_conv_idx
+            )
+            feats.append(feat)
+        feat = torch.cat(feats, dim=2)  # [B, out_dim, T_lat, H/16, W/16]
+
+        # --- phase 2: middle (temporal attention) + head over the FULL timeline ---
+        # feat_cache=None -> plain causal padding over the whole latent sequence.
+        out, _, _ = self.encoder.encode_middle_head(feat, feat_cache=None, feat_idx=[0])
+
         mu, log_var = self.conv1(out).chunk(2, dim=1)
         if isinstance(scale[0], torch.Tensor):
             scale = [s.to(dtype=mu.dtype, device=mu.device) for s in scale]

@@ -38,11 +38,18 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         is_training_set=False,
         global_sample_stride=1,
         action_video_freq_ratio: int = 1,
+        history_video_frames: int = 0,
         skip_padding_as_possible: bool = False,
         max_padding_retry: int = 3,
         concat_multi_camera: str = "horizontal", # "horizontal", "vertical", "robotwin", or None
         override_instruction: Optional[str] = None, # whether to hardcode a specific instruction for all samples, for debugging
     ):
+        assert history_video_frames % 4 == 0, (
+            f"history_video_frames must be a multiple of 4 (so that (K+1) % 4 == 1 "
+            f"for the VAE memory encode), got {history_video_frames}"
+        )
+        # raw history frames = history video frames * stride between video frames
+        history_obs_size = history_video_frames * action_video_freq_ratio
         self.lerobot_dataset = BaseLerobotDataset(
             dataset_dirs=dataset_dirs,
             shape_meta=OmegaConf.to_container(shape_meta, resolve=True),
@@ -51,10 +58,13 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             val_set_proportion=val_set_proportion,
             is_training_set=is_training_set,
             global_sample_stride=global_sample_stride,
+            history_obs_size=history_obs_size,
         )
-    
+
         self.num_frames = num_frames
         self.action_video_freq_ratio = action_video_freq_ratio
+        self.history_video_frames = history_video_frames
+        self.history_obs_size = history_obs_size
         
         assert (num_frames - 1) % self.action_video_freq_ratio == 0, \
             f"num_frames-1 must be divisible by action_video_freq_ratio, got {num_frames - 1} and {self.action_video_freq_ratio}"
@@ -139,16 +149,26 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         
         image_is_pad = sample["image_is_pad"]
 
+        # MEM-style memory: the IMAGE stream may carry `history_obs_size` extra past raw
+        # frames prepended (see BaseLerobotDataset). Build the sub-sampling indices for
+        # history (older past frames, same stride as the current frames) and current
+        # (the original window, now offset by the history block).
+        H_raw = self.history_obs_size
+        hist_indices = list(range(0, H_raw, self.action_video_freq_ratio))  # K history frames
+        cur_indices = [H_raw + i for i in self.video_sample_indices]        # current video frames
+        num_history = len(hist_indices)
+        sample_indices = hist_indices + cur_indices
+
         video = sample["pixel_values"]  # [T, C, H, W] or [num_cameras, T, C, H, W]
         num_cameras = 1
         if video.ndim == 5:
-            video = video[:, self.video_sample_indices, :, :, :] # [num_cameras, T_video, C, H, W]
+            video = video[:, sample_indices, :, :, :] # [num_cameras, T_video, C, H, W]
             num_cameras, T_video, C, H, W = video.shape
         else:
             assert video.ndim == 4, f"Expected video to have shape [T, C, H, W], but got {video.shape}"
-            video = video[self.video_sample_indices, :, :, :] # [T_video, C, H, W]
+            video = video[sample_indices, :, :, :] # [T_video, C, H, W]
             T_video, C, H, W = video.shape
-        image_is_pad = image_is_pad[self.video_sample_indices]
+        image_is_pad = image_is_pad[sample_indices]
 
         video = video.view(num_cameras, T_video, C, H, W)  # [num_cameras, T_video, C, H, W]
         if self.concat_multi_camera == "robotwin":
@@ -196,7 +216,16 @@ class RobotVideoDataset(torch.utils.data.Dataset):
 
         video = video.permute(1, 0, 2, 3) # [C, T_video, H, W], range [-1, 1]
 
-        # Proxy (from lerobot): 
+        # Split the prepended history off the current clip (both already transformed).
+        history_video = None
+        history_is_pad = None
+        if num_history > 0:
+            history_video = video[:, :num_history].contiguous()   # [C, K, H, W]
+            history_is_pad = image_is_pad[:num_history]
+            video = video[:, num_history:].contiguous()           # [C, T_current, H, W]
+            image_is_pad = image_is_pad[num_history:]
+
+        # Proxy (from lerobot):
         #   action: [num_frames-1, action_dim] # start from t0, except the last frame
         #   proprio: [num_frames, proprio_dim] # start from t0 to the last frame, aligned with video frames
         action = sample["action"] # [T-1, action_dim]
@@ -231,6 +260,9 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             "action_is_pad": sample["action_is_pad"],
             "proprio_is_pad": sample["proprio_is_pad"],
         }
+        if history_video is not None:
+            data["history_video"] = history_video          # [C, K, H, W]
+            data["history_is_pad"] = history_is_pad         # [K]
         return data
 
     def _get_cached_text_context(self, prompt: str):

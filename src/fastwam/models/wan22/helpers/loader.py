@@ -148,6 +148,7 @@ def load_wan22_ti2v_5b_components(
     dit_config: dict[str, Any] | None = None,
     skip_dit_load_from_pretrain: bool = False,
     load_text_encoder: bool = True,
+    vae_use_temporal_attention: bool = False,
 ):
     logger.info("Loading Wan2.2-TI2V-5B components...")
     start = time.time()
@@ -207,7 +208,20 @@ def load_wan22_ti2v_5b_components(
             "Skipping pretrained text encoder/tokenizer load (`load_text_encoder=False`); "
             "training must provide cached `context/context_mask`."
         )
-    vae: WanVideoVAE38 = _load_registered_model(vae_config.path, "wan_video_vae", torch_dtype=torch_dtype, device=device)
+    # When memory (spatio-temporal attention) is enabled, build the VAE with the
+    # temporal branch. The pretrained ckpt is loaded with strict=False (see
+    # `_load_registered_model`), so the new temporal params are simply left at
+    # their init values for the caller to warm-start / unfreeze afterwards.
+    vae_kwargs_override = (
+        {"use_temporal_attention": True} if vae_use_temporal_attention else None
+    )
+    vae: WanVideoVAE38 = _load_registered_model(
+        vae_config.path,
+        "wan_video_vae",
+        torch_dtype=torch_dtype,
+        device=device,
+        model_kwargs_override=vae_kwargs_override,
+    )
     logger.info("Finished loading Wan2.2-TI2V-5B components in %.2f seconds.", time.time() - start)
     return Wan22LoadedComponents(
         dit=dit,

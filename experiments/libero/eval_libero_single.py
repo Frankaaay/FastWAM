@@ -356,6 +356,36 @@ def _compute_clip_mean_psnr(
     return float(np.mean(frame_psnr_values))
 
 
+def _assemble_history_images(
+    buffer: list[torch.Tensor],
+    cur_frame: torch.Tensor,
+    num_history: int,
+    stride: int,
+) -> torch.Tensor:
+    """Build the ``[1,3,K,H,W]`` history clip for the MEM-style memory VAE.
+
+    ``buffer`` holds the strictly-past model-input frames (each ``[1,3,H,W]``,
+    oldest -> newest, one per executed env step). History frame ``i`` is the
+    observation ``i*stride`` env steps before the current one, matching the
+    training cadence (``action_video_freq_ratio``). When the episode is too young
+    to reach that far back, replicate the oldest available frame (or the current
+    frame if nothing has been seen yet) -- the same boundary padding the dataset
+    uses at episode start.
+    """
+    n = len(buffer)
+    frames = []
+    for i in range(num_history, 0, -1):  # oldest (-K*stride) -> newest (-stride)
+        idx = n - i * stride
+        if idx >= 0:
+            frames.append(buffer[idx])
+        elif n > 0:
+            frames.append(buffer[0])
+        else:
+            frames.append(cur_frame)
+    # each frame [1,3,H,W] -> [1,3,1,H,W]; concat over time -> [1,3,K,H,W]
+    return torch.cat([f.unsqueeze(2) for f in frames], dim=2)
+
+
 def _predict_action_chunk(
     obs: dict,
     task_description: str,
@@ -367,6 +397,7 @@ def _predict_action_chunk(
     input_w: int,
     input_h: int,
     model_device: str,
+    history_images: Optional[torch.Tensor] = None,
 ) -> tuple[np.ndarray, dict, Optional[list[Image.Image]]]:
     num_inference_steps_cfg = cfg.EVALUATION.get("num_inference_steps", None)
     if num_inference_steps_cfg is None:
@@ -409,6 +440,10 @@ def _predict_action_chunk(
         infer_kwargs["num_video_frames"] = _get_num_video_frames(cfg)
     elif "num_video_frames" in inspect.signature(model.infer_action).parameters:
         infer_kwargs["num_video_frames"] = _get_num_video_frames(cfg)
+    # MEM-style memory: feed the real-frame history buffer to the action path.
+    # (infer_joint / visualize_future_video does not support history_images.)
+    if not visualize_future_video and history_images is not None:
+        infer_kwargs["history_images"] = history_images
 
     with torch.no_grad():
         if visualize_future_video:
@@ -477,6 +512,14 @@ def run_single_episode(
     current_replan_step = 0
     current_replan_idx = -1
 
+    # MEM-style memory: maintain a rolling buffer of recent real model-input frames.
+    memory_enabled = bool(getattr(model, "vae_memory_enabled", False))
+    num_history = int(cfg.data.train.get("history_video_frames", 0))
+    history_stride = int(cfg.data.train.get("action_video_freq_ratio", 1))
+    use_memory = memory_enabled and num_history > 0
+    buffer_cap = num_history * history_stride
+    frame_buffer: list[torch.Tensor] = []
+
     t = 0
     done = False
     pbar = tqdm(total=max_steps + num_steps_wait, desc=f"Episode {episode_idx + 1}")
@@ -487,7 +530,25 @@ def run_single_episode(
             t += 1
             continue
 
+        # Capture the current model-input frame for the history buffer (every real step).
+        cur_frame = None
+        if use_memory:
+            cur_frame = _obs_to_model_input(
+                obs,
+                cfg=cfg,
+                processor=processor,
+                width=input_w,
+                height=input_h,
+                device=model_device,
+                dtype=model.torch_dtype,
+            )[0]
+
         if len(pending_actions) == 0:
+            history_images = None
+            if use_memory:
+                history_images = _assemble_history_images(
+                    frame_buffer, cur_frame, num_history, history_stride
+                )
             action_chunk, imgs, predicted_future_frames = _predict_action_chunk(
                 obs=obs,
                 task_description=task_description,
@@ -498,6 +559,7 @@ def run_single_episode(
                 input_w=input_w,
                 input_h=input_h,
                 model_device=model_device,
+                history_images=history_images,
             )
             if predicted_future_frames is not None:
                 current_replan_idx += 1
@@ -518,6 +580,12 @@ def run_single_episode(
         else:
             imgs = get_libero_image(obs)
             replay_images.append(imgs.copy())
+
+        # Push the current frame into the history buffer (it becomes "past" once we step).
+        if use_memory and cur_frame is not None:
+            frame_buffer.append(cur_frame)
+            if len(frame_buffer) > buffer_cap:
+                del frame_buffer[0]
 
         obs, _, done, _ = env.step(pending_actions.pop(0))
         if visualize_future_video and current_predicted_future_clip is not None:

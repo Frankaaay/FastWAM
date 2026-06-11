@@ -21,10 +21,11 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
 
         # shapes
         shape_meta: Dict[str, Any],
-        action_size: int = 1, 
+        action_size: int = 1,
         past_action_size: int = 0, # Excludes the current frame
-        obs_size: int = 1, # should be 
+        obs_size: int = 1, # should be
         past_obs_size: int = 0,
+        history_obs_size: int = 0, # extra past IMAGE frames prepended for MEM-style memory (raw frames)
 
         # train vs val
         val_set_proportion: float = 0.05, 
@@ -39,11 +40,13 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         assert past_obs_size == 0
         assert action_size == obs_size - 1, "In this dataset, action_size should be obs_size - 1"
         
+        assert history_obs_size >= 0
         self.dataset_dirs = dataset_dirs
         self.shape_meta = shape_meta
         self.action_size = action_size
         self.past_action_size = past_action_size
         self.obs_size = obs_size
+        self.history_obs_size = history_obs_size
         self.processor = None  # Will be set externally
         metas = []
         for ds_dir in dataset_dirs:
@@ -69,8 +72,15 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         for meta in self.image_meta:
             key = meta["key"]
             meta["lerobot_key"] = f"observation.images.{key}" if key != "default" else "observation.images"
+            # For MEM-style memory, prepend `history_obs_size` extra past frames to the
+            # IMAGE keys only (state/action windows are left untouched so proprio/action
+            # alignment is preserved). lerobot fills out-of-episode-start frames with the
+            # boundary frame and flags them in `*_is_pad`.
+            image_offsets = list(range(-history_obs_size, 0)) + list(
+                range(-past_obs_size, -past_obs_size + obs_size)
+            )
             delta_timestamps[meta["lerobot_key"]] = [
-                (t * global_sample_stride) / fps for t in range(-past_obs_size, -past_obs_size + obs_size)
+                (t * global_sample_stride) / fps for t in image_offsets
             ]
         
         for meta in self.state_meta:

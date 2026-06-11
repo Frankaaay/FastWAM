@@ -88,10 +88,18 @@ def create_fastwam(
     loss=None,
     mot_checkpoint_mixed_attn: bool = True,
     redirect_common_files: bool = True,
+    vae_memory=None,
     model_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
 ):
     from .models.wan22.fastwam import FastWAM
+
+    if isinstance(vae_memory, DictConfig):
+        vae_memory = OmegaConf.to_container(vae_memory, resolve=True)
+    if vae_memory is None:
+        vae_memory = {}
+    if not isinstance(vae_memory, dict):
+        raise ValueError(f"`vae_memory` must be dict-like, got {type(vae_memory)}")
 
     if isinstance(video_dit_config, DictConfig):
         video_dit_config = OmegaConf.to_container(video_dit_config, resolve=True)
@@ -155,6 +163,9 @@ def create_fastwam(
         action_num_train_timesteps=int(action_scheduler["num_train_timesteps"]),
         loss_lambda_video=float(loss.get("lambda_video", 1.0)),
         loss_lambda_action=float(loss.get("lambda_action", 1.0)),
+        vae_use_temporal_attention=bool(vae_memory.get("enabled", False)),
+        vae_memory_warm_start=bool(vae_memory.get("warm_start", True)),
+        vae_memory_train_temporal_only=bool(vae_memory.get("train_temporal_only", True)),
     )
 
 

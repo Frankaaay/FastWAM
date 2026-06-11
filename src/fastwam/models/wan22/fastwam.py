@@ -11,6 +11,7 @@ from .action_dit import ActionDiT
 from .helpers.loader import load_wan22_ti2v_5b_components
 from .mot import MoT
 from .schedulers.scheduler_continuous import WanContinuousFlowMatchScheduler
+from .wan_video_vae import init_temporal_from_spatial, set_vae_memory_trainable
 
 logger = get_logger(__name__)
 
@@ -38,8 +39,13 @@ class FastWAM(torch.nn.Module):
         action_num_train_timesteps: int = 1000,
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
+        vae_memory_enabled: bool = False,
     ):
         super().__init__()
+        # When True, the conditioning (first-frame) latent is produced by the
+        # MEM-style `vae.encode_memory([history + current_frame])` path instead of
+        # the plain single-frame encode. See `build_inputs` / `infer_action`.
+        self.vae_memory_enabled = bool(vae_memory_enabled)
         self.video_expert = video_expert
         self.action_expert = action_expert
         self.mot = mot
@@ -111,6 +117,9 @@ class FastWAM(torch.nn.Module):
         action_num_train_timesteps: int = 1000,
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
+        vae_use_temporal_attention: bool = False,
+        vae_memory_warm_start: bool = True,
+        vae_memory_train_temporal_only: bool = True,
     ):
         if video_dit_config is None:
             raise ValueError("`video_dit_config` is required for FastWAM.from_wan22_pretrained().")
@@ -127,7 +136,23 @@ class FastWAM(torch.nn.Module):
             dit_config=video_dit_config,
             skip_dit_load_from_pretrain=skip_dit_load_from_pretrain,
             load_text_encoder=load_text_encoder,
+            vae_use_temporal_attention=vae_use_temporal_attention,
         )
+
+        if vae_use_temporal_attention:
+            # The ckpt was loaded strict=False, so the temporal params are still at
+            # their constructor init. Optionally warm-start `temporal_proj` from the
+            # pretrained spatial `proj`, then (optionally) freeze everything except
+            # the memory params for stage-1 finetuning.
+            if vae_memory_warm_start:
+                init_temporal_from_spatial(components.vae.model)
+                logger.info("VAE memory: warm-started temporal_proj from pretrained spatial proj.")
+            if vae_memory_train_temporal_only:
+                trainable = set_vae_memory_trainable(components.vae)
+                logger.info(
+                    "VAE memory: froze base VAE, unfroze %d temporal param tensors.",
+                    len(trainable),
+                )
 
         video_expert = components.dit
         action_expert = ActionDiT.from_pretrained(
@@ -168,6 +193,7 @@ class FastWAM(torch.nn.Module):
             action_num_train_timesteps=action_num_train_timesteps,
             loss_lambda_video=loss_lambda_video,
             loss_lambda_action=loss_lambda_action,
+            vae_memory_enabled=vae_use_temporal_attention,
         )
         model.model_paths = {
             "video_dit": components.dit_path,
@@ -264,6 +290,38 @@ class FastWAM(torch.nn.Module):
             z = z[0].unsqueeze(0)
         return z
 
+    def _encode_memory_first_frame(self, history_video: torch.Tensor, current_first_frame: torch.Tensor):
+        """MEM-style conditioning-frame encode: ``[history + current_frame_0]`` -> 1 latent.
+
+        Args:
+            history_video: ``[B, 3, K, H, W]`` history video frames (``K % 4 == 0``),
+                ordered oldest -> newest, immediately preceding the current frame.
+            current_first_frame: ``[B, 3, 1, H, W]`` the current observation frame.
+
+        Returns:
+            ``[B, z_dim, 1, H/16, W/16]`` -- the single current-conditioning latent,
+            now carrying history information via causal temporal attention.
+
+        NOTE: intentionally NOT wrapped in ``torch.no_grad()``. The temporal VAE
+        params must receive gradients during finetuning; the frozen base params
+        simply pass gradient through without being updated.
+        """
+        if history_video.ndim != 5 or history_video.shape[1] != 3:
+            raise ValueError(f"`history_video` must be [B,3,K,H,W], got {tuple(history_video.shape)}")
+        if current_first_frame.ndim != 5 or current_first_frame.shape[1] != 3 or current_first_frame.shape[2] != 1:
+            raise ValueError(
+                f"`current_first_frame` must be [B,3,1,H,W], got {tuple(current_first_frame.shape)}"
+            )
+        if history_video.shape[2] % 4 != 0:
+            raise ValueError(
+                f"`history_video` frame count must be a multiple of 4 so that (K+1) % 4 == 1, "
+                f"got K={history_video.shape[2]}"
+            )
+        clip = torch.cat([history_video, current_first_frame], dim=2)  # [B, 3, K+1, H, W]
+        clips = [clip[i] for i in range(clip.shape[0])]  # list of [3, K+1, H, W]
+        z = self.vae.encode_memory(clips, num_current_frames=1, device=self.device)
+        return z  # [B, z_dim, 1, H/16, W/16]
+
     def _decode_latents(self, latents, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)):
         video_tensor = self.vae.decode(latents, device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
         video_tensor = video_tensor.squeeze(0).detach().float().clamp(-1, 1)
@@ -340,7 +398,20 @@ class FastWAM(torch.nn.Module):
         first_frame_latents = None
         fuse_flag = False
         if getattr(self.video_expert, "fuse_vae_embedding_in_latents", False):
-            first_frame_latents = input_latents[:, :, 0:1]
+            history_video = sample.get("history_video", None) if self.vae_memory_enabled else None
+            if history_video is not None:
+                # MEM-style: enrich the conditioning frame with real past frames.
+                # Target latents (`input_latents`, frames 1..) stay the plain encode;
+                # only the frozen frame-0 conditioning is replaced by the memory encode.
+                history_video = history_video.to(
+                    device=self.device, dtype=self.torch_dtype, non_blocking=True
+                )
+                first_frame_latents = self._encode_memory_first_frame(
+                    history_video=history_video,
+                    current_first_frame=input_video[:, :, 0:1],
+                )
+            else:
+                first_frame_latents = input_latents[:, :, 0:1]
             fuse_flag = True
 
         if context.ndim != 3 or context_mask.ndim != 2:
@@ -909,6 +980,7 @@ class FastWAM(torch.nn.Module):
         input_image: torch.Tensor,
         action_horizon: int,
         proprio: Optional[torch.Tensor] = None,
+        history_images: Optional[torch.Tensor] = None,
         context: Optional[torch.Tensor] = None,
         context_mask: Optional[torch.Tensor] = None,
         negative_prompt: Optional[str] = None,
@@ -958,7 +1030,19 @@ class FastWAM(torch.nn.Module):
         ).to(device=self.device, dtype=self.torch_dtype)
 
         input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
-        first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
+        if self.vae_memory_enabled and history_images is not None:
+            # MEM-style conditioning: fold a real-frame history buffer into the
+            # current observation latent. `history_images` is [B,3,K,H,W] (or
+            # [3,K,H,W]); `input_image` is [1,3,H,W] -> [1,3,1,H,W].
+            history_images = history_images.to(device=self.device, dtype=self.torch_dtype)
+            if history_images.ndim == 4:
+                history_images = history_images.unsqueeze(0)  # [3,K,H,W] -> [1,3,K,H,W]
+            first_frame_latents = self._encode_memory_first_frame(
+                history_video=history_images,
+                current_first_frame=input_image.unsqueeze(2),
+            )
+        else:
+            first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
         fuse_flag = bool(getattr(self.video_expert, "fuse_vae_embedding_in_latents", False))
 
         use_prompt = prompt is not None
