@@ -43,6 +43,11 @@ class FastWAMProcessor(BaseProcessor):
     ):
         self.shape_meta = shape_meta
         self.num_obs_steps = num_obs_steps
+        # Extra past IMAGE frames prepended for MEM-style memory (raw frames). The
+        # image stream carries `num_obs_steps + image_history_obs_size` frames while
+        # state/proprio/action keep `num_obs_steps`. Set by the dataset after
+        # instantiation; 0 means no memory history (plain single-window behavior).
+        self.image_history_obs_size = 0
         self.num_output_cameras = num_output_cameras
         self.action_output_dim = action_output_dim
         self.proprio_output_dim = proprio_output_dim
@@ -224,7 +229,10 @@ class FastWAMProcessor(BaseProcessor):
             for trans in current_transforms:
                 image = trans(image)
             
-            meta_shape = [self.num_obs_steps] + shape
+            # The image stream carries the optional MEM-style history block prepended
+            # to the current window, so it has `num_obs_steps + image_history_obs_size`
+            # frames (state/proprio/action are NOT history-expanded).
+            meta_shape = [self.num_obs_steps + self.image_history_obs_size] + shape
             assert image.shape == meta_shape, \
                 f"Expected shape {meta_shape}, got {image.shape} after transforms for key {key}"
 

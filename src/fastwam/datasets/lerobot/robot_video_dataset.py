@@ -95,6 +95,9 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         if processor is not None:
             if isinstance(processor, DictConfig):
                 processor = instantiate(processor)
+            # Tell the processor how many extra past IMAGE frames are prepended, so its
+            # per-key shape assertion expects the history-expanded image stream.
+            processor.image_history_obs_size = history_obs_size
             if not pretrained_norm_stats:
                 if not is_training_set:
                     raise ValueError("pretrained_norm_stats must be provided for validation/test sets since we don't want to calculate stats on them.")

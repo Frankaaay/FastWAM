@@ -11,7 +11,11 @@ from .action_dit import ActionDiT
 from .helpers.loader import load_wan22_ti2v_5b_components
 from .mot import MoT
 from .schedulers.scheduler_continuous import WanContinuousFlowMatchScheduler
-from .wan_video_vae import init_temporal_from_spatial, set_vae_memory_trainable
+from .wan_video_vae import (
+    init_temporal_from_spatial,
+    set_vae_memory_trainable,
+    MEMORY_PARAM_KEYS,
+)
 
 logger = get_logger(__name__)
 
@@ -1169,6 +1173,19 @@ class FastWAM(torch.nn.Module):
             tiled=tiled,
         )
 
+    def _vae_memory_state_dict(self):
+        """Return only the MEM-style temporal params (temporal_proj/gate/pos).
+
+        These are the sole trainable tensors in VAE-memory finetuning; the rest of
+        the VAE is frozen and already lives in the pretrained Wan VAE checkpoint, so
+        we persist just this small subset to keep our checkpoints tiny.
+        """
+        return {
+            name: param.detach().cpu()
+            for name, param in self.vae.named_parameters()
+            if any(k in name for k in MEMORY_PARAM_KEYS)
+        }
+
     def save_checkpoint(self, path, optimizer=None, step=None):
         payload = {
             "mot": self.mot.state_dict(),
@@ -1177,6 +1194,10 @@ class FastWAM(torch.nn.Module):
         }
         if self.proprio_encoder is not None:
             payload["proprio_encoder"] = self.proprio_encoder.state_dict()
+        if self.vae_memory_enabled:
+            vae_memory = self._vae_memory_state_dict()
+            if vae_memory:
+                payload["vae_memory"] = vae_memory
         if optimizer is not None:
             payload["optimizer"] = optimizer.state_dict()
         torch.save(payload, path)
@@ -1197,6 +1218,26 @@ class FastWAM(torch.nn.Module):
                 logger.warning("Checkpoint has no `proprio_encoder` weights; keeping current `proprio_encoder` params.")
         elif "proprio_encoder" in payload:
             logger.warning("Checkpoint contains `proprio_encoder` weights but current model has `proprio_dim=None`; ignoring.")
+
+        if "vae_memory" in payload:
+            if self.vae_memory_enabled:
+                vae_params = dict(self.vae.named_parameters())
+                missing, loaded = [], 0
+                for name, tensor in payload["vae_memory"].items():
+                    target = vae_params.get(name)
+                    if target is None:
+                        missing.append(name)
+                        continue
+                    with torch.no_grad():
+                        target.copy_(tensor.to(device=target.device, dtype=target.dtype))
+                    loaded += 1
+                logger.info("Loaded %d VAE-memory temporal params from checkpoint.", loaded)
+                if missing:
+                    logger.warning("Checkpoint `vae_memory` had %d unmatched keys: %s", len(missing), missing[:5])
+            else:
+                logger.warning("Checkpoint contains `vae_memory` weights but `vae_memory_enabled=False`; ignoring.")
+        elif self.vae_memory_enabled:
+            logger.warning("`vae_memory_enabled=True` but checkpoint has no `vae_memory` weights; keeping warm-started temporal params.")
 
         if optimizer is not None and "optimizer" in payload:
             optimizer.load_state_dict(payload["optimizer"])
