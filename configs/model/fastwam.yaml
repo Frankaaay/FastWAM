@@ -64,4 +64,8 @@ loss:
 vae_memory:
   enabled: false            # set true to turn on the memory VAE
   warm_start: true          # copy pretrained spatial proj -> temporal_proj after load
-  train_temporal_only: true # freeze base VAE, train only temporal_proj/gate/pos
+  # true  -> train ONLY temporal_proj/gate/pos (DiT + base VAE frozen).
+  # false -> ALSO finetune the DiT (+ proprio) so the experts adapt to the
+  #          memory-enriched conditioning; base VAE stays frozen. The trainer
+  #          honors this at runtime (unfreeze set + optimizer param group).
+  train_temporal_only: true

@@ -84,11 +84,14 @@ class Wan22Trainer:
         # memory mode) as trainable when ZeRO builds optimizer state.
         self._apply_dit_only_train_mode(self.model)
         if self._is_vae_memory_mode(self.model):
-            # MEM-style memory finetune: DiT frozen, train only the new VAE temporal params.
-            trainable_params = self._collect_vae_temporal_params(self.model)
+            # MEM-style memory finetune. Always train the new VAE temporal params;
+            # when `train_temporal_only=false`, also finetune the DiT (+ proprio).
+            # Mirror exactly what `_apply_dit_only_train_mode` unfroze by collecting
+            # every param with requires_grad=True (avoids drift between the two).
+            trainable_params = [p for p in self.model.parameters() if p.requires_grad]
             if not trainable_params:
                 raise ValueError(
-                    "vae_memory_enabled is set but no temporal params were found to train."
+                    "vae_memory_enabled is set but no trainable params were found."
                 )
         else:
             trainable_params = list(self.model.dit.parameters())
@@ -310,22 +313,37 @@ class Wan22Trainer:
     @staticmethod
     def _apply_dit_only_train_mode(model):
         if Wan22Trainer._is_vae_memory_mode(model):
-            # MEM-style memory finetune: freeze EVERYTHING (incl. DiT) and keep the whole
-            # model in eval() so the VAE's Dropout stays off and encoding is deterministic.
-            # eval() does NOT disable autograd, so the temporal params still receive grads;
-            # gradients flow back through the frozen DiT to the conditioning latent.
+            # MEM-style memory finetune. Keep the whole model in eval() so the VAE's
+            # Dropout stays off and encoding is deterministic. eval() does NOT disable
+            # autograd, so unfrozen params still receive grads.
+            #
+            # `train_temporal_only` controls the trainable set:
+            #   True  -> ONLY the VAE temporal params (DiT + base VAE frozen). Grads
+            #            flow back through the frozen DiT to the conditioning latent.
+            #   False -> also finetune the DiT (+ proprio) so the experts adapt to the
+            #            memory-enriched conditioning; base VAE (non-temporal) frozen.
             from .models.wan22.wan_video_vae import MEMORY_PARAM_KEYS
 
+            temporal_only = bool(getattr(model, "vae_memory_train_temporal_only", True))
             model.eval()
             model.requires_grad_(False)
+            if not temporal_only:
+                model.dit.train()
+                model.dit.requires_grad_(True)
+                proprio_encoder = getattr(model, "proprio_encoder", None)
+                if proprio_encoder is not None:
+                    proprio_encoder.train()
+                    proprio_encoder.requires_grad_(True)
             n_temporal = 0
             for name, p in model.named_parameters():
                 if any(k in name for k in MEMORY_PARAM_KEYS):
                     p.requires_grad_(True)
                     n_temporal += 1
             logger.info(
-                "VAE-memory mode: DiT frozen (eval), unfroze %d temporal params for training.",
+                "VAE-memory mode (%s): unfroze %d temporal params%s.",
+                "temporal-only" if temporal_only else "temporal+DiT",
                 n_temporal,
+                "" if temporal_only else " + DiT (+ proprio)",
             )
             return
         model.eval()

@@ -44,12 +44,19 @@ class FastWAM(torch.nn.Module):
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
         vae_memory_enabled: bool = False,
+        vae_memory_train_temporal_only: bool = True,
     ):
         super().__init__()
         # When True, the conditioning (first-frame) latent is produced by the
         # MEM-style `vae.encode_memory([history + current_frame])` path instead of
         # the plain single-frame encode. See `build_inputs` / `infer_action`.
         self.vae_memory_enabled = bool(vae_memory_enabled)
+        # In memory-training mode, controls the trainable set:
+        #   True  -> train ONLY the VAE temporal params (DiT + base VAE frozen).
+        #   False -> also finetune the DiT (+ proprio) so the experts adapt to the
+        #            memory-enriched conditioning; base VAE stays frozen.
+        # The trainer reads this to decide what to unfreeze / put in the optimizer.
+        self.vae_memory_train_temporal_only = bool(vae_memory_train_temporal_only)
         self.video_expert = video_expert
         self.action_expert = action_expert
         self.mot = mot
@@ -198,6 +205,7 @@ class FastWAM(torch.nn.Module):
             loss_lambda_video=loss_lambda_video,
             loss_lambda_action=loss_lambda_action,
             vae_memory_enabled=vae_use_temporal_attention,
+            vae_memory_train_temporal_only=vae_memory_train_temporal_only,
         )
         model.model_paths = {
             "video_dit": components.dit_path,
@@ -413,6 +421,18 @@ class FastWAM(torch.nn.Module):
                 first_frame_latents = self._encode_memory_first_frame(
                     history_video=history_video,
                     current_first_frame=input_video[:, :, 0:1],
+                )
+            elif self.vae_memory_enabled:
+                # Memory VAE is on, but this batch carries no `history_video`.
+                # Falling back to `input_latents[:, :, 0:1]` would silently route
+                # the conditioning through the @torch.no_grad() encode, so the
+                # temporal params never enter the graph. In memory-training mode
+                # (DiT + base VAE frozen) that leaves the loss with no trainable
+                # path -> backward() raises "does not require grad". Fail loudly.
+                raise ValueError(
+                    "vae_memory.enabled=true but the batch has no `history_video`. "
+                    "Set data.train.history_video_frames > 0 (a multiple of 4) so the "
+                    "dataset feeds history frames, or disable model.vae_memory.enabled."
                 )
             else:
                 first_frame_latents = input_latents[:, :, 0:1]
