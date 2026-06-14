@@ -28,9 +28,14 @@ ENV=${ENV:-fastwam}
 # shellcheck disable=SC1090
 source "$CONDA_SH" && conda activate "$ENV" || { echo "[FATAL] 无法激活 conda env: $ENV"; exit 1; }
 
+# ---- DiffSynth 离线:本地权重路径 + 禁止联网下载(air-gapped H200 必须)----
+# 缺这两个，加载 Wan2.2-TI2V-5B 时会回落到 modelscope 联网，解析不了域名直接挂。
+export DIFFSYNTH_MODEL_BASE_PATH="$ROOT/checkpoints"
+export DIFFSYNTH_SKIP_DOWNLOAD=true
+
 # ---- 参数 ----
 GPUS=${GPUS:-0,1,2,3}
-CANDIDATES=${CANDIDATES:-"16 24 32 40"}
+CANDIDATES=${CANDIDATES:-"32 40"}
 STEPS=${STEPS:-6}
 COLD_CKPT=${COLD_CKPT:-checkpoints/fastwam_release/libero_uncond_2cam224.pt}
 ACCEL_CFG=${ACCEL_CFG:-scripts/accelerate_configs/accelerate_zero1_ds.yaml}
@@ -77,6 +82,7 @@ for BS in $CANDIDATES; do
         --config_file "$ACCEL_CFG" --num_processes "$NUM_PROC" \
         scripts/train.py \
         data=libero_2cam model=fastwam task=libero_uncond_2cam224_1e-4 \
+        model.redirect_common_files=false \
         model.vae_memory.enabled=true \
         model.vae_memory.warm_start=true \
         model.vae_memory.train_temporal_only=true \
