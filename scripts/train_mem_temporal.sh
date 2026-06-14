@@ -6,6 +6,9 @@ cd ~/projects/FastWAM
 export DIFFSYNTH_MODEL_BASE_PATH=$(pwd)/checkpoints
 export DIFFSYNTH_SKIP_DOWNLOAD=true
 
+# 另一个人占了后 4 张卡 → 我们只用前 4 卡(0,1,2,3)
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+
 # Auto-resume: if a saved DeepSpeed training state exists, continue from the latest;
 # otherwise cold-start (warm-start temporal params from the released checkpoint).
 LATEST_STATE=$(ls -d runs/mem_temporal_libero/checkpoints/state/step_* 2>/dev/null | sort -V | tail -1)
@@ -17,9 +20,11 @@ else
   echo "[cold-start] warm-starting weights from $RESUME"
 fi
 
-accelerate launch --config_file scripts/accelerate_configs/accelerate_zero1_ds.yaml --num_processes 8 \
+# 4 卡 × per-GPU 32 × grad_accum 1 = 全局 batch 128(与断点前一致，续训干净)
+accelerate launch --config_file scripts/accelerate_configs/accelerate_zero1_ds.yaml --num_processes 4 \
   scripts/train.py \
   data=libero_2cam model=fastwam task=libero_uncond_2cam224_1e-4 \
+  batch_size=32 \
   model.redirect_common_files=false \
   model.vae_memory.enabled=true \
   model.vae_memory.warm_start=true \
