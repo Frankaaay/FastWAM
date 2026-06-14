@@ -1,0 +1,5 @@
+# Shell scripts must use LF endings so they run on the Linux H200 nodes.
+# Without this, editing on Windows produces CRLF and bash fails with
+# "set: -\r: invalid option" / "$'\r': command not found".
+*.sh text eol=lf
+*.bash text eol=lf
