@@ -9,7 +9,11 @@ ckpt: null
 gpu_id: 0
 
 model:
-  load_text_encoder: true
+  # Air-gapped/offline: keep the text encoder OFF (matches training). The model
+  # consumes precomputed T5 context from data.train.text_embedding_cache_dir, the
+  # same cache training used, so eval never needs the ~11GB T5 weights present.
+  # Set true only if the T5 weights are available under checkpoints/ to run T5 live.
+  load_text_encoder: false
   skip_dit_load_from_pretrain: true
   action_dit_pretrained_path: null
 

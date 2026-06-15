@@ -1,3 +1,4 @@
+import hashlib
 import json
 import inspect
 import logging
@@ -386,6 +387,49 @@ def _assemble_history_images(
     return torch.cat([f.unsqueeze(2) for f in frames], dim=2)
 
 
+def _load_cached_text_context(
+    cfg: DictConfig,
+    prompt: str,
+    *,
+    device: str,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Load the precomputed T5 text context for ``prompt`` (offline, no text encoder).
+
+    Mirrors ``RobotVideoDataset._get_cached_text_context`` so eval matches training
+    exactly: same sha256 cache key, same ``t5_len{N}.wan22ti2v5b`` filename, and the
+    same zero-pad + all-ones mask convention. Used when the model is built with
+    ``load_text_encoder=false`` (air-gapped H200 has no T5 weights). The cache was
+    already produced for every task instruction by ``scripts/precompute_text_embeds.py``.
+    """
+    cache_dir = cfg.data.train.get("text_embedding_cache_dir")
+    if cache_dir is None:
+        raise ValueError(
+            "data.train.text_embedding_cache_dir is unset but the model has no text "
+            "encoder. Set model.load_text_encoder=true, or point to the precomputed cache."
+        )
+    context_len = int(cfg.data.train.get("context_len", 128))
+    cache_dir = os.path.expanduser(os.path.expandvars(str(cache_dir)))
+    hashed = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    cache_path = os.path.join(cache_dir, f"{hashed}.t5_len{context_len}.wan22ti2v5b.pt")
+    if not os.path.exists(cache_path):
+        raise FileNotFoundError(
+            "Missing text embedding cache for eval prompt.\n"
+            f"  prompt: {prompt!r}\n  path:   {cache_path}\n"
+            "Run scripts/precompute_text_embeds.py for this task suite, or set "
+            "model.load_text_encoder=true with the T5 weights available offline."
+        )
+    payload = torch.load(cache_path, map_location="cpu")
+    context = payload["context"]
+    context_mask = payload["mask"].bool()
+    # match training (wan2.2 behavior): zero padded positions, then mask all-ones
+    context[~context_mask] = 0.0
+    context_mask = torch.ones_like(context_mask)
+    context = context.unsqueeze(0).to(device=device, dtype=dtype)
+    context_mask = context_mask.unsqueeze(0).to(device=device)
+    return context, context_mask
+
+
 def _predict_action_chunk(
     obs: dict,
     task_description: str,
@@ -418,7 +462,6 @@ def _predict_action_chunk(
     )
 
     infer_kwargs = {
-        "prompt": prompt,
         "input_image": image,
         "action_horizon": action_horizon,
         "negative_prompt": str(cfg.EVALUATION.get("negative_prompt", "")),
@@ -434,6 +477,17 @@ def _predict_action_chunk(
         "rand_device": str(cfg.EVALUATION.get("rand_device", "cpu")),
         "tiled": bool(cfg.EVALUATION.get("tiled", False)),
     }
+    # Text conditioning: with the text encoder loaded (online) pass the raw prompt
+    # and let the model run T5. Offline (load_text_encoder=false, air-gapped) the
+    # model has no T5, so feed the precomputed context cache -- same path training used.
+    if getattr(model, "text_encoder", None) is not None:
+        infer_kwargs["prompt"] = prompt
+    else:
+        context, context_mask = _load_cached_text_context(
+            cfg, prompt, device=model_device, dtype=model.torch_dtype
+        )
+        infer_kwargs["context"] = context
+        infer_kwargs["context_mask"] = context_mask
     visualize_future_video = bool(cfg.EVALUATION.get("visualize_future_video", False))
     predicted_future_frames = None
     if visualize_future_video:
