@@ -14,6 +14,11 @@ model:
   # same cache training used, so eval never needs the ~11GB T5 weights present.
   # Set true only if the T5 weights are available under checkpoints/ to run T5 live.
   load_text_encoder: false
+  # Use the original local VAE weights checkpoints/Wan-AI/Wan2.2-TI2V-5B/Wan2.2_VAE.pth
+  # instead of the redirected DiffSynth converted-safetensors (not present offline).
+  # hash_model_file keys on weight names+shapes, so .pth and .safetensors share the
+  # same registry hash -- redirect only changes which path is globbed for the file.
+  redirect_common_files: false
   skip_dit_load_from_pretrain: true
   action_dit_pretrained_path: null
 
