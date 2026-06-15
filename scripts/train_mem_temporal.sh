@@ -6,8 +6,8 @@ cd ~/projects/FastWAM
 export DIFFSYNTH_MODEL_BASE_PATH=$(pwd)/checkpoints
 export DIFFSYNTH_SKIP_DOWNLOAD=true
 
-# 另一个人占了后 4 张卡 → 我们只用前 4 卡(0,1,2,3)
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+# 8 卡全空，用全部 8 张(0-7)。注意：step_008000 断点是按 8 卡 world_size 存的，
+# DeepSpeed ZeRO 不支持改卡数续训，所以续训必须保持 8 卡。
 
 # Auto-resume: if a saved DeepSpeed training state exists, continue from the latest;
 # otherwise cold-start (warm-start temporal params from the released checkpoint).
