@@ -32,6 +32,13 @@
 #   WORKER_SWEEP 若设置则只做 num_workers 扫描(空格分隔),不扫 batch
 #   WS_BS        WORKER_SWEEP 时用的固定 batch  默认 16
 #   COLD_CKPT / NORM_STATS / ACCEL_CFG / CONDA_SH / ENV  同 probe_batch_size.sh
+
+'''mkdir -p runs/throughput_probe
+nohup bash scripts/probe_throughput.sh > runs/throughput_probe/probe_summary.log 2>&1 &
+echo $! > runs/throughput_probe/probe.pid     # 记下 PID 备查
+# 实时看:
+tail -f runs/throughput_probe/probe_summary.log
+# 想停:kill $(cat runs/throughput_probe/probe.pid)'''
 # ----------------------------------------------------------------------------
 set -u
 cd "$(dirname "$0")/.." || exit 1
