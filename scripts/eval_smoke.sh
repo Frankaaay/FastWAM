@@ -29,6 +29,17 @@ source /opt/miniconda3/etc/profile.d/conda.sh && conda activate fastwam \
 export DIFFSYNTH_MODEL_BASE_PATH="$ROOT/checkpoints"
 export DIFFSYNTH_SKIP_DOWNLOAD=true
 
+# LIBERO/mujoco 无头渲染:H200 节点用 EGL;若报 GL/GLEW/GLX 错可改 osmesa
+export MUJOCO_GL=${MUJOCO_GL:-egl}
+export PYOPENGL_PLATFORM=${PYOPENGL_PLATFORM:-$MUJOCO_GL}
+
+# import 预检:仿真依赖没装好就别白跑模型,直接给出明确报错
+python - <<'PY' || { echo "[FATAL] LIBERO 仿真依赖 import 失败,见上面的报错(常见:libGL.so.1 缺系统库 / mujoco / libero)"; exit 1; }
+import mujoco, robosuite, bddl
+from libero.libero import get_libero_path
+print(f"[preflight] mujoco={mujoco.__version__} robosuite={robosuite.__version__} libero bddl_files={get_libero_path('bddl_files')}")
+PY
+
 CKPT=${CKPT:-runs/mem_temporal_libero/checkpoints/weights/step_021700.pt}
 STATS=${STATS:-checkpoints/fastwam_release/libero_uncond_2cam224_dataset_stats.json}
 GPU=${GPU:-0}
