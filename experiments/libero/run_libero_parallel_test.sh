@@ -343,7 +343,12 @@ run_libero_eval() {
         # When the task exits, write a status file so the scheduler can detect failures promptly.
         tmux select-pane -t $SESSION_NAME:$pane_info 2>/dev/null
         tmux send-keys -t $SESSION_NAME:$pane_info "clear" C-m 2>/dev/null
-        tmux send-keys -t $SESSION_NAME:$pane_info "source ~/.bashrc && \
+        # NOTE: do NOT 'source ~/.bashrc' here. The pane inherits the manager's
+        # already-activated conda env; sourcing bashrc re-runs conda init and
+        # auto-activates 'base', and the subsequent 'conda activate fastwam' then
+        # no-ops (leaving base's python, which lacks hydra -> instant rc=1). Reset
+        # the inherited conda state vars, then source conda.sh and activate cleanly.
+        tmux send-keys -t $SESSION_NAME:$pane_info "unset CONDA_SHLVL CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_PREFIX_1 CONDA_PROMPT_MODIFIER && \
             source ${CONDA_PROFILE:-/opt/miniconda3/etc/profile.d/conda.sh} && conda activate ${CONDA_ENV:-fastwam} && \
             cd $ROOT_DIR && export EXP_NAME=$EXP_NAME && \
             export DIFFSYNTH_MODEL_BASE_PATH=\"$ROOT_DIR/checkpoints\" DIFFSYNTH_SKIP_DOWNLOAD=true && \
