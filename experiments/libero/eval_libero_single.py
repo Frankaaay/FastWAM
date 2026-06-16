@@ -755,6 +755,18 @@ def run_single_task(
         if visualize_future_video:
             results["episode_future_video_psnr"].append(episode_mean_psnr)
 
+        # Best-effort incremental progress for the multi-GPU manager to aggregate
+        # into a global episode counter. One small file per task, overwritten each
+        # trial with "<done>/<total>". Never let this break the eval.
+        try:
+            _prog_dir = Path(cfg.EVALUATION.output_dir) / cfg.EVALUATION.task_suite_name
+            _prog_dir.mkdir(parents=True, exist_ok=True)
+            (_prog_dir / f"gpu{cfg.gpu_id}_task{cfg.EVALUATION.task_id}.progress").write_text(
+                f"{trial_idx + 1}/{int(cfg.EVALUATION.num_trials)}\n"
+            )
+        except Exception:
+            pass
+
         save_rollout_video(
             video_dir,
             replay_images,

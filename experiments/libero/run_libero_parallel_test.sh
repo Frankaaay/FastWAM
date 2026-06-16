@@ -597,6 +597,20 @@ run_libero_eval() {
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Total tasks: $total_tasks"
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Completed: $total_completed"
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Remaining: $((total_tasks - total_completed))"
+            # Global episode-level progress: sum the per-task .progress files that
+            # workers update after every trial (numerator = trials done so far).
+            total_eps=$((total_tasks * NUM_TRIALS))
+            done_eps=0
+            for pf in "$OUTPUT_DIR"/*/*.progress; do
+                [ -f "$pf" ] || continue
+                n=$(cut -d/ -f1 "$pf" 2>/dev/null)
+                [ -n "$n" ] && done_eps=$((done_eps + n))
+            done
+            eps_pct=0
+            [ "$total_eps" -gt 0 ] && eps_pct=$((done_eps * 100 / total_eps))
+            filled=$((eps_pct / 5)); bar=""
+            for ((i=0;i<20;i++)); do [ $i -lt $filled ] && bar="${bar}#" || bar="${bar}-"; done
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Overall episodes: $done_eps/$total_eps ($eps_pct%) [$bar]"
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Running: $running_count"
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Pending: $pending_count"
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Failed: $total_failed"
