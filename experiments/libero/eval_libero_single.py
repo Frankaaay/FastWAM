@@ -486,6 +486,10 @@ def _predict_action_chunk(
         context, context_mask = _load_cached_text_context(
             cfg, prompt, device=model_device, dtype=model.torch_dtype
         )
+        # `prompt` is a required positional arg of infer_action/infer_joint; pass
+        # None explicitly so the model takes the context branch (prompt and
+        # context/context_mask are mutually exclusive).
+        infer_kwargs["prompt"] = None
         infer_kwargs["context"] = context
         infer_kwargs["context_mask"] = context_mask
     visualize_future_video = bool(cfg.EVALUATION.get("visualize_future_video", False))
