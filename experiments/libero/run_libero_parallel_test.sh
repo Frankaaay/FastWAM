@@ -7,6 +7,14 @@ run_libero_eval() {
     local task_list_file=$1
     echo "task_file: $task_list_file"
 
+    # The system tmux (/usr/bin/tmux) crashes under the activated conda env: the
+    # env prepends an old libtinfo.so.6 (missing tiparm_s) to LD_LIBRARY_PATH, so
+    # every tmux call dies with "symbol lookup error: tiparm_s". This silently
+    # broke worker launch (all send-keys went nowhere -> 0 GPU activity). Run tmux
+    # with a clean LD_LIBRARY_PATH; the python workers re-activate conda inside
+    # their own panes, so tmux itself needs no conda libs.
+    tmux() { LD_LIBRARY_PATH="" command tmux "$@"; }
+
     require_non_empty() {
         local var_name="$1"
         local var_val="${!var_name}"
