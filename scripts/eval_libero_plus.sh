@@ -30,6 +30,10 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 ROOT="$(pwd)"
 
+# conda 的 activate.d 钩子会引用 LD_LIBRARY_PATH;在 set -u 下若未定义会报错
+# (非 login shell 启动时常见)。先给它一个空默认值。
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
+
 source /opt/miniconda3/etc/profile.d/conda.sh && conda activate fastwam \
   || { echo "[FATAL] 无法激活 conda env: fastwam"; exit 1; }
 
@@ -38,6 +42,17 @@ export DIFFSYNTH_SKIP_DOWNLOAD=true
 export MUJOCO_GL=${MUJOCO_GL:-egl}
 export PYOPENGL_PLATFORM=${PYOPENGL_PLATFORM:-$MUJOCO_GL}
 export TOKENIZERS_PARALLELISM=false
+
+# Sensor Noise 这一 factor 的扰动(motion blur 等)要 wand -> libMagickWand。
+# ImageMagick 用自包含 AppImage prefix 提供,绝不碰 conda 自带 .so。
+# 路径可用 MAGICK_HOME 覆盖;prefix 不存在则不导出(非 Noise 的 6 个 factor 不受影响)。
+MAGICK_HOME=${MAGICK_HOME:-/data/shared/offline/noise_deps/imagemagick}
+if [ -d "$MAGICK_HOME/lib" ]; then
+    export MAGICK_HOME
+    export LD_LIBRARY_PATH="$MAGICK_HOME/lib:${LD_LIBRARY_PATH:-}"
+elif [ "${INCLUDE_NOISE:-0}" = "1" ]; then
+    echo "[WARN] INCLUDE_NOISE=1 但找不到 ImageMagick prefix: $MAGICK_HOME/lib —— Noise case 会 FAILED"
+fi
 
 CKPT=${CKPT:-runs/mem_temporal_libero/checkpoints/weights/step_021700.pt}
 STATS=${STATS:-checkpoints/fastwam_release/libero_uncond_2cam224_dataset_stats.json}

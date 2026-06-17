@@ -1223,7 +1223,9 @@ class FastWAM(torch.nn.Module):
         torch.save(payload, path)
 
     def load_checkpoint(self, path, optimizer=None):
-        payload = torch.load(path, map_location="cpu")
+        # weights_only=False: 我们自己训练存的 ckpt 含 numpy 对象(optimizer/RNG 等),
+        # torch>=2.6 默认 weights_only=True 会拒载。来源可信,显式放开。
+        payload = torch.load(path, map_location="cpu", weights_only=False)
         if "mot" in payload:
             self.mot.load_state_dict(payload["mot"], strict=False)
         elif "dit" in payload:
