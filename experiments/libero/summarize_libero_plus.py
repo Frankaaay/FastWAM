@@ -9,6 +9,7 @@
 # 所以直接读这俩聚合即可,不依赖外部映射。
 # ----------------------------------------------------------------------------
 import argparse
+import csv
 import glob
 import json
 import os
@@ -40,7 +41,9 @@ def main():
     by_cat = defaultdict(lambda: [0, 0])      # col -> [succ, total]
     by_suite = defaultdict(lambda: [0, 0])
     by_diff = defaultdict(lambda: [0, 0])
+    by_cat_time = defaultdict(list)           # col -> [duration_s, ...]
     overall = [0, 0]
+    overall_time = []
     n_files = 0
 
     for f in files:
@@ -60,6 +63,10 @@ def main():
         if dl is not None:
             by_diff[dl][0] += s; by_diff[dl][1] += t
         overall[0] += s; overall[1] += t
+        dur = d.get("duration")
+        if dur is not None:
+            by_cat_time[col].append(float(dur))
+            overall_time.append(float(dur))
 
     def pct(sd):
         return 100.0 * sd[0] / sd[1] if sd[1] else float("nan")
@@ -92,6 +99,39 @@ def main():
         for dl in sorted(by_diff):
             print(f"  L{dl}: {pct(by_diff[dl]):5.1f}  ({by_diff[dl][0]}/{by_diff[dl][1]})")
 
+    # ---- 写 summary.csv(对齐标准 LIBERO 的 summary.csv 格式:列=7 factor + Total)----
+    def avg(xs):
+        return sum(xs) / len(xs) if xs else float("nan")
+
+    csv_path = os.path.join(args.output_dir, "summary.csv")
+    cols = [c for c in COL_ORDER if c in by_cat]
+    with open(csv_path, "w", newline="") as fp:
+        w = csv.writer(fp)
+        w.writerow([os.path.basename(os.path.normpath(args.output_dir))])
+        w.writerow([""] + cols + ["Total"])
+        w.writerow(["Success Rate (%)"]
+                   + [f"{pct(by_cat[c]):.2f}" for c in cols] + [f"{pct(overall):.2f}"])
+        w.writerow(["Successes"]
+                   + [str(by_cat[c][0]) for c in cols] + [str(overall[0])])
+        w.writerow(["Total Cases"]
+                   + [str(by_cat[c][1]) for c in cols] + [str(overall[1])])
+        w.writerow(["Average Time (s)"]
+                   + [f"{avg(by_cat_time[c]):.2f}" for c in cols] + [f"{avg(overall_time):.2f}"])
+        w.writerow(["Max Time (s)"]
+                   + [f"{max(by_cat_time[c]):.2f}" if by_cat_time[c] else "nan" for c in cols]
+                   + [f"{max(overall_time):.2f}" if overall_time else "nan"])
+        # 附:按 suite 和按难度
+        w.writerow([])
+        w.writerow(["by suite", "Success Rate (%)", "succ", "total"])
+        for s in ["libero_spatial", "libero_object", "libero_goal", "libero_10"]:
+            if s in by_suite:
+                w.writerow([s, f"{pct(by_suite[s]):.2f}", by_suite[s][0], by_suite[s][1]])
+        w.writerow([])
+        w.writerow(["by difficulty", "Success Rate (%)", "succ", "total"])
+        for dl in sorted(by_diff):
+            w.writerow([f"L{dl}", f"{pct(by_diff[dl]):.2f}", by_diff[dl][0], by_diff[dl][1]])
+
+    print(f"\n  summary.csv 已写到: {csv_path}")
     print("\n  注:Original 列 = 标准 LIBERO(无扰动)成绩,见 evaluate_results/libero 下的全量 eval。")
 
 

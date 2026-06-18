@@ -61,6 +61,9 @@ MAX_PER_GPU=${MAX_PER_GPU:-2}
 HISTORY=${HISTORY:-16}
 PILOT=${PILOT:-0}
 INCLUDE_NOISE=${INCLUDE_NOISE:-0}
+# VAE 短时记忆开关:默认 true(和训练一致)。VAE_MEM=false 跑「关记忆」对照,
+# 此时 ckpt 里的 temporal 参数会被忽略,前向退化为原版无记忆 VAE(见 fastwam.py)。
+VAE_MEM=${VAE_MEM:-true}
 OUT=${OUT:-./evaluate_results/libero_plus/libero_uncond_2cam224_1e-4/$(date +%Y%m%d_%H%M%S)}
 
 [ -f "$CKPT" ]  || { echo "[FATAL] 找不到 ckpt: $CKPT"; exit 1; }
@@ -73,7 +76,7 @@ echo "=========================================================="
 echo " LIBERO-plus eval"
 echo "   CKPT=$CKPT"
 echo "   NUM_GPUS=$NUM_GPUS  MAX_PER_GPU=$MAX_PER_GPU  NWORKERS=$NWORKERS"
-echo "   PILOT=$PILOT  INCLUDE_NOISE=$INCLUDE_NOISE"
+echo "   VAE_MEM=$VAE_MEM  PILOT=$PILOT  INCLUDE_NOISE=$INCLUDE_NOISE"
 echo "   OUT=$OUT"
 echo "=========================================================="
 
@@ -116,6 +119,10 @@ for i, c in enumerate(cases):
 for w, sc in enumerate(shards):
     json.dump(sc, open(os.path.join(shard_dir, f"shard_{w}.json"), "w"))
 
+# 总 case 数落盘,供进度监控算 ETA(shard_dir 是 $OUT/shards,父目录即 $OUT)
+out_dir = os.path.dirname(os.path.normpath(shard_dir))
+open(os.path.join(out_dir, "total_cases.txt"), "w").write(str(len(cases)))
+
 from collections import Counter
 cat = Counter(c["category"] for c in cases)
 print(f"[shards] total_cases={len(cases)} nworkers={nworkers} "
@@ -123,6 +130,29 @@ print(f"[shards] total_cases={len(cases)} nworkers={nworkers} "
 print("[shards] by factor:", dict(cat))
 PY
 [ $? -eq 0 ] || { echo "[FATAL] 生成分片失败"; exit 1; }
+TOTAL=$(cat "$OUT/total_cases.txt" 2>/dev/null || echo 0)
+
+# ---- 进度监控:后台每 60s 往 progress.log 写一行(已完成/总数、用时、速率、ETA)----
+monitor_progress() {
+    local out="$1" total="$2" start done now elapsed pct rate eta
+    start=$(date +%s)
+    while true; do
+        sleep 60
+        done=$(ls "$out"/*/gpu*_task*_results.json 2>/dev/null | wc -l | tr -d ' ')
+        now=$(date +%s); elapsed=$((now - start))
+        pct=$(awk "BEGIN{printf \"%.1f\", $total?100.0*$done/$total:0}")
+        rate=$(awk "BEGIN{printf \"%.1f\", $elapsed?60.0*$done/$elapsed:0}")
+        if [ "$done" -gt 0 ]; then
+            eta=$(awk "BEGIN{printf \"%.0f\", ($total-$done)*$elapsed/$done/60}")
+        else
+            eta="?"
+        fi
+        printf "[%s] done=%s/%s %s%%  elapsed=%dm  rate=%s/min  ETA=%smin\n" \
+            "$(date '+%m-%d %H:%M:%S')" "$done" "$total" "$pct" "$((elapsed/60))" "$rate" "$eta" \
+            | tee -a "$out/progress.log"
+        [ "$total" -gt 0 ] && [ "$done" -ge "$total" ] && break
+    done
+}
 
 # ---- 起 worker:第 w 个 worker 用物理卡 (w % NUM_GPUS),gpu_id=w(只用于文件名) ----
 PIDS=()
@@ -134,7 +164,7 @@ for ((w=0; w<NWORKERS; w++)); do
     CUDA_VISIBLE_DEVICES=$PHYS nohup python experiments/libero/eval_libero_multi.py \
         ckpt="$CKPT" \
         task=libero_uncond_2cam224_1e-4 \
-        model.vae_memory.enabled=true \
+        model.vae_memory.enabled=$VAE_MEM \
         data.train.history_video_frames="$HISTORY" \
         EVALUATION.num_trials=1 \
         +EVALUATION.save_video=false \
@@ -149,13 +179,17 @@ for ((w=0; w<NWORKERS; w++)); do
 done
 
 echo "已起 ${#PIDS[@]} 个 worker,等待全部完成..."
-echo "  看进度:  ls $OUT/*/ | grep results.json | wc -l"
+echo "  看总进度: tail -f $OUT/progress.log"
 echo "  看某 worker: tail -f $OUT/worker_logs/gpu0_w0.log"
+
+monitor_progress "$OUT" "$TOTAL" &
+MON_PID=$!
 
 FAIL=0
 for pid in "${PIDS[@]}"; do
     wait "$pid" || FAIL=$((FAIL+1))
 done
+kill "$MON_PID" 2>/dev/null
 
 echo "=========================================================="
 echo " 所有 worker 退出(失败 worker 数=$FAIL)。聚合成绩:"
