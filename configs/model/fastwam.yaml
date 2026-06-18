@@ -69,3 +69,8 @@ vae_memory:
   #          memory-enriched conditioning; base VAE stays frozen. The trainer
   #          honors this at runtime (unfreeze set + optimizer param group).
   train_temporal_only: true
+  # Stage-2 middle ground between the two above: keep temporal trainable AND also
+  # unfreeze ONLY the DiT input interface (video_expert.patch_embedding, 2 tensors)
+  # so the frozen DiT re-learns to read the memory-modified latent. Used together
+  # with train_temporal_only=true. No effect unless enabled=true.
+  unfreeze_patch_embed: false

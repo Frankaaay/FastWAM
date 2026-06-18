@@ -45,6 +45,7 @@ class FastWAM(torch.nn.Module):
         loss_lambda_action: float = 1.0,
         vae_memory_enabled: bool = False,
         vae_memory_train_temporal_only: bool = True,
+        vae_memory_unfreeze_patch_embed: bool = False,
     ):
         super().__init__()
         # When True, the conditioning (first-frame) latent is produced by the
@@ -57,6 +58,11 @@ class FastWAM(torch.nn.Module):
         #            memory-enriched conditioning; base VAE stays frozen.
         # The trainer reads this to decide what to unfreeze / put in the optimizer.
         self.vae_memory_train_temporal_only = bool(vae_memory_train_temporal_only)
+        # Stage-2 interface adaptation: when True, additionally unfreeze the DiT input
+        # interface (`video_expert.patch_embedding`) so the otherwise-frozen DiT can
+        # re-learn to read the memory-modified conditioning latent. Only 2 tensors,
+        # far lighter than the full-DiT unfreeze that `train_temporal_only=False` does.
+        self.vae_memory_unfreeze_patch_embed = bool(vae_memory_unfreeze_patch_embed)
         self.video_expert = video_expert
         self.action_expert = action_expert
         self.mot = mot
@@ -131,6 +137,7 @@ class FastWAM(torch.nn.Module):
         vae_use_temporal_attention: bool = False,
         vae_memory_warm_start: bool = True,
         vae_memory_train_temporal_only: bool = True,
+        vae_memory_unfreeze_patch_embed: bool = False,
     ):
         if video_dit_config is None:
             raise ValueError("`video_dit_config` is required for FastWAM.from_wan22_pretrained().")
@@ -206,6 +213,7 @@ class FastWAM(torch.nn.Module):
             loss_lambda_action=loss_lambda_action,
             vae_memory_enabled=vae_use_temporal_attention,
             vae_memory_train_temporal_only=vae_memory_train_temporal_only,
+            vae_memory_unfreeze_patch_embed=vae_memory_unfreeze_patch_embed,
         )
         model.model_paths = {
             "video_dit": components.dit_path,

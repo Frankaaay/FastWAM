@@ -339,11 +339,24 @@ class Wan22Trainer:
                 if any(k in name for k in MEMORY_PARAM_KEYS):
                     p.requires_grad_(True)
                     n_temporal += 1
+            # Stage-2: optionally unfreeze ONLY the DiT input interface so the frozen
+            # DiT re-learns to read the memory-modified latent (2 tensors: weight+bias).
+            # patch_embedding lives on video_expert, which is also a submodule of
+            # model.dit (the MoT), so it is picked up by both the optimizer's
+            # requires_grad scan and mot.state_dict() at save time.
+            unfreeze_pe = bool(getattr(model, "vae_memory_unfreeze_patch_embed", False))
+            n_pe = 0
+            if unfreeze_pe:
+                pe = model.video_expert.patch_embedding
+                pe.requires_grad_(True)
+                pe.train()
+                n_pe = sum(1 for _ in pe.parameters())
             logger.info(
-                "VAE-memory mode (%s): unfroze %d temporal params%s.",
+                "VAE-memory mode (%s): unfroze %d temporal params%s%s.",
                 "temporal-only" if temporal_only else "temporal+DiT",
                 n_temporal,
                 "" if temporal_only else " + DiT (+ proprio)",
+                f" + {n_pe} patch_embedding tensors" if unfreeze_pe else "",
             )
             return
         model.eval()
