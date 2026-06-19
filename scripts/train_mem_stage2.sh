@@ -48,5 +48,10 @@ accelerate launch --config_file scripts/accelerate_configs/accelerate_zero1_ds.y
   data.train.history_video_frames=16 \
   +data.train.pretrained_norm_stats=checkpoints/fastwam_release/libero_uncond_2cam224_dataset_stats.json \
   log_every=10 \
+  wandb.enabled=true \
+  wandb.mode=offline \
+  wandb.workspace=yichx14-uc-irvine \
+  wandb.project=fastwam-mem \
+  wandb.name=mem_temporal_libero_stage2 \
   resume="$CKPT" \
   output_dir=./runs/mem_temporal_libero_stage2
