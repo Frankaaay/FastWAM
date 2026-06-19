@@ -57,6 +57,9 @@ fi
 CKPT=${CKPT:-runs/mem_temporal_libero/checkpoints/weights/step_021700.pt}
 STATS=${STATS:-checkpoints/fastwam_release/libero_uncond_2cam224_dataset_stats.json}
 NUM_GPUS=${NUM_GPUS:-8}
+# 物理卡偏移:worker 用 physical (w % NUM_GPUS) + GPU_OFFSET。
+# 训练占着 0-3 时,用 NUM_GPUS=4 GPU_OFFSET=4 把 eval 钉在 4-7,并行不抢卡。
+GPU_OFFSET=${GPU_OFFSET:-0}
 MAX_PER_GPU=${MAX_PER_GPU:-2}
 HISTORY=${HISTORY:-16}
 PILOT=${PILOT:-0}
@@ -75,7 +78,7 @@ mkdir -p "$OUT/shards" "$OUT/worker_logs"
 echo "=========================================================="
 echo " LIBERO-plus eval"
 echo "   CKPT=$CKPT"
-echo "   NUM_GPUS=$NUM_GPUS  MAX_PER_GPU=$MAX_PER_GPU  NWORKERS=$NWORKERS"
+echo "   NUM_GPUS=$NUM_GPUS  GPU_OFFSET=$GPU_OFFSET  (physical $GPU_OFFSET..$((GPU_OFFSET+NUM_GPUS-1)))  MAX_PER_GPU=$MAX_PER_GPU  NWORKERS=$NWORKERS"
 echo "   VAE_MEM=$VAE_MEM  PILOT=$PILOT  INCLUDE_NOISE=$INCLUDE_NOISE"
 echo "   OUT=$OUT"
 echo "=========================================================="
@@ -159,7 +162,7 @@ PIDS=()
 for ((w=0; w<NWORKERS; w++)); do
     SHARD="$OUT/shards/shard_${w}.json"
     [ -s "$SHARD" ] || { echo "shard_$w 为空,跳过"; continue; }
-    PHYS=$((w % NUM_GPUS))
+    PHYS=$(( (w % NUM_GPUS) + GPU_OFFSET ))
     LOG="$OUT/worker_logs/gpu${PHYS}_w${w}.log"
     CUDA_VISIBLE_DEVICES=$PHYS nohup python experiments/libero/eval_libero_multi.py \
         ckpt="$CKPT" \
