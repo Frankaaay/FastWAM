@@ -46,8 +46,13 @@ ROOT="$(pwd)"
 
 CONDA_SH=${CONDA_SH:-/opt/miniconda3/etc/profile.d/conda.sh}
 ENV=${ENV:-fastwam}
+# conda 的 activate.d 脚本(zz-fastwam-libs.sh)在 set -u 下会因引用未定义的
+# LD_LIBRARY_PATH 直接报 "unbound variable" 退出 → 激活期间临时关掉 set -u。
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
+set +u
 # shellcheck disable=SC1090
 source "$CONDA_SH" && conda activate "$ENV" || { echo "[FATAL] 无法激活 conda env: $ENV"; exit 1; }
+set -u
 
 # DiffSynth 离线(air-gapped H200 必须),缺了会回落联网下载直接挂
 export DIFFSYNTH_MODEL_BASE_PATH="$ROOT/checkpoints"
@@ -56,6 +61,9 @@ export DIFFSYNTH_SKIP_DOWNLOAD=true
 GPUS=${GPUS:-0,1,2,3}
 STEPS=${STEPS:-24}
 WARMUP=${WARMUP:-8}
+# 历史窗口帧数(必须 4 的倍数)。stage-1/2 用 16(3.2s);若准备转 H4 训练,
+# 用 HISTORY=4 探吞吐才能反映真实显存/吞吐(历史越短显存越省、bs 可更大)。
+HISTORY=${HISTORY:-16}
 COLD_CKPT=${COLD_CKPT:-checkpoints/fastwam_release/libero_uncond_2cam224.pt}
 ACCEL_CFG=${ACCEL_CFG:-scripts/accelerate_configs/accelerate_zero1_ds.yaml}
 NUM_PROC=$(echo "$GPUS" | tr ',' '\n' | grep -c .)
@@ -97,7 +105,7 @@ run_once () {  # 参数: BS WORKERS_OR_EMPTY LOGTAG
         model.vae_memory.enabled=true \
         model.vae_memory.warm_start=true \
         model.vae_memory.train_temporal_only=true \
-        data.train.history_video_frames=16 \
+        data.train.history_video_frames="$HISTORY" \
         +data.train.pretrained_norm_stats="$NORM_STATS" \
         batch_size="$BS" max_steps="$STEPS" log_every=1 $WK_ARG \
         save_every=999999 eval_every=999999 resume=null \
@@ -132,7 +140,7 @@ run_once () {  # 参数: BS WORKERS_OR_EMPTY LOGTAG
 }
 
 echo "=========================================================="
-echo " 吞吐 / 瓶颈探测   GPUS=$GPUS (num_processes=$NUM_PROC)  STEPS=$STEPS WARMUP=$WARMUP"
+echo " 吞吐 / 瓶颈探测   GPUS=$GPUS (num_processes=$NUM_PROC)  STEPS=$STEPS WARMUP=$WARMUP  HISTORY=$HISTORY"
 echo " NORM_STATS=$NORM_STATS"
 echo "=========================================================="
 
