@@ -88,22 +88,41 @@
 | 12 | 2.4s |
 | 16(stage-1/2 现状) | 3.2s |
 
-> 领导意见:看过去 **1.2s** 就够。当前喂了 **3.2s**,大概率偏长(无关历史干扰
-> 只微调了几张量的 DiT)。1.2s 卡在整 4 倍数之间,实操取 4(0.8s)或 8(1.6s);
-> 要精确 1.2s 需把 history 抽帧步长与 action 解耦(stride=2 × 12 帧 = 24 原始帧)。
 
 ---
 
-## 4. 未来尝试(按性价比排序)
+## 5. Stage-3 — 从 base 冷启动,全 DiT + temporal 联合 co-adapt(H4)
 
-| # | 思路 | 改动 | 成本 | 预期 |
-|---|---|---|---|---|
-| **1** | **缩短历史(领导方向)** | `history_video_frames=4`(0.8s)/ `8`(1.6s)重跑 stage-2 | 低 | 先用现有 ckpt eval-only PILOT 验证短历史在推理端是否更好,有信号再重训 |
-| **2** | **挑最优 checkpoint** | step_2000/5000/6000 各跑 PILOT 快筛 | 低 | step_3000 未必最优,可能 >46.9 |
-| **3** | **解冻更多 DiT** | 再解冻前 N 个 DiT block,或 DiT 上 LoRA(小 LR) | 中 | 接口对齐不够时,给网络更深适应空间;风险:遗忘/过拟合 |
-| **4** | **记忆门控 / 历史增强** | learned gate 让模型自决信多少历史;训练时随机丢历史 | 中 | 针对 Camera 8.1(怀疑视角变化时历史在误导);降低对记忆过度依赖 |
+> 思路转向:**不再在 stage-1/2 的歪地基上打补丁**。从 base 原版 ckpt 冷启动,
+> 整个 DiT 自由适应带记忆的 latent,从一开始就 co-adapt。领导方向:历史砍到 H4。
 
-**当前推荐顺序:1 + 2 先做(都便宜,且 1 直接对接领导)→ 不够再 3 → 仍不够再 4。**
+| 项 | 值 |
+|---|---|
+| 脚本 | `scripts/train_mem_stage3.sh`(`HISTORY` 参数化,默认 4) |
+| run 目录 | `runs/mem_temporal_libero_stage3/` |
+| 起点 ckpt | `checkpoints/fastwam_release/libero_uncond_2cam224.pt`(base 原版,mem-off 49.83) |
+| resume | weights-only 冷启动(不继承 stage-1/2);有 DeepSpeed state 则续(须保持 8 卡) |
+| warm_start | **true**(temporal 4 参数从 spatial proj 初始化) |
+| 可训练 | **全 DiT(video+action expert ~5.9B)+ proprio + temporal**(`train_temporal_only=false`) |
+| history | **4** → 0.8s(ratio4/fps20);参数保留,消融可 8/16 |
+| 卡 / batch | **8 卡 × bs32 = global 256** |
+| lr | **1e-5**,cosine + 5% warmup(全解冻 blast radius 大,比 stage-2 的 3e-5 更保守) |
+| max_steps | **4000**(~3.7 epoch);**故意留长,靠 PILOT 看到掉头就 kill,不跑满** |
+| save_every | **500**(8 个存档点,密集抓峰值) |
+| wandb | offline→jump→cloud(entity yichx14-uc-irvine / project fastwam-mem) |
+
+**为什么全解冻(vs AdaLN/BitFit):** 仓库只有三档(temporal-only / +patch_embed / 全解冻),
+无 LoRA/AdaLN 中间档。病根是「DiT 读不懂记忆 latent」属接口/表征错配,AdaLN 那点
+缩放未必修得动,全解冻自由度才够真正 co-adapt。**全解冻不贵**:stage-2 的 backward
+本就穿过全网到输入层 patch_embedding,FLOPs ≈ 全解冻;只多优化器状态(~6G/卡)+ 梯度
+缓冲(~12G/卡),峰值 ~85-90G/140G,单步 +10-30%,叠加 H4 整体仍 ~6h。OOM 回退 bs24。
+
+**挑 ckpt 的依据 = eval,不是 loss:** stage-1 loss 在 ~step4000 就压平到 ~0.10(到
+21700 全平,见 `docs/mem_loss.png`);stage-2 也是 loss 缓降但任务峰值在 step3000、
+step6000 过训。所以 stage-3 不看 loss,跑完(或中途)对各存档点 PILOT 快筛挑峰值,
+等效任务峰值预计落在 ~1500 步(global256)。再对最优点全量 eval(`INCLUDE_NOISE=1`,10030)。
+
+**成绩:** _(待跑)_
 
 ---
 
@@ -113,6 +132,7 @@
 |---|---|
 | stage-1 脚本 / run | `scripts/train_mem_temporal.sh` / `runs/mem_temporal_libero/` |
 | stage-2 脚本 / run | `scripts/train_mem_stage2.sh` / `runs/mem_temporal_libero_stage2/` |
+| stage-3 脚本 / run | `scripts/train_mem_stage3.sh` / `runs/mem_temporal_libero_stage3/` |
 | 标准 LIBERO eval | `evaluate_results/libero/` |
 | LIBERO-plus eval | `evaluate_results/libero_plus/stage2_step*_FULL/` |
 | 评测脚本 | `scripts/eval_libero_plus.sh`,`experiments/libero/summarize_libero_plus.py` |
