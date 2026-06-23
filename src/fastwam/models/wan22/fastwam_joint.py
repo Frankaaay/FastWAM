@@ -32,6 +32,7 @@ class FastWAMJoint(FastWAM):
         action_seq_len: int,
         video_tokens_per_frame: int,
         device: torch.device,
+        num_history_frames: int = 0,
     ) -> torch.Tensor:
         total_seq_len = video_seq_len + action_seq_len
         mask = torch.zeros((total_seq_len, total_seq_len), dtype=torch.bool, device=device)
@@ -41,6 +42,7 @@ class FastWAMJoint(FastWAM):
             video_seq_len=video_seq_len,
             video_tokens_per_frame=video_tokens_per_frame,
             device=device,
+            num_history_frames=num_history_frames,
         )
         # action -> action
         mask[video_seq_len:, video_seq_len:] = True

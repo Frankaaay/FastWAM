@@ -63,6 +63,15 @@ loss:
 # Requires `data.train.history_video_frames > 0` to actually supply history.
 vae_memory:
   enabled: false            # set true to turn on the memory VAE
+  # DiT-side short-term memory (option C / 6.1, MEM-stage2). MUTUALLY EXCLUSIVE
+  # with `enabled` above. Instead of the VAE temporal attention, the frozen VAE
+  # plain-encodes the history frames and they are PREPENDED to the video token
+  # sequence inside the DiT: the current frame absorbs history via the video
+  # expert's own self-attention, and the action expert reads the (history-
+  # enriched) current-frame K/V. No new params -> loads cleanly from the base
+  # ckpt; train the full DiT (set train_temporal_only=false / leave enabled=false
+  # so the trainer keeps everything trainable). Needs data.train.history_video_frames>0.
+  dit_prepend: false
   warm_start: true          # copy pretrained spatial proj -> temporal_proj after load
   # true  -> train ONLY temporal_proj/gate/pos (DiT + base VAE frozen).
   # false -> ALSO finetune the DiT (+ proprio) so the experts adapt to the

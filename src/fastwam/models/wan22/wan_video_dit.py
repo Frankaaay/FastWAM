@@ -470,11 +470,57 @@ class WanVideoDiT(torch.nn.Module):
             timestep = timestep.expand(batch_size)
         return x, timestep, context_mask
 
+    @staticmethod
+    def _build_history_causal_mask(
+        video_seq_len: int,
+        video_tokens_per_frame: int,
+        num_history_frames: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """History-aware video self-attention for the DiT-side memory prepend.
+
+        Frame layout along the temporal axis:
+            [history_0 .. history_{K-1}, current, future_1 .. future_{T-1}]
+        with K = ``num_history_frames``. Frame-level rules (then expanded by
+        ``video_tokens_per_frame``):
+            - history (q <  K) -> history only         (k <  K)
+            - current (q == K) -> history + current    (k <= K), NOT future
+            - future  (q >  K) -> current + all future (k >= K), NOT history
+        With K == 0 this reduces exactly to ``first_frame_causal``.
+
+        The ``current -> not future`` rule keeps the current-frame tokens (which
+        the action expert reads as memory) invariant to whether future frames are
+        present, so training (joint, future present) and inference (no future)
+        produce identical memory K/V.
+        """
+        if video_seq_len % video_tokens_per_frame != 0:
+            raise ValueError(
+                "`video_seq_len` must be divisible by `video_tokens_per_frame` in history mode, "
+                f"got {video_seq_len} and {video_tokens_per_frame}"
+            )
+        num_frames = video_seq_len // video_tokens_per_frame
+        K = int(num_history_frames)
+        if not 0 < K < num_frames:
+            raise ValueError(
+                f"`num_history_frames` must satisfy 0 < K < num_frames, got K={K}, num_frames={num_frames}"
+            )
+        q = torch.arange(num_frames, device=device).view(num_frames, 1)
+        k = torch.arange(num_frames, device=device).view(1, num_frames)
+        frame_mask = (
+            ((q < K) & (k < K))      # history -> history
+            | ((q == K) & (k <= K))  # current -> history + current
+            | ((q > K) & (k >= K))   # future  -> current + future
+        )
+        return frame_mask.repeat_interleave(video_tokens_per_frame, dim=0).repeat_interleave(
+            video_tokens_per_frame, dim=1
+        )
+
     def build_video_to_video_mask(
         self,
         video_seq_len: int,
         video_tokens_per_frame: int,
         device: torch.device,
+        num_history_frames: int = 0,
     ) -> torch.Tensor:
         if video_seq_len <= 0:
             raise ValueError(f"`video_seq_len` must be positive, got {video_seq_len}")
@@ -499,6 +545,15 @@ class WanVideoDiT(torch.nn.Module):
             )
 
         if self.video_attention_mask_mode == "first_frame_causal":
+            if num_history_frames > 0:
+                # DiT-side memory prepend: current frame may look back at history
+                # frames but not forward at future frames (see helper docstring).
+                return self._build_history_causal_mask(
+                    video_seq_len=video_seq_len,
+                    video_tokens_per_frame=video_tokens_per_frame,
+                    num_history_frames=num_history_frames,
+                    device=device,
+                )
             video_mask = torch.ones((video_seq_len, video_seq_len), dtype=torch.bool, device=device)
             first_frame_tokens = min(video_tokens_per_frame, video_seq_len)
             video_mask[:first_frame_tokens, first_frame_tokens:] = False
@@ -515,6 +570,7 @@ class WanVideoDiT(torch.nn.Module):
         action: Optional[torch.Tensor] = None,
         fuse_vae_embedding_in_latents: bool = False,
         control_camera_latents_input: Optional[torch.Tensor] = None,
+        num_history_frames: int = 0,
     ) -> Dict[str, Any]:
         x, timestep, context_mask = self._validate_forward_inputs(
             x=x,
@@ -543,7 +599,10 @@ class WanVideoDiT(torch.nn.Module):
                 dtype=timestep.dtype,
                 device=timestep.device,
             ) * timestep.view(batch_size, 1, 1)
-            token_timesteps[:, 0, :] = 0
+            # Clean (timestep 0) conditioning frames: the current frame plus any
+            # prepended history frames [0 .. num_history_frames]. Future frames
+            # keep the sampled noise timestep. num_history_frames=0 -> only frame 0.
+            token_timesteps[:, : num_history_frames + 1, :] = 0
             token_timesteps = token_timesteps.reshape(batch_size, -1)
             token_t_emb = sinusoidal_embedding_1d(self.freq_dim, token_timesteps.reshape(-1))
             t = self.time_embedding(token_t_emb).reshape(batch_size, -1, self.hidden_dim)

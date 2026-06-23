@@ -46,6 +46,7 @@ class FastWAM(torch.nn.Module):
         vae_memory_enabled: bool = False,
         vae_memory_train_temporal_only: bool = True,
         vae_memory_unfreeze_patch_embed: bool = False,
+        dit_history_memory: bool = False,
     ):
         super().__init__()
         # When True, the conditioning (first-frame) latent is produced by the
@@ -63,6 +64,20 @@ class FastWAM(torch.nn.Module):
         # re-learn to read the memory-modified conditioning latent. Only 2 tensors,
         # far lighter than the full-DiT unfreeze that `train_temporal_only=False` does.
         self.vae_memory_unfreeze_patch_embed = bool(vae_memory_unfreeze_patch_embed)
+        # DiT-side short-term memory (option C / 6.1): instead of folding history
+        # into the conditioning latent via the VAE temporal attention, the frozen
+        # VAE plain-encodes the history frames and they are PREPENDED to the video
+        # token sequence inside the DiT. The current frame absorbs history through
+        # the video expert's own self-attention; the action expert then reads the
+        # (history-enriched) current-frame K/V. Mutually exclusive in spirit with
+        # `vae_memory_enabled` (the old encode_memory path), but both gate the same
+        # `history_video` data supply.
+        self.dit_history_memory_enabled = bool(dit_history_memory)
+        if self.dit_history_memory_enabled and self.vae_memory_enabled:
+            raise ValueError(
+                "`dit_history_memory` (DiT-side prepend) and `vae_memory_enabled` "
+                "(VAE encode_memory) are mutually exclusive; enable only one."
+            )
         self.video_expert = video_expert
         self.action_expert = action_expert
         self.mot = mot
@@ -138,6 +153,7 @@ class FastWAM(torch.nn.Module):
         vae_memory_warm_start: bool = True,
         vae_memory_train_temporal_only: bool = True,
         vae_memory_unfreeze_patch_embed: bool = False,
+        dit_history_memory: bool = False,
     ):
         if video_dit_config is None:
             raise ValueError("`video_dit_config` is required for FastWAM.from_wan22_pretrained().")
@@ -214,6 +230,7 @@ class FastWAM(torch.nn.Module):
             vae_memory_enabled=vae_use_temporal_attention,
             vae_memory_train_temporal_only=vae_memory_train_temporal_only,
             vae_memory_unfreeze_patch_embed=vae_memory_unfreeze_patch_embed,
+            dit_history_memory=dit_history_memory,
         )
         model.model_paths = {
             "video_dit": components.dit_path,
@@ -342,6 +359,29 @@ class FastWAM(torch.nn.Module):
         z = self.vae.encode_memory(clips, num_current_frames=1, device=self.device)
         return z  # [B, z_dim, 1, H/16, W/16]
 
+    @torch.no_grad()
+    def _encode_history_latents(self, history_video: torch.Tensor, tiled: bool = False) -> torch.Tensor:
+        """Frozen plain VAE encode of the history frames for the DiT-side prepend.
+
+        Unlike `_encode_memory_first_frame`, this uses the ordinary (no temporal
+        attention) `vae.encode`, producing one latent frame per history chunk that
+        is later PREPENDED to the video token sequence inside the DiT.
+
+        Args:
+            history_video: ``[B, 3, K_px, H, W]`` history frames, oldest -> newest,
+                with ``K_px % 4 == 0``.
+
+        Returns:
+            ``[B, z_dim, K_lat, H/16, W/16]`` history latents, ``K_lat = 1 + (K_px-1)//4``.
+        """
+        if history_video.ndim != 5 or history_video.shape[1] != 3:
+            raise ValueError(f"`history_video` must be [B,3,K,H,W], got {tuple(history_video.shape)}")
+        if history_video.shape[2] % 4 != 0:
+            raise ValueError(
+                f"`history_video` frame count must be a multiple of 4, got K={history_video.shape[2]}"
+            )
+        return self._encode_video_latents(history_video, tiled=tiled)
+
     def _decode_latents(self, latents, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)):
         video_tensor = self.vae.decode(latents, device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
         video_tensor = video_tensor.squeeze(0).detach().float().clamp(-1, 1)
@@ -416,34 +456,52 @@ class FastWAM(torch.nn.Module):
         input_latents = self._encode_video_latents(input_video, tiled=tiled)
 
         first_frame_latents = None
+        history_latents = None
         fuse_flag = False
         if getattr(self.video_expert, "fuse_vae_embedding_in_latents", False):
-            history_video = sample.get("history_video", None) if self.vae_memory_enabled else None
-            if history_video is not None:
-                # MEM-style: enrich the conditioning frame with real past frames.
-                # Target latents (`input_latents`, frames 1..) stay the plain encode;
-                # only the frozen frame-0 conditioning is replaced by the memory encode.
+            if self.dit_history_memory_enabled:
+                # DiT-side memory prepend: frozen plain-encode the history frames;
+                # they are prepended to the video token sequence in `training_loss`.
+                # The current conditioning frame stays the plain single-frame encode
+                # (byte-for-byte identical to the no-memory baseline frame 0).
+                history_video = sample.get("history_video", None)
+                if history_video is None:
+                    raise ValueError(
+                        "dit_history_memory=true but the batch has no `history_video`. "
+                        "Set data.train.history_video_frames > 0 (a multiple of 4)."
+                    )
                 history_video = history_video.to(
                     device=self.device, dtype=self.torch_dtype, non_blocking=True
                 )
-                first_frame_latents = self._encode_memory_first_frame(
-                    history_video=history_video,
-                    current_first_frame=input_video[:, :, 0:1],
-                )
-            elif self.vae_memory_enabled:
-                # Memory VAE is on, but this batch carries no `history_video`.
-                # Falling back to `input_latents[:, :, 0:1]` would silently route
-                # the conditioning through the @torch.no_grad() encode, so the
-                # temporal params never enter the graph. In memory-training mode
-                # (DiT + base VAE frozen) that leaves the loss with no trainable
-                # path -> backward() raises "does not require grad". Fail loudly.
-                raise ValueError(
-                    "vae_memory.enabled=true but the batch has no `history_video`. "
-                    "Set data.train.history_video_frames > 0 (a multiple of 4) so the "
-                    "dataset feeds history frames, or disable model.vae_memory.enabled."
-                )
-            else:
+                history_latents = self._encode_history_latents(history_video, tiled=tiled)
                 first_frame_latents = input_latents[:, :, 0:1]
+            else:
+                history_video = sample.get("history_video", None) if self.vae_memory_enabled else None
+                if history_video is not None:
+                    # MEM-style: enrich the conditioning frame with real past frames.
+                    # Target latents (`input_latents`, frames 1..) stay the plain encode;
+                    # only the frozen frame-0 conditioning is replaced by the memory encode.
+                    history_video = history_video.to(
+                        device=self.device, dtype=self.torch_dtype, non_blocking=True
+                    )
+                    first_frame_latents = self._encode_memory_first_frame(
+                        history_video=history_video,
+                        current_first_frame=input_video[:, :, 0:1],
+                    )
+                elif self.vae_memory_enabled:
+                    # Memory VAE is on, but this batch carries no `history_video`.
+                    # Falling back to `input_latents[:, :, 0:1]` would silently route
+                    # the conditioning through the @torch.no_grad() encode, so the
+                    # temporal params never enter the graph. In memory-training mode
+                    # (DiT + base VAE frozen) that leaves the loss with no trainable
+                    # path -> backward() raises "does not require grad". Fail loudly.
+                    raise ValueError(
+                        "vae_memory.enabled=true but the batch has no `history_video`. "
+                        "Set data.train.history_video_frames > 0 (a multiple of 4) so the "
+                        "dataset feeds history frames, or disable model.vae_memory.enabled."
+                    )
+                else:
+                    first_frame_latents = input_latents[:, :, 0:1]
             fuse_flag = True
 
         if context.ndim != 3 or context_mask.ndim != 2:
@@ -479,6 +537,7 @@ class FastWAM(torch.nn.Module):
             "context_mask": context_mask,
             "input_latents": input_latents,
             "first_frame_latents": first_frame_latents,
+            "history_latents": history_latents,
             "fuse_vae_embedding_in_latents": fuse_flag,
             "action": action,
             "action_is_pad": action_is_pad,
@@ -492,6 +551,7 @@ class FastWAM(torch.nn.Module):
         action_seq_len: int,
         video_tokens_per_frame: int,
         device: torch.device,
+        num_history_frames: int = 0,
     ) -> torch.Tensor:
         total_seq_len = video_seq_len + action_seq_len
         mask = torch.zeros((total_seq_len, total_seq_len), dtype=torch.bool, device=device)
@@ -501,12 +561,16 @@ class FastWAM(torch.nn.Module):
             video_seq_len=video_seq_len,
             video_tokens_per_frame=video_tokens_per_frame,
             device=device,
+            num_history_frames=num_history_frames,
         )
         # action -> action
         mask[video_seq_len:, video_seq_len:] = True
-        # action -> first-frame video only
-        first_frame_tokens = min(video_tokens_per_frame, video_seq_len)
-        mask[video_seq_len:, :first_frame_tokens] = True
+        # action -> current-frame video only. With history prepended the current
+        # frame sits at temporal index `num_history_frames` (not 0); the action
+        # expert reads exactly its (history-enriched) tokens. K=0 -> first frame.
+        cur_start = num_history_frames * video_tokens_per_frame
+        cur_end = min(cur_start + video_tokens_per_frame, video_seq_len)
+        mask[video_seq_len:, cur_start:cur_end] = True
         return mask
 
     def _compute_video_loss_per_sample(
@@ -570,6 +634,17 @@ class FastWAM(torch.nn.Module):
         if inputs["first_frame_latents"] is not None:
             latents[:, :, 0:1] = inputs["first_frame_latents"]
 
+        # DiT-side memory: prepend clean history latents in front of the
+        # [current, future...] sequence. Current/future latents are unchanged
+        # from the baseline; history adds K_lat clean frames at the front.
+        history_latents = inputs.get("history_latents")
+        if history_latents is not None:
+            num_history_frames = int(history_latents.shape[2])
+            video_in = torch.cat([history_latents, latents], dim=2)
+        else:
+            num_history_frames = 0
+            video_in = latents
+
         noise_action = torch.randn_like(action)
         timestep_action = self.train_action_scheduler.sample_training_t(
             batch_size=batch_size,
@@ -580,12 +655,13 @@ class FastWAM(torch.nn.Module):
         target_action = self.train_action_scheduler.training_target(action, noise_action, timestep_action)
 
         video_pre = self.video_expert.pre_dit(
-            x=latents,
+            x=video_in,
             timestep=timestep_video,
             context=context,
             context_mask=context_mask,
             action=action,
             fuse_vae_embedding_in_latents=inputs["fuse_vae_embedding_in_latents"],
+            num_history_frames=num_history_frames,
         )
 
         action_pre = self.action_expert.pre_dit(
@@ -603,6 +679,7 @@ class FastWAM(torch.nn.Module):
             action_seq_len=action_tokens.shape[1],
             video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
             device=video_tokens.device,
+            num_history_frames=num_history_frames,
         )
         tokens_out = self.mot(
             embeds_all={
@@ -633,6 +710,12 @@ class FastWAM(torch.nn.Module):
         pred_video = self.video_expert.post_dit(tokens_out["video"], video_pre)
 
         pred_action = self.action_expert.post_dit(tokens_out["action"], action_pre)
+
+        # Drop the prepended history frames so pred aligns with `target_video`
+        # (built from input_latents = [current, future...]). History carries no
+        # video loss; it only serves as memory context for the current frame.
+        if num_history_frames > 0:
+            pred_video = pred_video[:, :, num_history_frames:]
 
         include_initial_video_step = inputs["first_frame_latents"] is None
         if inputs["first_frame_latents"] is not None:
@@ -1062,19 +1145,33 @@ class FastWAM(torch.nn.Module):
         ).to(device=self.device, dtype=self.torch_dtype)
 
         input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
-        if self.vae_memory_enabled and history_images is not None:
+        if self.dit_history_memory_enabled and history_images is not None:
+            # DiT-side memory: plain-encode the history frames and PREPEND them to
+            # the current observation latent. Mirrors `training_loss`, minus future
+            # frames (none at inference). `history_images` is [B,3,K,H,W] or
+            # [3,K,H,W]; current latent is the plain single-frame encode.
+            history_images = history_images.to(device=self.device, dtype=self.torch_dtype)
+            if history_images.ndim == 4:
+                history_images = history_images.unsqueeze(0)  # [3,K,H,W] -> [1,3,K,H,W]
+            history_latents = self._encode_history_latents(history_images, tiled=tiled)
+            current_latent = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
+            num_history_frames = int(history_latents.shape[2])
+            video_in = torch.cat([history_latents, current_latent], dim=2)
+        elif self.vae_memory_enabled and history_images is not None:
             # MEM-style conditioning: fold a real-frame history buffer into the
             # current observation latent. `history_images` is [B,3,K,H,W] (or
             # [3,K,H,W]); `input_image` is [1,3,H,W] -> [1,3,1,H,W].
             history_images = history_images.to(device=self.device, dtype=self.torch_dtype)
             if history_images.ndim == 4:
                 history_images = history_images.unsqueeze(0)  # [3,K,H,W] -> [1,3,K,H,W]
-            first_frame_latents = self._encode_memory_first_frame(
+            video_in = self._encode_memory_first_frame(
                 history_video=history_images,
                 current_first_frame=input_image.unsqueeze(2),
             )
+            num_history_frames = 0
         else:
-            first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
+            video_in = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
+            num_history_frames = 0
         fuse_flag = bool(getattr(self.video_expert, "fuse_vae_embedding_in_latents", False))
 
         use_prompt = prompt is not None
@@ -1107,17 +1204,18 @@ class FastWAM(torch.nn.Module):
             )
 
         timestep_video = torch.zeros(
-            (first_frame_latents.shape[0],),
-            dtype=first_frame_latents.dtype,
+            (video_in.shape[0],),
+            dtype=video_in.dtype,
             device=self.device,
         )
         video_pre = self.video_expert.pre_dit(
-            x=first_frame_latents,
+            x=video_in,
             timestep=timestep_video,
             context=context,
             context_mask=context_mask,
             action=None,
             fuse_vae_embedding_in_latents=fuse_flag,
+            num_history_frames=num_history_frames,
         )
         video_seq_len = int(video_pre["tokens"].shape[1])
         attention_mask = self._build_mot_attention_mask(
@@ -1125,6 +1223,7 @@ class FastWAM(torch.nn.Module):
             action_seq_len=latents_action.shape[1],
             video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
             device=video_pre["tokens"].device,
+            num_history_frames=num_history_frames,
         )
         video_kv_cache = self.mot.prefill_video_cache(
             video_tokens=video_pre["tokens"],

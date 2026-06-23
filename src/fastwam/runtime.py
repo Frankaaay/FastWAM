@@ -167,6 +167,7 @@ def create_fastwam(
         vae_memory_warm_start=bool(vae_memory.get("warm_start", True)),
         vae_memory_train_temporal_only=bool(vae_memory.get("train_temporal_only", True)),
         vae_memory_unfreeze_patch_embed=bool(vae_memory.get("unfreeze_patch_embed", False)),
+        dit_history_memory=bool(vae_memory.get("dit_prepend", False)),
     )
 
 
