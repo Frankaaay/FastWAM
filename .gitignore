@@ -9,11 +9,13 @@ runs
 runs/
 evaluate_results/
 .deepspeed*
+Mem.pdf
 
 
 # ai coding
 .codex/
 .claude/
+CLAUDE.md
 
 # Data types
 *.jit

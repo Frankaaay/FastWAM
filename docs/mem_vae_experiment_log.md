@@ -161,6 +161,13 @@ latent」上训出来的,读不懂被记忆改写过的 latent → 接口错配�
   `temporal_gate=torch.zeros(())`,前向 `x + tanh(gate)*temp`)只挡住第 0 步,挡不住几千步
   全解冻 DiT 的漂移。Camera 每点都 0、goal/long suite 接近 0 = 典型 rollout 不稳。
 
+**确认实验(原版 LIBERO,2026-06-21 进行中):** 跑两个**真·原版 LIBERO**(无扰动,40 task×50 trial):
+stage-2 step3000 @H16、stage-3 step4000 @H4。base=95.9。判读:**崩到 10-40% → rollout 裂缝坐实**;
+**仍 ~95% → 底座没坏,问题只在 libero-plus 的 OOD**。
+
+原版Libero启动前
+> `export PYTHONPATH=/data/home/frank/projects/LIBERO:$PYTHONPATH` 
+
 
 ---
 
