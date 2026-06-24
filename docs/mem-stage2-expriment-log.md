@@ -132,5 +132,5 @@ history pixels [B,3,K,H,W]  --frozen VAE.encode(plain,无temporal)-->  K_lat 个
 | smoke 脚本 | `scripts/train_mem_stage2_v1_smoke.sh` |
 | 训练脚本 | `scripts/train_mem_stage2_v1.sh`(`train_mem_stage1_v2.sh` 是旧 patch_embed 路线,勿混) |
 | run 目录(待建) | `runs/mem_stage2_v1/` |
-| 评测脚本 | `scripts/eval_libero_plus.sh`,`experiments/libero/summarize_libero_plus.py` |
+| 评测脚本 | `scripts/eval_mem_stage2_v1.sh`(stage2 包装:锁 VAE_MEM=false+DIT_PREPEND=true+H5+INCLUDE_NOISE=1,自动选最新 ckpt;底层调通用 `scripts/eval_libero_plus.sh`),聚合 `experiments/libero/summarize_libero_plus.py` |
 | wandb 看板 | wandb.ai/yichx14-uc-irvine/fastwam-mem |

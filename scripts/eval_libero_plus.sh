@@ -67,6 +67,10 @@ INCLUDE_NOISE=${INCLUDE_NOISE:-0}
 # VAE 短时记忆开关:默认 true(和训练一致)。VAE_MEM=false 跑「关记忆」对照,
 # 此时 ckpt 里的 temporal 参数会被忽略,前向退化为原版无记忆 VAE(见 fastwam.py)。
 VAE_MEM=${VAE_MEM:-true}
+# MEM-stage2(prepend 路线)开关,与 VAE_MEM 互斥。stage2 eval 必须 VAE_MEM=false
+# DIT_PREPEND=true,模型才会走「冻结 VAE plain-encode 历史 -> prepend 到 video 序列」
+# 的推理路径(runtime.py: dit_history_memory);默认 false 保持 stage1 行为不变。
+DIT_PREPEND=${DIT_PREPEND:-false}
 OUT=${OUT:-./evaluate_results/libero_plus/libero_uncond_2cam224_1e-4/$(date +%Y%m%d_%H%M%S)}
 
 [ -f "$CKPT" ]  || { echo "[FATAL] 找不到 ckpt: $CKPT"; exit 1; }
@@ -79,7 +83,7 @@ echo "=========================================================="
 echo " LIBERO-plus eval"
 echo "   CKPT=$CKPT"
 echo "   NUM_GPUS=$NUM_GPUS  GPU_OFFSET=$GPU_OFFSET  (physical $GPU_OFFSET..$((GPU_OFFSET+NUM_GPUS-1)))  MAX_PER_GPU=$MAX_PER_GPU  NWORKERS=$NWORKERS"
-echo "   VAE_MEM=$VAE_MEM  PILOT=$PILOT  INCLUDE_NOISE=$INCLUDE_NOISE"
+echo "   VAE_MEM=$VAE_MEM  DIT_PREPEND=$DIT_PREPEND  HISTORY=$HISTORY  PILOT=$PILOT  INCLUDE_NOISE=$INCLUDE_NOISE"
 echo "   OUT=$OUT"
 echo "=========================================================="
 
@@ -168,6 +172,7 @@ for ((w=0; w<NWORKERS; w++)); do
         ckpt="$CKPT" \
         task=libero_uncond_2cam224_1e-4 \
         model.vae_memory.enabled=$VAE_MEM \
+        model.vae_memory.dit_prepend=$DIT_PREPEND \
         data.train.history_video_frames="$HISTORY" \
         EVALUATION.num_trials=1 \
         +EVALUATION.save_video=false \
