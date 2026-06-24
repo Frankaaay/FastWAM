@@ -571,7 +571,15 @@ def run_single_episode(
     current_replan_idx = -1
 
     # MEM-style memory: maintain a rolling buffer of recent real model-input frames.
-    memory_enabled = bool(getattr(model, "vae_memory_enabled", False))
+    # Two memory paths share the same history buffer + assembly: the legacy VAE
+    # temporal-attn path (`vae_memory_enabled`, stage1) AND the DiT-side prepend path
+    # (`dit_history_memory_enabled`, stage2). If we only check the former, a stage2
+    # ckpt — trained to expect K_lat history latents prepended (current frame at RoPE
+    # temporal index K_lat) — runs at inference with NO history (current at index 0),
+    # a catastrophic train/infer mismatch that collapses success to ~0.
+    memory_enabled = bool(getattr(model, "vae_memory_enabled", False)) or bool(
+        getattr(model, "dit_history_memory_enabled", False)
+    )
     num_history = int(cfg.data.train.get("history_video_frames", 0))
     history_stride = int(cfg.data.train.get("action_video_freq_ratio", 1))
     use_memory = memory_enabled and num_history > 0
