@@ -66,7 +66,7 @@ history pixels [B,3,K,H,W]  --frozen VAE.encode(plain,无temporal)-->  K_lat 个
 | resume | weights-only 冷启动 |
 | 可训练 | **全 DiT(video+action expert ~5.9B)+ proprio**(trainer 默认分支,因 enabled=false) |
 | history | **H5** → 1.0s(ratio4/fps20);K_lat=2 个历史 latent 帧。⚠️ **必须 4n+1**:冻结 VAE plain encode 把首帧单独成 chunk、之后每 4 帧一 chunk(`iter_=1+(K-1)//4`),喂 4n(如 H4)会**静默丢掉最近 3 帧**;H5 → `[h0][h1..h4]` 全编码、0 丢失 |
-| 卡 / batch | **8 卡 × bs32 = global 256**;需 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`(bs32 首步差 ~184MiB OOM,碎片有 ~214MiB)。仍 OOM 则 `BS=24`=global192 |
+| 卡 / batch | **8 卡 × BS=24 = global 192(实际生效)**。bs32 即便加 `expandable_segments:True` 仍差 184MiB OOM(非碎片,是真实激活:prepend 多 K_lat=2 帧 + 全 DiT),故回退 BS=24,~124GB/卡稳跑 |
 | lr | **1e-5**,cosine + 5% warmup |
 | loss 权重 | lambda_video=1.0 / lambda_action=1.0(option C 默认贴原版) |
 | max_steps | **20000**;save_every **1000** |
@@ -102,8 +102,15 @@ history pixels [B,3,K,H,W]  --frozen VAE.encode(plain,无temporal)-->  K_lat 个
   激活显存比 smoke 的 bs4 高得多,bs32 踩线。** 修法:脚本加
   `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`(消碎片,保住 global 256);
   `BS` 参数化,仍 OOM 则 `BS=24`。
-- **下一步:** alloc-conf 重启后确认跨过首步训练;每 1000 步存档,逐档跑 H5
-  LIBERO-plus(INCLUDE_NOISE=1)。
+- **2026-06-24 — 正式训练上线(BS=24,global 192)。** bs32 加 alloc-conf 仍 OOM(碎片
+  214→132MiB 但仍差 184MiB,确认是真实激活不够),回退 BS=24 后顺利:
+  - `step=10 loss=2.116 → 20 loss=2.042 → 30 loss=2.004`,平稳下降;8 卡 ~124GB/卡、
+    94–100% util,余 ~16GB headroom,~4.3s/step(20000 步 ETA ≈ 24h)。
+  - wandb offline run `9971x97w`(`runs/mem_stage2_v1/wandb/`),offline→jump 同步到
+    wandb.ai/yichx14-uc-irvine/fastwam-mem。
+  - ⚠️ **loss 起点 ~2.1 是正常冷启动值**(对得上 stage1-v3 的 2.18);smoke 的 0.12/0.16 是
+    小 batch 单批只抽到低噪声 timestep 的假象,bs24 平均后才是真实起点。
+- **下一步:** 每 1000 步存档,逐档跑 H5 LIBERO-plus(INCLUDE_NOISE=1),对照 mem-off 49.83。
 
 ---
 
