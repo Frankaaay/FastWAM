@@ -369,16 +369,23 @@ class FastWAM(torch.nn.Module):
 
         Args:
             history_video: ``[B, 3, K_px, H, W]`` history frames, oldest -> newest,
-                with ``K_px % 4 == 0``.
+                with ``K_px % 4 == 1`` (i.e. 4n+1). The frozen VAE encodes the very
+                first frame as its own chunk and every following 4 frames as one chunk
+                (``iter_ = 1 + (K_px-1)//4``), so a 4n input would silently DROP the
+                last 3 (most-recent) frames. Encoding history ALONE therefore needs
+                4n+1; we do NOT concat the current frame (that would entangle the
+                current conditioning latent and break the byte-identical invariant).
 
         Returns:
             ``[B, z_dim, K_lat, H/16, W/16]`` history latents, ``K_lat = 1 + (K_px-1)//4``.
         """
         if history_video.ndim != 5 or history_video.shape[1] != 3:
             raise ValueError(f"`history_video` must be [B,3,K,H,W], got {tuple(history_video.shape)}")
-        if history_video.shape[2] % 4 != 0:
+        if history_video.shape[2] % 4 != 1:
             raise ValueError(
-                f"`history_video` frame count must be a multiple of 4, got K={history_video.shape[2]}"
+                f"`history_video` frame count must be of the form 4n+1 (e.g. 5) so the "
+                f"frozen VAE encodes every frame without dropping the most-recent ones, "
+                f"got K={history_video.shape[2]}"
             )
         return self._encode_video_latents(history_video, tiled=tiled)
 
@@ -468,7 +475,7 @@ class FastWAM(torch.nn.Module):
                 if history_video is None:
                     raise ValueError(
                         "dit_history_memory=true but the batch has no `history_video`. "
-                        "Set data.train.history_video_frames > 0 (a multiple of 4)."
+                        "Set data.train.history_video_frames > 0 (of the form 4n+1, e.g. 5)."
                     )
                 history_video = history_video.to(
                     device=self.device, dtype=self.torch_dtype, non_blocking=True

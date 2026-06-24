@@ -231,7 +231,12 @@ $X_t \leftarrow X_t + \alpha \cdot \mathrm{TemporalAttn}(X_{t-K:t})$
 ## 0. 帧布局与不变量
 
 沿 latent 时间轴排成:`[history_0 .. history_{K-1}, current, future_1 .. future_{T-1}]`,
-其中 `K = num_history_frames`(H4 → K_lat=1)。video self-attention 的帧级规则:
+其中 `K = num_history_frames`(latent 帧数,**H5 → K_lat=2**)。video self-attention 的帧级规则:
+
+> **历史像素帧必须 4n+1。** 冻结 VAE 的 plain `encode` 把首帧单独成一个 chunk、之后每 4 帧
+> 一个 chunk(`iter_ = 1 + (K_px-1)//4`),所以历史**单独编码**时必须 4n+1,否则最近 3 帧落单被
+> 丢(H4 只编码到最老一帧)。**不**把 current 拼进历史一起编码——那会让 current 的 conditioning
+> latent 被历史污染,破坏"current 与 base 逐位一致"的核心不变量。H5(5 帧=1.0s)→ K_lat=2。
 
 - history(`q < K`)→ 只看 history(`k < K`)
 - current(`q == K`)→ 看 history+current(`k <= K`),**不看 future**
@@ -260,7 +265,8 @@ stage-3 的 train/infer 裂缝。`K=0` 时规则退化为原版 `first_frame_cau
   `dit_history_memory: bool = False` → `self.dit_history_memory_enabled`;与 `vae_memory_enabled`
   **互斥**(同开即 raise),透传给 `cls(...)`。
 - 新增 [`_encode_history_latents`](../src/fastwam/models/wan22/fastwam.py#L363)(`@torch.no_grad`):
-  校验 `[B,3,K,H,W]` 且 `K%4==0`,返回 plain `_encode_video_latents` → `[B,z,K_lat,h,w]`。
+  校验 `[B,3,K,H,W]` 且 **`K%4==1`(4n+1,防 VAE 丢最近帧)**,返回 plain `_encode_video_latents`
+  → `[B,z,K_lat,h,w]`,`K_lat = 1 + (K-1)//4`。
 - [`build_inputs`](../src/fastwam/models/wan22/fastwam.py#L459-L540):新增分支
   `if self.dit_history_memory_enabled:` 编码历史 latent;旧 vae_memory 分支挪到 `else:`;
   返回里带 `"history_latents"`。
@@ -290,7 +296,9 @@ stage-3 的 train/infer 裂缝。`K=0` 时规则退化为原版 `first_frame_cau
 - [`configs/model/fastwam.yaml`](../configs/model/fastwam.yaml):`vae_memory:` 下新增
   `dit_prepend: false`(与 `enabled` 互斥)。
 - [`scripts/train_mem_stage2_smoke.sh`](../scripts/train_mem_stage2_smoke.sh):1-step smoke,
-  `vae_memory.enabled=false vae_memory.dit_prepend=true history_video_frames=4`,冷启动 base ckpt。
+  `vae_memory.enabled=false vae_memory.dit_prepend=true history_video_frames=5`(H5,4n+1),冷启动 base ckpt。
+- [`scripts/train_mem_stage2_prepend.sh`](../scripts/train_mem_stage2_prepend.sh):正式训练(8 卡 × bs32 = 256,
+  max_steps=20000,H5,lr=1e-5,wandb offline)。注:旧 `train_mem_stage2.sh` 是被废弃的 patch_embed 路线。
 
 ## 5. 为什么 trainer 无需改
 

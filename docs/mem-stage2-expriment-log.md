@@ -65,11 +65,11 @@ history pixels [B,3,K,H,W]  --frozen VAE.encode(plain,无temporal)-->  K_lat 个
 | 起点 ckpt | `checkpoints/fastwam_release/libero_uncond_2cam224.pt`(base,mem-off 49.83) |
 | resume | weights-only 冷启动 |
 | 可训练 | **全 DiT(video+action expert ~5.9B)+ proprio**(trainer 默认分支,因 enabled=false) |
-| history | **H4** → 0.8s(ratio4/fps20);K_lat=1 个历史 latent 帧 |
+| history | **H5** → 1.0s(ratio4/fps20);K_lat=2 个历史 latent 帧。⚠️ **必须 4n+1**:冻结 VAE plain encode 把首帧单独成 chunk、之后每 4 帧一 chunk(`iter_=1+(K-1)//4`),喂 4n(如 H4)会**静默丢掉最近 3 帧**;H5 → `[h0][h1..h4]` 全编码、0 丢失 |
 | 卡 / batch | **8 卡 × bs32 = global 256**(节点被占时 **bs24** 回退) |
 | lr | **1e-5**,cosine + 5% warmup |
 | loss 权重 | lambda_video=1.0 / lambda_action=1.0(option C 默认贴原版) |
-| max_steps | **4000**;save_every **500** |
+| max_steps | **20000**;save_every **1000** |
 | wandb | offline → jump 同步(entity yichx14-uc-irvine,project fastwam-mem) |
 | output_dir | `runs/mem_stage2` |
 
@@ -86,8 +86,11 @@ history pixels [B,3,K,H,W]  --frozen VAE.encode(plain,无temporal)-->  K_lat 个
     conditioning 与 base 逐位一致,base 一上来就在"熟悉的输入 + 额外历史"上工作,起点健康
     (不像 stage-1/2/3 把 conditioning 改写/扰动了)。**印证"贴原版、不扰动"方向正确。**
   - ⚠️ 该 smoke 用 bs4/卡(非真实 bs32)以与他人 job 共存;真实 bs32 峰值显存待训练时确认。
-- **下一步:** 用户批准 §3 参数 → 写 `scripts/train_mem_stage2.sh` → commit → 同步 → 启动
-  4000-step;每 500 步存档,逐档跑 H4 LIBERO-plus(INCLUDE_NOISE=1)。
+  - ⚠️ **该 smoke 用 H4(4 帧),只验证了管道连通**:H4 喂进 plain VAE 实际只编码到最老一帧
+    (最近 3 帧被丢),记忆内容是退化的,**不能当真实训练代理**。已修(见 §3 的 4n+1 说明),
+    smoke 脚本与正式脚本均改用 **H5**。
+- **下一步:** 用户批准 §3 参数 → 写 `scripts/train_mem_stage2_prepend.sh` → commit → 同步 → 启动
+  20000-step;每 1000 步存档,逐档跑 H5 LIBERO-plus(INCLUDE_NOISE=1)。
 
 ---
 
@@ -107,7 +110,7 @@ history pixels [B,3,K,H,W]  --frozen VAE.encode(plain,无temporal)-->  K_lat 个
 |---|---|
 | 思路文档 | `docs/MEM-stage2-Idea.md`(末尾含实施说明) |
 | smoke 脚本 | `scripts/train_mem_stage2_smoke.sh` |
-| 训练脚本(待建) | `scripts/train_mem_stage2.sh` |
+| 训练脚本 | `scripts/train_mem_stage2_prepend.sh`(`train_mem_stage2.sh` 是旧 patch_embed 路线,勿混) |
 | run 目录(待建) | `runs/mem_stage2/` |
 | 评测脚本 | `scripts/eval_libero_plus.sh`,`experiments/libero/summarize_libero_plus.py` |
 | wandb 看板 | wandb.ai/yichx14-uc-irvine/fastwam-mem |

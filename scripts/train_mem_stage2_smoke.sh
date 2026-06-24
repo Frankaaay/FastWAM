@@ -12,7 +12,10 @@
 #       the video expert self-attention; action reads the (history-enriched)
 #       current-frame K/V. Full DiT trainable (trainer default branch, since
 #       vae_memory.enabled=false), cold-started from the base ckpt.
-#   - data.train.history_video_frames=4 -> H4 (0.8s), K_lat=1 history latent frame.
+#   - data.train.history_video_frames=5 -> H5 (1.0s), K_lat=2 history latent frames.
+#       (MUST be 4n+1: the frozen plain VAE encodes frame0 as its own chunk then every
+#        4 frames as one chunk, so a 4n input like H4 silently drops the most-recent 3
+#        frames; H5 -> [h0][h1..h4] encodes all 5.)
 #
 # Single GPU, batch 2, max_steps=1, wandb off. Expect: it loads the base ckpt
 # strict (no new params), runs one forward+backward, prints loss_video/loss_action,
@@ -26,7 +29,7 @@ export DIFFSYNTH_MODEL_BASE_PATH=$(pwd)/checkpoints
 export DIFFSYNTH_SKIP_DOWNLOAD=true
 
 BASE_CKPT="checkpoints/fastwam_release/libero_uncond_2cam224.pt"
-echo "[smoke] cold-start from $BASE_CKPT ; dit_prepend=true ; H4 ; 1 step ; 1 GPU"
+echo "[smoke] cold-start from $BASE_CKPT ; dit_prepend=true ; H5 ; 1 step ; 1 GPU"
 
 accelerate launch --config_file scripts/accelerate_configs/accelerate_zero1_ds.yaml --num_processes 1 \
   scripts/train.py \
@@ -39,7 +42,7 @@ accelerate launch --config_file scripts/accelerate_configs/accelerate_zero1_ds.y
   model.redirect_common_files=false \
   model.vae_memory.enabled=false \
   model.vae_memory.dit_prepend=true \
-  data.train.history_video_frames=4 \
+  data.train.history_video_frames=5 \
   +data.train.pretrained_norm_stats=checkpoints/fastwam_release/libero_uncond_2cam224_dataset_stats.json \
   log_every=1 \
   wandb.enabled=false \

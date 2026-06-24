@@ -44,9 +44,11 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         concat_multi_camera: str = "horizontal", # "horizontal", "vertical", "robotwin", or None
         override_instruction: Optional[str] = None, # whether to hardcode a specific instruction for all samples, for debugging
     ):
-        assert history_video_frames % 4 == 0, (
-            f"history_video_frames must be a multiple of 4 (so that (K+1) % 4 == 1 "
-            f"for the VAE memory encode), got {history_video_frames}"
+        assert history_video_frames % 4 in (0, 1), (
+            f"history_video_frames must be either 4n (legacy vae_memory: history+current "
+            f"are encoded together so K+1=4n+1) or 4n+1 (dit_prepend: history is encoded "
+            f"ALONE, so it must itself be 4n+1 or the VAE drops the most-recent frames), "
+            f"got {history_video_frames}"
         )
         # raw history frames = history video frames * stride between video frames
         history_obs_size = history_video_frames * action_video_freq_ratio
