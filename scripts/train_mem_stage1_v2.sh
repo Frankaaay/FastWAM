@@ -1,8 +1,9 @@
 #!/bin/bash
 # ----------------------------------------------------------------------------
-# train_mem_stage2.sh — VAE-memory 微调 stage-2:输入接口对齐
+# train_mem_stage1_v2.sh — "改VAE"路线(stage1)v2:额外解冻 DiT 输入接口 patch_embedding
+#   (历史名 stage-2;run 目录 runs/mem_temporal_libero_stage2 保留不变,下文叙述仍用旧称)
 #
-# 背景:stage-1(train_mem_temporal.sh)只训了 4 个 VAE temporal 张量,DiT 全程冻结。
+# 背景:v1(train_mem_stage1_v1.sh)只训了 4 个 VAE temporal 张量,DiT 全程冻结。
 # LIBERO-plus 上 mem-on(45.6)反而低于 mem-off(49.8)—— 冻死的 DiT 输入层
 # patch_embedding 是在「无记忆 latent」上训出来的,读不懂被记忆改写过的 latent。
 #

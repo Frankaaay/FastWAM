@@ -1,6 +1,6 @@
 #!/bin/bash
 # ----------------------------------------------------------------------------
-# train_mem_stage2_smoke.sh — MEM-stage2 (option C / 6.1) 1-step smoke test.
+# train_mem_stage2_v1_smoke.sh — MEM-stage2 prepend v1, 1-step smoke test (option C / 6.1).
 #
 # Goal: catch shape / runtime errors in the DiT-side history-prepend path BEFORE
 # committing to a multi-GPU run. NOT a real training run.
@@ -47,4 +47,4 @@ accelerate launch --config_file scripts/accelerate_configs/accelerate_zero1_ds.y
   log_every=1 \
   wandb.enabled=false \
   resume="$BASE_CKPT" \
-  output_dir=./runs/mem_stage2_smoke
+  output_dir=./runs/mem_stage2_v1_smoke

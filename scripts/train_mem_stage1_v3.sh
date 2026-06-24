@@ -1,6 +1,7 @@
 #!/bin/bash
 # ----------------------------------------------------------------------------
-# train_mem_stage3.sh — VAE-memory 微调 stage-3:全 DiT + temporal 联合 co-adapt
+# train_mem_stage1_v3.sh — "改VAE"路线(stage1)v3:从 base 冷启动,全 DiT + temporal 联合 co-adapt
+#   (历史名 stage-3;run 目录 runs/mem_temporal_libero_stage3 保留不变,下文叙述仍用旧称)
 #
 # 背景 / 改进点:
 #   stage-1(只训 temporal 4 参数,DiT 全冻)→ 45.6,记忆净负。

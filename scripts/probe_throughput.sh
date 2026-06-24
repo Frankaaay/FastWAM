@@ -69,7 +69,7 @@ ACCEL_CFG=${ACCEL_CFG:-scripts/accelerate_configs/accelerate_zero1_ds.yaml}
 NUM_PROC=$(echo "$GPUS" | tr ',' '\n' | grep -c .)
 
 # pretrained_norm_stats:默认从正式训练脚本里抠出来,保证和训练一致
-TRAIN_SH=scripts/train_mem_temporal.sh
+TRAIN_SH=scripts/train_mem_stage1_v1.sh
 if [ -z "${NORM_STATS:-}" ] && [ -f "$TRAIN_SH" ]; then
     NORM_STATS=$(grep -oE 'pretrained_norm_stats=[^ ]+' "$TRAIN_SH" | head -1 | cut -d= -f2-)
 fi

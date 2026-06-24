@@ -1,8 +1,9 @@
 #!/bin/bash
 # ----------------------------------------------------------------------------
-# train_mem_stage2_prepend.sh — MEM-stage2 重设计正式训练(option C / 文档 6.1)
+# train_mem_stage2_v1.sh — MEM-stage2(prepend 路线)v1 正式训练(option C / 文档 6.1)
 #
-# 与旧路线的区别(勿与 train_mem_stage2.sh 混淆,那个是被废弃的 patch_embed 路线):
+# 命名:stage2 = DiT-side history prepend 路线;v1 = 该路线第一版。
+# 与旧"改VAE"路线区别(勿与 train_mem_stage1_v1/v2/v3.sh 混淆,那是被废弃的 VAE-temporal 路线):
 #   - 彻底关掉 VAE temporal(vae_memory.enabled=false,零新增 nn.Parameter);
 #   - 冻结 VAE 只做 plain 逐帧 encode,历史 latent 帧 PREPEND 到 video token 序列最前面
 #     (vae_memory.dit_prepend=true),由 video expert 自身 self-attention 混合,
@@ -10,9 +11,9 @@
 #   - vae_memory.enabled=false → trainer 默认分支:全 DiT(video+action expert ~5.9B)
 #     + proprio 可训,其余冻结(正是 option C 想要的)。
 #
-# 设计要点(为什么避开 stage-1/2/3 的坑):
+# 设计要点(为什么避开 stage1-v1/v2/v3 的坑):
 #   - current → 不看 future(mask):current 的 K/V(action 读的 memory)与 future 是否
-#     存在无关 → 训练(有 future)与推理(无 future)产出一致,修掉 stage-3 的 train/infer 裂缝;
+#     存在无关 → 训练(有 future)与推理(无 future)产出一致,修掉 stage1-v3 的 train/infer 裂缝;
 #   - 不碰 conditioning latent:current 帧 = base 原版 plain encode,逐位一致;
 #   - base ckpt strict 加载(无 missing/unexpected key)。
 #
@@ -33,7 +34,7 @@ HISTORY=${HISTORY:-5}
 
 # Auto-resume:有 DeepSpeed 训练 state 就续(ZeRO 不支持改卡数,续训必须保持 8 卡);
 # 否则冷启动 —— 从 base 原版 ckpt(mem-off 49.83)weights-only 加载,全 DiT 联合微调。
-LATEST_STATE=$(ls -d runs/mem_stage2/checkpoints/state/step_* 2>/dev/null | sort -V | tail -1)
+LATEST_STATE=$(ls -d runs/mem_stage2_v1/checkpoints/state/step_* 2>/dev/null | sort -V | tail -1)
 if [ -n "$LATEST_STATE" ]; then
   RESUME="$LATEST_STATE"
   echo "[resume] continuing full training state from $RESUME (须保持 8 卡)"
@@ -61,6 +62,6 @@ accelerate launch --config_file scripts/accelerate_configs/accelerate_zero1_ds.y
   wandb.mode=offline \
   wandb.workspace=yichx14-uc-irvine \
   wandb.project=fastwam-mem \
-  wandb.name=mem_stage2_prepend \
+  wandb.name=mem_stage2_v1 \
   resume="$RESUME" \
-  output_dir=./runs/mem_stage2
+  output_dir=./runs/mem_stage2_v1

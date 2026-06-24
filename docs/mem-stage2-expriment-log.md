@@ -4,7 +4,7 @@
 > **彻底去掉 VAE 侧 temporal attention**,改为在 **MoT 的 video prefill 路径里 prepend
 > 历史 latent 帧**(option C / 文档 6.1,v1 不 crop)。
 > 目标不变:在 LIBERO-plus 上 **超过无记忆基线 49.83**。
-> 配套思路见 [MEM-stage2-Idea.md](MEM-stage2-Idea.md);stage-1/2/3 的旧记录见
+> 配套思路见 [MEM-stage2-Idea.md](MEM-stage2-Idea.md);stage1-v1/v2/v3 的旧记录见
 > [mem-stage1-expriment-log.md](mem-stage1-expriment-log.md)。
 >
 > 
@@ -46,9 +46,9 @@ history pixels [B,3,K,H,W]  --frozen VAE.encode(plain,无temporal)-->  K_lat 个
 
 1. **current → 不看 future(mask 规则)**:current 帧的 K/V(就是 action 读的那份 memory)
    **与 future 是否存在无关** → 训练(联合,有 future)和推理(无 future)产出**完全一致**的
-   memory K/V。这直接修掉了 stage-3 的 train/infer 裂缝(exposure bias)。
+   memory K/V。这直接修掉了 stage1-v3 的 train/infer 裂缝(exposure bias)。
 2. **不碰 conditioning latent**:current 帧 conditioning = base 原版的 plain encode,**逐位
-   一致**;历史只是额外可 attend 的上下文。→ 避开 stage-1/2 的"DiT 读不懂记忆 latent"。
+   一致**;历史只是额外可 attend 的上下文。→ 避开 stage1-v1/v2 的"DiT 读不懂记忆 latent"。
 3. **零新增 nn.Parameter** → base ckpt **strict 加载**,无 missing/unexpected key。
 4. **3D RoPE 是相对位置**:prepend 只是把绝对 index 平移,current↔future、future↔future 的
    相对关系不变,只多出 history↔current 的相对位置。无需新增 sinusoidal PE。
@@ -71,25 +71,25 @@ history pixels [B,3,K,H,W]  --frozen VAE.encode(plain,无temporal)-->  K_lat 个
 | loss 权重 | lambda_video=1.0 / lambda_action=1.0(option C 默认贴原版) |
 | max_steps | **20000**;save_every **1000** |
 | wandb | offline → jump 同步(entity yichx14-uc-irvine,project fastwam-mem) |
-| output_dir | `runs/mem_stage2` |
+| output_dir | `runs/mem_stage2_v1` |
 
 ---
 
 ## 4. 进展 / 状态
 
-- **2026-06-23 — 8 卡 1-step smoke 通过(干净 PASS)。** 见 `scripts/train_mem_stage2_smoke.sh`。
+- **2026-06-23 — 8 卡 1-step smoke 通过(干净 PASS)。** 见 `scripts/train_mem_stage2_v1_smoke.sh`。
   - base ckpt **strict 加载**(无 missing/unexpected key)✓
   - 全 DiT 进入训练、**多卡 ZeRO-1 分片不 OOM**(每卡 MA 15.33 GB @bs4)✓
   - **optimizer step 干净跑完**、checkpoint(weights + state)保存链路通 ✓
   - `step=1/1 loss=0.1178 loss_action=0.0262 loss_video=0.0916 lr=1e-7`
-  - **初始 loss 0.118 ≪ stage-3 冷启动的 2.18**:因为没新增 temporal 参数、current
+  - **初始 loss 0.118 ≪ stage1-v3 冷启动的 2.18**:因为没新增 temporal 参数、current
     conditioning 与 base 逐位一致,base 一上来就在"熟悉的输入 + 额外历史"上工作,起点健康
-    (不像 stage-1/2/3 把 conditioning 改写/扰动了)。**印证"贴原版、不扰动"方向正确。**
+    (不像 stage1-v1/v2/v3 把 conditioning 改写/扰动了)。**印证"贴原版、不扰动"方向正确。**
   - ⚠️ 该 smoke 用 bs4/卡(非真实 bs32)以与他人 job 共存;真实 bs32 峰值显存待训练时确认。
   - ⚠️ **该 smoke 用 H4(4 帧),只验证了管道连通**:H4 喂进 plain VAE 实际只编码到最老一帧
     (最近 3 帧被丢),记忆内容是退化的,**不能当真实训练代理**。已修(见 §3 的 4n+1 说明),
     smoke 脚本与正式脚本均改用 **H5**。
-- **下一步:** 用户批准 §3 参数 → 写 `scripts/train_mem_stage2_prepend.sh` → commit → 同步 → 启动
+- **下一步:** 用户批准 §3 参数 → 写 `scripts/train_mem_stage2_v1.sh` → commit → 同步 → 启动
   20000-step;每 1000 步存档,逐档跑 H5 LIBERO-plus(INCLUDE_NOISE=1)。
 
 ---
@@ -109,8 +109,8 @@ history pixels [B,3,K,H,W]  --frozen VAE.encode(plain,无temporal)-->  K_lat 个
 | 内容 | 路径 |
 |---|---|
 | 思路文档 | `docs/MEM-stage2-Idea.md`(末尾含实施说明) |
-| smoke 脚本 | `scripts/train_mem_stage2_smoke.sh` |
-| 训练脚本 | `scripts/train_mem_stage2_prepend.sh`(`train_mem_stage2.sh` 是旧 patch_embed 路线,勿混) |
-| run 目录(待建) | `runs/mem_stage2/` |
+| smoke 脚本 | `scripts/train_mem_stage2_v1_smoke.sh` |
+| 训练脚本 | `scripts/train_mem_stage2_v1.sh`(`train_mem_stage1_v2.sh` 是旧 patch_embed 路线,勿混) |
+| run 目录(待建) | `runs/mem_stage2_v1/` |
 | 评测脚本 | `scripts/eval_libero_plus.sh`,`experiments/libero/summarize_libero_plus.py` |
 | wandb 看板 | wandb.ai/yichx14-uc-irvine/fastwam-mem |

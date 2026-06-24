@@ -1,4 +1,6 @@
 #!/bin/bash
+# train_mem_stage1_v1.sh — "改VAE"路线(stage1)v1:只训 VAE temporal 4 参数,DiT 全冻
+#   (历史名 stage-1 / train_mem_temporal.sh;run 目录 runs/mem_temporal_libero 保留不变)
 set -e
 source /opt/miniconda3/etc/profile.d/conda.sh
 conda activate fastwam

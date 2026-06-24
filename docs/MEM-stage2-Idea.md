@@ -244,7 +244,7 @@ $X_t \leftarrow X_t + \alpha \cdot \mathrm{TemporalAttn}(X_{t-K:t})$
 
 **关键不变量:** `current → 不看 future`,使 current 帧 K/V(就是 action 读的 memory)
 与 future 是否存在无关 → **训练(有 future)与推理(无 future)产出一致的 memory**,修掉
-stage-3 的 train/infer 裂缝。`K=0` 时规则退化为原版 `first_frame_causal`。
+stage1-v3 的 train/infer 裂缝。`K=0` 时规则退化为原版 `first_frame_causal`。
 
 ## 1. `src/fastwam/models/wan22/wan_video_dit.py`
 
@@ -295,10 +295,10 @@ stage-3 的 train/infer 裂缝。`K=0` 时规则退化为原版 `first_frame_cau
   `dit_history_memory=bool(vae_memory.get("dit_prepend", False))`。
 - [`configs/model/fastwam.yaml`](../configs/model/fastwam.yaml):`vae_memory:` 下新增
   `dit_prepend: false`(与 `enabled` 互斥)。
-- [`scripts/train_mem_stage2_smoke.sh`](../scripts/train_mem_stage2_smoke.sh):1-step smoke,
+- [`scripts/train_mem_stage2_v1_smoke.sh`](../scripts/train_mem_stage2_v1_smoke.sh):1-step smoke,
   `vae_memory.enabled=false vae_memory.dit_prepend=true history_video_frames=5`(H5,4n+1),冷启动 base ckpt。
-- [`scripts/train_mem_stage2_prepend.sh`](../scripts/train_mem_stage2_prepend.sh):正式训练(8 卡 × bs32 = 256,
-  max_steps=20000,H5,lr=1e-5,wandb offline)。注:旧 `train_mem_stage2.sh` 是被废弃的 patch_embed 路线。
+- [`scripts/train_mem_stage2_v1.sh`](../scripts/train_mem_stage2_v1.sh):正式训练(8 卡 × bs32 = 256,
+  max_steps=20000,H5,lr=1e-5,wandb offline)。注:旧 `train_mem_stage1_v2.sh` 是被废弃的 patch_embed 路线。
 
 ## 5. 为什么 trainer 无需改
 
