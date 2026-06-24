@@ -66,7 +66,7 @@ history pixels [B,3,K,H,W]  --frozen VAE.encode(plain,无temporal)-->  K_lat 个
 | resume | weights-only 冷启动 |
 | 可训练 | **全 DiT(video+action expert ~5.9B)+ proprio**(trainer 默认分支,因 enabled=false) |
 | history | **H5** → 1.0s(ratio4/fps20);K_lat=2 个历史 latent 帧。⚠️ **必须 4n+1**:冻结 VAE plain encode 把首帧单独成 chunk、之后每 4 帧一 chunk(`iter_=1+(K-1)//4`),喂 4n(如 H4)会**静默丢掉最近 3 帧**;H5 → `[h0][h1..h4]` 全编码、0 丢失 |
-| 卡 / batch | **8 卡 × bs32 = global 256**(节点被占时 **bs24** 回退) |
+| 卡 / batch | **8 卡 × bs32 = global 256**;需 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`(bs32 首步差 ~184MiB OOM,碎片有 ~214MiB)。仍 OOM 则 `BS=24`=global192 |
 | lr | **1e-5**,cosine + 5% warmup |
 | loss 权重 | lambda_video=1.0 / lambda_action=1.0(option C 默认贴原版) |
 | max_steps | **20000**;save_every **1000** |
@@ -89,8 +89,21 @@ history pixels [B,3,K,H,W]  --frozen VAE.encode(plain,无temporal)-->  K_lat 个
   - ⚠️ **该 smoke 用 H4(4 帧),只验证了管道连通**:H4 喂进 plain VAE 实际只编码到最老一帧
     (最近 3 帧被丢),记忆内容是退化的,**不能当真实训练代理**。已修(见 §3 的 4n+1 说明),
     smoke 脚本与正式脚本均改用 **H5**。
-- **下一步:** 用户批准 §3 参数 → 写 `scripts/train_mem_stage2_v1.sh` → commit → 同步 → 启动
-  20000-step;每 1000 步存档,逐档跑 H5 LIBERO-plus(INCLUDE_NOISE=1)。
+- **2026-06-24 — 8 卡 H5 smoke 重跑通过(干净 PASS)。** node-1,`HEAD=69b73d1`,8 卡 ×
+  bs4 = global 32,1 step,wandb off。
+  - `step=1/1 loss=0.1582 loss_action=0.0412 loss_video=0.1170`,无 error/assert/OOM,
+    weights+state 保存链路通,8 卡退出干净。
+  - loss 0.158(略高于 H4 单卡 0.118):H5 真编码 2 个历史 latent 帧(非 H4 退化单帧),
+    仍远低于 stage1-v3 冷启动 2.18,起点健康。**4n+1 修复 + 8 卡路径双双坐实。**
+  - smoke 产出的 5.9B throwaway ckpt 已清(保留 `runs/mem_stage2_v1_smoke/smoke8_H5.log`)。
+- **2026-06-24 — 正式 20000-step 首次启动 OOM(bs32),已加 alloc-conf 重启。** 真实
+  bs32(global 256)在第一步 OOM:GPU0 用 137.4/139.8 GiB,仅差 184 MiB,且 ~214 MiB 是
+  碎片化 reserved-unallocated。**根因:prepend 路线给 video 序列多 K_lat=2 历史帧 + 全 DiT,
+  激活显存比 smoke 的 bs4 高得多,bs32 踩线。** 修法:脚本加
+  `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`(消碎片,保住 global 256);
+  `BS` 参数化,仍 OOM 则 `BS=24`。
+- **下一步:** alloc-conf 重启后确认跨过首步训练;每 1000 步存档,逐档跑 H5
+  LIBERO-plus(INCLUDE_NOISE=1)。
 
 ---
 

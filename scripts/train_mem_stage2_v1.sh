@@ -28,9 +28,14 @@ conda activate fastwam
 cd ~/projects/FastWAM
 export DIFFSYNTH_MODEL_BASE_PATH=$(pwd)/checkpoints
 export DIFFSYNTH_SKIP_DOWNLOAD=true
+# prepend 路线给 video 序列多了 K_lat 历史帧,bs32 激活显存踩线(首步 OOM,仅超 ~184MiB,
+# 且有 ~214MiB 碎片化 reserved)。expandable_segments 消碎片,保住 global 256。仍 OOM 则降 BS=24。
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # 历史像素帧数,必须 4n+1(H5=1.0s, H9=1.8s, H13=2.6s)。
 HISTORY=${HISTORY:-5}
+# per-GPU batch(8 卡 → global = BS×8)。默认 32=global256;OOM 回退 BS=24=global192。
+BS=${BS:-32}
 
 # Auto-resume:有 DeepSpeed 训练 state 就续(ZeRO 不支持改卡数,续训必须保持 8 卡);
 # 否则冷启动 —— 从 base 原版 ckpt(mem-off 49.83)weights-only 加载,全 DiT 联合微调。
@@ -47,7 +52,7 @@ fi
 accelerate launch --config_file scripts/accelerate_configs/accelerate_zero1_ds.yaml --num_processes 8 \
   scripts/train.py \
   data=libero_2cam model=fastwam task=libero_uncond_2cam224_1e-4 \
-  batch_size=32 \
+  batch_size="$BS" \
   learning_rate=1e-5 \
   max_steps=20000 \
   save_every=1000 \
