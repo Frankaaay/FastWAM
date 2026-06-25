@@ -34,8 +34,9 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # 历史像素帧数,必须 4n+1(H5=1.0s, H9=1.8s, H13=2.6s)。
 HISTORY=${HISTORY:-5}
-# per-GPU batch(8 卡 → global = BS×8)。默认 32=global256;OOM 回退 BS=24=global192。
-BS=${BS:-32}
+# per-GPU batch(8 卡 → global = BS×8)。正式训练用 24=global192(bs32 会 OOM,且步数/epoch
+# 与 step_006000 的 resume sampler 偏移对不上)。如需改回先确认显存与 resume 一致性。
+BS=${BS:-24}
 
 # Auto-resume:有 DeepSpeed 训练 state 就续(ZeRO 不支持改卡数,续训必须保持 8 卡);
 # 否则冷启动 —— 从 base 原版 ckpt(mem-off 49.83)weights-only 加载,全 DiT 联合微调。
@@ -54,7 +55,8 @@ accelerate launch --config_file scripts/accelerate_configs/accelerate_zero1_ds.y
   data=libero_2cam model=fastwam task=libero_uncond_2cam224_1e-4 \
   batch_size="$BS" \
   learning_rate=1e-5 \
-  max_steps=20000 \
+  num_epochs=10 \
+  max_steps=null \
   save_every=1000 \
   eval_every=100000 \
   model.redirect_common_files=false \
