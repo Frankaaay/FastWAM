@@ -307,6 +307,88 @@ class Head(nn.Module):
         return x
 
 
+class TemporalFoldAdapter(nn.Module):
+    """Fold short-term visual history into the current frame's tokens (MEM-stage2-v2).
+
+    Runs in DiT token space (right after ``patch_embedding``). The patchified video
+    grid is laid out along the temporal axis as
+
+        [history_0 .. history_{K-1}, current, future_1 .. future_{T-1}]
+
+    with ``K = num_history_frames``. For every spatial token position independently,
+    the CURRENT frame (temporal index K) attends over ``[history_0 .. current]``
+    (a ``K+1``-length temporal sequence) via a small temporal attention; the gated
+    result is added back to the current tokens, then the history frames are DROPPED
+    so the returned grid is shape-identical to the no-memory baseline
+    (``[B, C, T, H', W']`` with ``T = F - K``).
+
+    Two distinct mechanisms (do NOT conflate):
+      - ``gate``: a single learned scalar, zero-initialised, controlling how much
+        of the temporal delta is mixed into the current tokens. ``tanh(0) = 0`` so
+        the module is a no-op at step 0 -> mem-off / K=1 is byte-identical to base.
+      - ``temporal_pos``: a per-frame learned positional encoding over the (K+1)
+        context frames, giving the temporal attention a notion of frame order.
+    """
+
+    def __init__(self, hidden_dim, num_heads, attn_head_dim, max_history_frames=8, eps=1e-6):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.attn_head_dim = attn_head_dim
+        self.attn_hidden_dim = num_heads * attn_head_dim
+        self.max_history_frames = int(max_history_frames)
+        self.norm = nn.LayerNorm(hidden_dim, eps=eps)
+        self.q = nn.Linear(hidden_dim, self.attn_hidden_dim)
+        self.k = nn.Linear(hidden_dim, self.attn_hidden_dim)
+        self.v = nn.Linear(hidden_dim, self.attn_hidden_dim)
+        self.o = nn.Linear(self.attn_hidden_dim, hidden_dim)
+        self.norm_q = RMSNorm(self.attn_hidden_dim, eps=eps)
+        self.norm_k = RMSNorm(self.attn_hidden_dim, eps=eps)
+        # Per-frame temporal position encoding over the (K+1) context frames.
+        self.temporal_pos = nn.Parameter(torch.zeros(1, self.max_history_frames + 1, 1, hidden_dim))
+        # Zero-init gate -> module starts as a no-op (additive memory).
+        self.gate = nn.Parameter(torch.zeros(()))
+
+    def forward(self, x, num_history_frames, history_keep_mask=None):
+        """``x``: ``[B, C, F, H', W']`` patchified grid. Returns ``[B, C, F-K, H', W']``."""
+        K = int(num_history_frames)
+        B, C, Fdim, Hh, Ww = x.shape
+        if not 0 < K < Fdim:
+            raise ValueError(f"TemporalFoldAdapter needs 0 < K < F, got K={K}, F={Fdim}")
+        if K + 1 > self.temporal_pos.shape[1]:
+            raise ValueError(
+                f"history frames K+1={K + 1} exceeds adapter capacity "
+                f"max_history_frames+1={self.temporal_pos.shape[1]}; raise max_history_frames."
+            )
+        S = Hh * Ww
+        # [B, C, F, H', W'] -> [B, F, S, C]
+        xt = x.permute(0, 2, 3, 4, 1).reshape(B, Fdim, S, C)
+        ctx = xt[:, : K + 1]                       # [B, K+1, S, C] history..current
+        cur = xt[:, K]                             # [B, S, C]      current
+        ctx = ctx + self.temporal_pos[:, : K + 1].to(dtype=ctx.dtype)
+        # Temporal attention per spatial token: collapse spatial into the batch so
+        # the (K+1) temporal frames are the only attended axis.
+        q = self.norm_q(self.q(self.norm(cur)))                      # [B, S, A]
+        ctx_n = self.norm(ctx)
+        k = self.norm_k(self.k(ctx_n))                               # [B, K+1, S, A]
+        v = self.v(ctx_n)                                            # [B, K+1, S, A]
+        q = q.reshape(B * S, 1, self.attn_hidden_dim)
+        k = k.permute(0, 2, 1, 3).reshape(B * S, K + 1, self.attn_hidden_dim)
+        v = v.permute(0, 2, 1, 3).reshape(B * S, K + 1, self.attn_hidden_dim)
+        attn = flash_attention(q=q, k=k, v=v, num_heads=self.num_heads)  # [B*S, 1, A]
+        delta = self.o(attn).reshape(B, S, C)                       # [B, S, C]
+        gate = torch.tanh(self.gate)
+        if history_keep_mask is not None:
+            gate = gate * history_keep_mask.to(dtype=delta.dtype).reshape(B, 1, 1)
+        cur = cur + gate * delta
+        # Write the enriched current frame back, then drop history -> base shape.
+        out = xt[:, K:].clone()                                    # [B, T, S, C] current..future
+        out[:, 0] = cur
+        T = Fdim - K
+        out = out.reshape(B, T, Hh, Ww, C).permute(0, 4, 1, 2, 3).contiguous()
+        return out
+
+
 class WanVideoDiT(torch.nn.Module):
     def __init__(
         self,
@@ -398,6 +480,24 @@ class WanVideoDiT(torch.nn.Module):
         if self.use_gradient_checkpointing:
             logger.info("Using gradient checkpointing for DiT blocks. This will save memory but use more computation.")
             
+
+    def enable_history_fold(self, max_history_frames: int = 8):
+        """Attach the MEM-stage2-v2 fold-current memory adapter (additive, zero-init).
+
+        Idempotent. The adapter folds prepended history frames into the current
+        frame's tokens inside ``pre_dit`` and drops the history frames, so the rest
+        of the network (timestep marking, RoPE, MoT, action expert) sees the exact
+        base layout. New params load fresh (strict=False) from the base ckpt and the
+        zero-init gate makes them a no-op until trained.
+        """
+        if getattr(self, "history_fold_adapter", None) is not None:
+            return
+        self.history_fold_adapter = TemporalFoldAdapter(
+            hidden_dim=self.hidden_dim,
+            num_heads=self.num_heads,
+            attn_head_dim=self.attn_head_dim,
+            max_history_frames=int(max_history_frames),
+        )
 
     def patchify(self, x: torch.Tensor, control_camera_latents_input: Optional[torch.Tensor] = None):
         x = self.patch_embedding(x)
@@ -571,6 +671,7 @@ class WanVideoDiT(torch.nn.Module):
         fuse_vae_embedding_in_latents: bool = False,
         control_camera_latents_input: Optional[torch.Tensor] = None,
         num_history_frames: int = 0,
+        history_keep_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
         x, timestep, context_mask = self._validate_forward_inputs(
             x=x,
@@ -589,6 +690,19 @@ class WanVideoDiT(torch.nn.Module):
                 f"got HxW=({x.shape[3]}, {x.shape[4]}), patch=({patch_h}, {patch_w})"
             )
         tokens_per_frame = (x.shape[3] // patch_h) * (x.shape[4] // patch_w)
+
+        # MEM-stage2-v2 fold-current: when the fold adapter is attached and history
+        # frames are prepended, patch-embed the full [history, current, future]
+        # stack, fold history into the current frame, then DROP the history frames.
+        # After this `x` is already patchified and `num_history_frames` is consumed,
+        # so timestep marking / RoPE / MoT / action all see the base layout.
+        already_patchified = False
+        fold_adapter = getattr(self, "history_fold_adapter", None)
+        if fold_adapter is not None and num_history_frames > 0:
+            x = self.patchify(x, control_camera_latents_input=control_camera_latents_input)
+            x = fold_adapter(x, num_history_frames, history_keep_mask=history_keep_mask)
+            num_history_frames = 0
+            already_patchified = True
 
         if self.seperated_timestep and fuse_vae_embedding_in_latents:
             if not hasattr(self, "patch_size") or len(self.patch_size) < 3:
@@ -611,7 +725,8 @@ class WanVideoDiT(torch.nn.Module):
             raise NotImplementedError("Only support seperated_timestep with fuse_vae_embedding_in_latents for now.")
             t = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, timestep))
             t_mod = self.time_projection(t).unflatten(1, (6, self.hidden_dim))
-        x = self.patchify(x, control_camera_latents_input=control_camera_latents_input)
+        if not already_patchified:
+            x = self.patchify(x, control_camera_latents_input=control_camera_latents_input)
         f, h, w = x.shape[2:]
 
         context = self.text_embedding(context) # (B, L, dim)

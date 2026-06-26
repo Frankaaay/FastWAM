@@ -72,6 +72,20 @@ vae_memory:
   # ckpt; train the full DiT (set train_temporal_only=false / leave enabled=false
   # so the trainer keeps everything trainable). Needs data.train.history_video_frames>0.
   dit_prepend: false
+  # MEM-stage2-v2 fold-current (MUTUALLY EXCLUSIVE with `enabled` and `dit_prepend`).
+  # The frozen VAE plain-encodes the history frames; the video expert's
+  # TemporalFoldAdapter folds them into the CURRENT frame's tokens and DROPS the
+  # history frames, so the MoT / action expert / masks see the exact base layout
+  # (token count, current index, action interface unchanged). The adapter is
+  # additive with a zero-init gate -> step-0 output == base, baseline preserved by
+  # construction. Only the adapter is trained (whole base DiT/VAE/action frozen).
+  # Needs data.train.history_video_frames > 0 (of the form 4n+1, e.g. 5).
+  dit_fold_current: false
+  # Per-sample probability of dropping the history channel during training so the
+  # model also sees "no memory" inputs (keeps mem-off in-distribution). 0 = never.
+  fold_history_dropout: 0.4
+  # Adapter capacity: max history latent frames (temporal_pos has this many +1 slots).
+  fold_max_history_frames: 8
   warm_start: true          # copy pretrained spatial proj -> temporal_proj after load
   # true  -> train ONLY temporal_proj/gate/pos (DiT + base VAE frozen).
   # false -> ALSO finetune the DiT (+ proprio) so the experts adapt to the

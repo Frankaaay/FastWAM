@@ -168,6 +168,9 @@ def create_fastwam(
         vae_memory_train_temporal_only=bool(vae_memory.get("train_temporal_only", True)),
         vae_memory_unfreeze_patch_embed=bool(vae_memory.get("unfreeze_patch_embed", False)),
         dit_history_memory=bool(vae_memory.get("dit_prepend", False)),
+        dit_fold_current=bool(vae_memory.get("dit_fold_current", False)),
+        fold_history_dropout=float(vae_memory.get("fold_history_dropout", 0.0)),
+        fold_max_history_frames=int(vae_memory.get("fold_max_history_frames", 8)),
     )
 
 

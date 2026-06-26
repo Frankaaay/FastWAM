@@ -124,7 +124,168 @@ history pixels [B,3,K,H,W]  --frozen VAE.encode(plain,无temporal)-->  K_lat 个
 
 ---
 
-## 6. 实验目录速查
+
+## 6. v2 方案锁定:DiT-side MEM-style current-fold adapter
+
+> 结论:stage2-v1 的 prepend 路线不继续扩大训练。v2 改成 MEM-style factorized temporal
+> attention:history 只用于增强 current tokens,随后立即丢弃 history tokens,后端 MoT/action
+> 看到的 token 数、current index、attention mask 都保持 base 形态。
+
+### 6.1 为什么不是继续 prepend
+
+stage2-v1 的真实问题不是单纯超参或早停,而是 history prepend 改变了后端接口:
+
+- 原版 FastWAM action 只读 current-frame video cache。
+- v1 把 video 序列改成 `[history_0..K-1,current,future...]`,current 的 temporal index 从 0 变成 K。
+- action 仍只读 current,但这个 current 已经经过 history-prepend 路径重塑。
+- 全 DiT finetune 后策略会依赖该路径;一旦 mem-off/current 回到 index 0,就是 OOD。
+
+因此 v2 不让 history token 暴露给 MoT/action,避免把 memory 变成一条新 policy backbone。
+
+### 6.2 Adapter 是什么
+
+这里的 adapter 不是大模块,而是一个轻量 temporal branch,对应 `docs/MEM-stage2-Idea.md`
+里先前写的正式版 "MEM-style temporal attention":
+
+```text
+X in R^{B x (K+1) x N x D}
+```
+
+其中 `K` 是 history latent 帧数,`+1` 是 current,`N` 是每帧 spatial tokens 数,`D`
+是 video token hidden dim。对同一个 spatial position `p` 跨时间做 temporal attention:
+
+```text
+X[:, :, p, :] -> TemporalAttn -> delta_current[:, p, :]
+current_tokens <- current_tokens + tanh(gate) * delta_current
+```
+
+复杂度:
+
+```text
+O(N K^2 D)
+```
+
+而不是 full spatio-temporal attention 的:
+
+```text
+O(K^2 N^2 D)
+```
+
+最后只保留 current tokens:
+
+```text
+[history,current] -> current_mem
+```
+
+所以它不是把 history 压成一个全局 token,而是把时间信息折叠进 **current 的每个
+spatial token**。后端仍接收一帧 current token grid,token 数与 base 完全一致。
+
+### 6.3 数据流
+
+```text
+history frames -- frozen Wan VAE plain encode --> history_latents
+current frame  -- frozen Wan VAE plain encode --> current_latent
+
+[history_latents,current_latent]
+  -> video_expert patch/token embedding
+  -> TemporalFoldAdapter
+  -> current_mem_tokens only
+  -> original MoT video prefill
+  -> action expert denoise
+```
+
+训练时如果有 future video loss,MoT 看到:
+
+```text
+[current_mem, future_1, future_2, ...]
+```
+
+推理时 MoT 看到:
+
+```text
+[current_mem]
+```
+
+关键不变量:
+
+- `gate=0` 初始化,step0 严格退化为 base。
+- current 仍是 temporal index 0。
+- action expert 的 video conditioning token 数不变。
+- 不需要 v1 那种 action 指向 `num_history_frames * tokens_per_frame` 的特殊 mask。
+
+### 6.4 与 stage1-v1 / MEM 原文的关系
+
+stage1-v1 的哲学是对的:history 在前端融合,最后只把 current latent 给 DiT。它保住了
+rollout:标准 LIBERO 仍 95.9,LIBERO-plus 只小幅掉到 45.64,没有全解冻崩盘。
+
+stage2-v2 继承这个原则,但把融合位置从 VAE latent 压缩器移到 DiT token 空间:
+
+- 比 stage1 更靠近 action conditioning,理论上更容易影响动作。
+- 比 stage2-v1 更像 MEM,因为后端只见 current tokens,history 不是 prepend 后端输入。
+- 长程 language memory 暂不并入 FastWAM,交给 robo agent / planner;FastWAM 只负责短程视觉 memory。
+
+### 6.5 训练参数 v2 初版
+
+| 项 | 值 |
+|---|---|
+| 分支 | `MEM-stage2` |
+| 新开关 | `model.vae_memory.enabled=false` + `model.vae_memory.dit_prepend=false` + `model.vae_memory.dit_fold_current=true` |
+| 互斥 | `enabled` / `dit_prepend` / `dit_fold_current` 三选一 |
+| 起点 ckpt | `checkpoints/fastwam_release/libero_uncond_2cam224.pt` |
+| VAE | 冻结,plain encode history/current |
+| 可训练 | **仅 TemporalFoldAdapter + gate + 可选 adapter norm/proj** |
+| 冻结 | action expert、MoT 主体、video expert 原参数、VAE、text encoder |
+| history | H5 默认:LIBERO 下 1.0s,plain VAE 单独 encode 满足 4n+1,K_lat=2 |
+| lr | `1e-4` 起步(adapter-only);若不稳降到 `3e-5` |
+| batch | 8 卡 x BS=32 优先;adapter-only 显存应低于 v1 全 DiT,若 OOM 回退 BS=24 |
+| max_steps | 10000 初版;save_every 1000 |
+| warmup | 5% cosine |
+| loss | action/video 原 loss 不变;可选加 base consistency loss |
+| output_dir | `runs/mem_stage2_v2_fold_current` |
+
+### 6.6 History dropout / anti-dependence
+
+目的:避免重演 v1 的 "训练永远有 history -> 策略依赖 history -> mem-off 崩"。训练时对
+一部分 batch 故意破坏 history,迫使模型学会 history 有用时用、无用时退回 current。
+
+初版比例建议保守:
+
+| 比例 | 操作 | 作用 |
+|---|---|---|
+| 70% | 正常 history | 学会使用真实短程视觉记忆 |
+| 20% | repeat current | 模拟无有效 history,但视觉分布自然 |
+| 10% | shuffle across batch / temporal offset | 模拟错误 history,训练不要盲信 |
+
+实现位置:在 `fastwam.py` 里拿到 `history_video` 后、VAE encode 前做,不要先改 dataset。
+`repeat current` 比 zero 黑帧更稳,因为 zero 太 OOD。
+
+伪代码:
+
+```python
+if self.training and self.history_dropout_enabled:
+    mode = torch.rand(B, device=history_video.device)
+    repeat = (mode >= 0.70) & (mode < 0.90)
+    shuffle = mode >= 0.90
+
+    history_video[repeat] = input_video[repeat, :, 0:1].repeat(1, 1, K, 1, 1)
+
+    perm = torch.randperm(B, device=history_video.device)
+    history_video[shuffle] = history_video[perm][shuffle]
+```
+
+### 6.7 验收
+
+先验收“不退化”,再看 memory 增益:
+
+1. `gate=0` smoke:同 seed 下 v2 fold-current 与 base 输出应近似一致。
+2. 标准 LIBERO:接近 base 95.9,不能像 v1 prepend 全解冻那样崩。
+3. LIBERO-plus:只做鲁棒性门禁,目标不明显低于 mem-off 50.5;永远 `INCLUDE_NOISE=1`。
+4. memory benchmark:base vs stage1-v1 vs stage2-v2 三方对比,这里才判定 memory 是否有效。
+5. 真机叠衣服:作为最终外部验证,需先定义 fold success / phase accuracy / history-sensitive action accuracy。
+
+---
+
+## 7. 实验目录速查
 
 | 内容 | 路径 |
 |---|---|

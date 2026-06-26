@@ -89,6 +89,11 @@ VAE_MEM=${VAE_MEM:-true}
 # DIT_PREPEND=true,模型才会走「冻结 VAE plain-encode 历史 -> prepend 到 video 序列」
 # 的推理路径(runtime.py: dit_history_memory);默认 false 保持 stage1 行为不变。
 DIT_PREPEND=${DIT_PREPEND:-false}
+# MEM-stage2-v2(fold-current 路线)开关,与 VAE_MEM / DIT_PREPEND 三者互斥。fold eval 必须
+# VAE_MEM=false DIT_PREPEND=false DIT_FOLD_CURRENT=true,模型才会走「冻结 VAE plain-encode
+# 历史 -> TemporalFoldAdapter 折进 current 帧并丢弃历史帧」的推理路径(runtime.py:
+# dit_fold_current);默认 false 保持既有行为不变。
+DIT_FOLD_CURRENT=${DIT_FOLD_CURRENT:-false}
 # 每个 task 跑几个 trial:libero_plus 协议=1(对齐 paper);标准 libero 习惯多 trial 取均值。
 TRIALS=${TRIALS:-1}
 OUT=${OUT:-./evaluate_results/$BENCH/libero_uncond_2cam224_1e-4/$(date +%Y%m%d_%H%M%S)}
@@ -104,7 +109,7 @@ echo " LIBERO-plus eval"
 echo "   CKPT=$CKPT"
 echo "   NUM_GPUS=$NUM_GPUS  GPU_OFFSET=$GPU_OFFSET  (physical $GPU_OFFSET..$((GPU_OFFSET+NUM_GPUS-1)))  MAX_PER_GPU=$MAX_PER_GPU  NWORKERS=$NWORKERS"
 echo "   BENCH=$BENCH  TRIALS=$TRIALS"
-echo "   VAE_MEM=$VAE_MEM  DIT_PREPEND=$DIT_PREPEND  HISTORY=$HISTORY  PILOT=$PILOT  INCLUDE_NOISE=$INCLUDE_NOISE"
+echo "   VAE_MEM=$VAE_MEM  DIT_PREPEND=$DIT_PREPEND  DIT_FOLD_CURRENT=$DIT_FOLD_CURRENT  HISTORY=$HISTORY  PILOT=$PILOT  INCLUDE_NOISE=$INCLUDE_NOISE"
 echo "   OUT=$OUT"
 echo "=========================================================="
 
@@ -207,6 +212,7 @@ for ((w=0; w<NWORKERS; w++)); do
         task=libero_uncond_2cam224_1e-4 \
         model.vae_memory.enabled=$VAE_MEM \
         model.vae_memory.dit_prepend=$DIT_PREPEND \
+        model.vae_memory.dit_fold_current=$DIT_FOLD_CURRENT \
         data.train.history_video_frames="$HISTORY" \
         EVALUATION.num_trials=$TRIALS \
         +EVALUATION.save_video=false \
