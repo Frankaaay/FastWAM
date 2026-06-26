@@ -30,12 +30,30 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 ROOT="$(pwd)"
 
+# BENCH 选择评测集(默认 libero_plus,行为与历史完全一致):
+#   libero_plus -> 7-factor 扰动鲁棒性集(读 task_classification.json)
+#   libero      -> 原版未扰动标准 LIBERO(对照基线 95.9)。LIBERO-plus 把 4 个标准 suite
+#                  覆盖成了 ~2500 扰动 task,所以这里用 per-process 两个环境变量切回原版包
+#                  与原版 config(见下方),不动共享 env、不需第二个 conda env。
+BENCH=${BENCH:-libero_plus}
+
 # conda 的 activate.d 钩子会引用 LD_LIBRARY_PATH;在 set -u 下若未定义会报错
 # (非 login shell 启动时常见)。先给它一个空默认值。
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
 
 source /opt/miniconda3/etc/profile.d/conda.sh && conda activate fastwam \
   || { echo "[FATAL] 无法激活 conda env: fastwam"; exit 1; }
+
+# BENCH=libero:切回原版标准 LIBERO(仅影响本进程,环境变量不外泄)。
+#   PYTHONPATH        -> import libero 命中原版包(非 LIBERO-plus)
+#   LIBERO_CONFIG_PATH-> libero 读 ~/.libero_orig/config.yaml(assets/bddl/benchmark_root/
+#                        init_states 指向原版;datasets 仍是 FastWAM 的)
+# 不设这两个变量 -> 默认就是 LIBERO-plus。两个变量也会被 shard-gen 与 worker 子进程继承。
+if [ "$BENCH" = "libero" ]; then
+    export PYTHONPATH=/data/home/frank/projects/LIBERO${PYTHONPATH:+:$PYTHONPATH}
+    export LIBERO_CONFIG_PATH=${LIBERO_CONFIG_PATH:-$HOME/.libero_orig}
+    echo "[BENCH=libero] 原版标准 LIBERO:PYTHONPATH=$PYTHONPATH  LIBERO_CONFIG_PATH=$LIBERO_CONFIG_PATH"
+fi
 
 export DIFFSYNTH_MODEL_BASE_PATH="$ROOT/checkpoints"
 export DIFFSYNTH_SKIP_DOWNLOAD=true
@@ -71,7 +89,9 @@ VAE_MEM=${VAE_MEM:-true}
 # DIT_PREPEND=true,模型才会走「冻结 VAE plain-encode 历史 -> prepend 到 video 序列」
 # 的推理路径(runtime.py: dit_history_memory);默认 false 保持 stage1 行为不变。
 DIT_PREPEND=${DIT_PREPEND:-false}
-OUT=${OUT:-./evaluate_results/libero_plus/libero_uncond_2cam224_1e-4/$(date +%Y%m%d_%H%M%S)}
+# 每个 task 跑几个 trial:libero_plus 协议=1(对齐 paper);标准 libero 习惯多 trial 取均值。
+TRIALS=${TRIALS:-1}
+OUT=${OUT:-./evaluate_results/$BENCH/libero_uncond_2cam224_1e-4/$(date +%Y%m%d_%H%M%S)}
 
 [ -f "$CKPT" ]  || { echo "[FATAL] 找不到 ckpt: $CKPT"; exit 1; }
 [ -f "$STATS" ] || { echo "[FATAL] 找不到 dataset_stats: $STATS"; exit 1; }
@@ -83,36 +103,50 @@ echo "=========================================================="
 echo " LIBERO-plus eval"
 echo "   CKPT=$CKPT"
 echo "   NUM_GPUS=$NUM_GPUS  GPU_OFFSET=$GPU_OFFSET  (physical $GPU_OFFSET..$((GPU_OFFSET+NUM_GPUS-1)))  MAX_PER_GPU=$MAX_PER_GPU  NWORKERS=$NWORKERS"
+echo "   BENCH=$BENCH  TRIALS=$TRIALS"
 echo "   VAE_MEM=$VAE_MEM  DIT_PREPEND=$DIT_PREPEND  HISTORY=$HISTORY  PILOT=$PILOT  INCLUDE_NOISE=$INCLUDE_NOISE"
 echo "   OUT=$OUT"
 echo "=========================================================="
 
-# ---- 生成分片:读 task_classification.json,展平成 case 列表,round-robin 切到 NWORKERS 个 shard ----
-python - "$OUT/shards" "$NWORKERS" "$PILOT" "$INCLUDE_NOISE" <<'PY'
+# ---- 生成分片:展平成 case 列表,round-robin 切到 NWORKERS 个 shard ----
+#   libero_plus: 读 task_classification.json(7 factor 扰动集)
+#   libero:      枚举 4 个标准 suite × 各自 n_tasks(原版未扰动),category=suite 便于聚合
+python - "$OUT/shards" "$NWORKERS" "$PILOT" "$INCLUDE_NOISE" "$BENCH" <<'PY'
 import json, os, sys
-import libero.libero as L
 
-shard_dir, nworkers, pilot, include_noise = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
-cls_path = os.path.join(os.path.dirname(L.__file__), "benchmark", "task_classification.json")
-data = json.load(open(cls_path))
-NOISE = "Sensor Noise"
+shard_dir, nworkers, pilot, include_noise, bench = (
+    sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5])
 
-# 展平:每项 {suite, task_id(0-based = id-1), name, category, difficulty_level}
 cases = []
-for suite, lst in data.items():
-    for t in lst:
-        if (not include_noise) and t.get("category") == NOISE:
-            continue
-        cases.append({
-            "suite": suite,
-            "task_id": int(t["id"]) - 1,
-            "name": t.get("name"),
-            "category": t.get("category"),
-            "difficulty_level": t.get("difficulty_level"),
-        })
-
-# 按 (category, suite) 排序后 round-robin,让每个 factor/suite 均匀分到各 worker
-cases.sort(key=lambda c: (c["category"] or "", c["suite"], c["task_id"]))
+if bench == "libero":
+    # 原版标准 LIBERO:4 个 eval suite,task_id=0..n_tasks-1,无扰动、无 name(跳过 multi 自检)。
+    import libero.libero.benchmark as B
+    bench_dict = B.get_benchmark_dict()
+    for suite in ("libero_spatial", "libero_object", "libero_goal", "libero_10"):
+        n = bench_dict[suite]().n_tasks
+        for tid in range(n):
+            cases.append({"suite": suite, "task_id": tid, "name": None,
+                          "category": suite, "difficulty_level": None})
+    cases.sort(key=lambda c: (c["category"], c["task_id"]))
+else:
+    import libero.libero as L
+    cls_path = os.path.join(os.path.dirname(L.__file__), "benchmark", "task_classification.json")
+    data = json.load(open(cls_path))
+    NOISE = "Sensor Noise"
+    # 展平:每项 {suite, task_id(0-based = id-1), name, category, difficulty_level}
+    for suite, lst in data.items():
+        for t in lst:
+            if (not include_noise) and t.get("category") == NOISE:
+                continue
+            cases.append({
+                "suite": suite,
+                "task_id": int(t["id"]) - 1,
+                "name": t.get("name"),
+                "category": t.get("category"),
+                "difficulty_level": t.get("difficulty_level"),
+            })
+    # 按 (category, suite) 排序后 round-robin,让每个 factor/suite 均匀分到各 worker
+    cases.sort(key=lambda c: (c["category"] or "", c["suite"], c["task_id"]))
 
 if pilot > 0:
     # 跨 factor 均匀取 pilot 个:按排序后等距抽样
@@ -174,7 +208,7 @@ for ((w=0; w<NWORKERS; w++)); do
         model.vae_memory.enabled=$VAE_MEM \
         model.vae_memory.dit_prepend=$DIT_PREPEND \
         data.train.history_video_frames="$HISTORY" \
-        EVALUATION.num_trials=1 \
+        EVALUATION.num_trials=$TRIALS \
         +EVALUATION.save_video=false \
         +EVALUATION.task_list_file="$SHARD" \
         EVALUATION.dataset_stats_path="$STATS" \

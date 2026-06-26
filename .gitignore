@@ -15,7 +15,9 @@ Mem.pdf
 # ai coding
 .codex/
 .claude/
+.agents/
 CLAUDE.md
+AGENTS.md
 
 # Data types
 *.jit
