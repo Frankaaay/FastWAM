@@ -1,4 +1,4 @@
-"""Smoke test for the MEM-stage2-v2 fold-current adapter.
+"""Smoke test for the MEM-stage3 fold-current adapter.
 
 Runs CPU-only on a tiny randomly-initialised WanVideoDiT (no pretrained weights,
 air-gapped friendly). Verifies the design invariants that make the fold-current

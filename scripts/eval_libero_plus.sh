@@ -89,7 +89,7 @@ VAE_MEM=${VAE_MEM:-true}
 # DIT_PREPEND=true,模型才会走「冻结 VAE plain-encode 历史 -> prepend 到 video 序列」
 # 的推理路径(runtime.py: dit_history_memory);默认 false 保持 stage1 行为不变。
 DIT_PREPEND=${DIT_PREPEND:-false}
-# MEM-stage2-v2(fold-current 路线)开关,与 VAE_MEM / DIT_PREPEND 三者互斥。fold eval 必须
+# MEM-stage3(fold-current 路线)开关,与 VAE_MEM / DIT_PREPEND 三者互斥。fold eval 必须
 # VAE_MEM=false DIT_PREPEND=false DIT_FOLD_CURRENT=true,模型才会走「冻结 VAE plain-encode
 # 历史 -> TemporalFoldAdapter 折进 current 帧并丢弃历史帧」的推理路径(runtime.py:
 # dit_fold_current);默认 false 保持既有行为不变。

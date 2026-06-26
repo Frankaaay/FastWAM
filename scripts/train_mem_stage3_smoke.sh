@@ -1,6 +1,6 @@
 #!/bin/bash
 # ----------------------------------------------------------------------------
-# train_mem_stage2_v2_smoke.sh — MEM-stage2-v2 (fold-current) 1-step smoke test.
+# train_mem_stage3_smoke.sh — MEM-stage3 (fold-current) 1-step smoke test.
 #
 # Goal: catch shape / runtime errors in the fold-current path BEFORE a multi-GPU run.
 #
@@ -48,4 +48,4 @@ accelerate launch --config_file scripts/accelerate_configs/accelerate_zero1_ds.y
   log_every=1 \
   wandb.enabled=false \
   resume="$BASE_CKPT" \
-  output_dir=./runs/mem_stage2_v2_smoke
+  output_dir=./runs/mem_stage3_smoke

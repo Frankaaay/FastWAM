@@ -84,7 +84,7 @@ class Wan22Trainer:
         # memory mode) as trainable when ZeRO builds optimizer state.
         self._apply_dit_only_train_mode(self.model)
         if self._is_vae_memory_mode(self.model) or self._is_fold_current_mode(self.model):
-            # MEM-style memory finetune (VAE temporal params, or the MEM-stage2-v2
+            # MEM-style memory finetune (VAE temporal params, or the MEM-stage3
             # fold-current adapter). Mirror exactly what `_apply_dit_only_train_mode`
             # unfroze by collecting every param with requires_grad=True (avoids drift
             # between the freeze logic and the optimizer param group).
@@ -364,7 +364,7 @@ class Wan22Trainer:
             )
             return
         if Wan22Trainer._is_fold_current_mode(model):
-            # MEM-stage2-v2 fold-current: freeze the ENTIRE base model and train ONLY
+            # MEM-stage3 fold-current: freeze the ENTIRE base model and train ONLY
             # the fold adapter (additive, zero-init). This preserves the baseline by
             # construction (gate=0 -> identity at step 0; frozen base -> rollout
             # stability) while letting short-term visual history influence the action.
@@ -384,7 +384,7 @@ class Wan22Trainer:
             model.dit.train()
             adapter.requires_grad_(True)
             n_fold = sum(1 for _ in adapter.parameters())
-            logger.info("MEM-stage2-v2 fold-current mode: unfroze %d fold-adapter param tensors.", n_fold)
+            logger.info("MEM-stage3 fold-current mode: unfroze %d fold-adapter param tensors.", n_fold)
             return
         model.eval()
         model.requires_grad_(False)

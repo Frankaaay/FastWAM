@@ -76,7 +76,7 @@ class FastWAM(torch.nn.Module):
         # `vae_memory_enabled` (the old encode_memory path), but both gate the same
         # `history_video` data supply.
         self.dit_history_memory_enabled = bool(dit_history_memory)
-        # MEM-stage2-v2 fold-current: the frozen VAE plain-encodes the history frames
+        # MEM-stage3 fold-current: the frozen VAE plain-encodes the history frames
         # (same supply as the prepend path), but instead of leaving them in the MoT
         # sequence, the video expert's `TemporalFoldAdapter` folds them into the
         # current frame's tokens and DROPS the history frames. The MoT / action
@@ -214,7 +214,7 @@ class FastWAM(torch.nn.Module):
             # inert until trained.
             video_expert.enable_history_fold(max_history_frames=int(fold_max_history_frames))
             logger.info(
-                "MEM-stage2-v2: attached TemporalFoldAdapter (max_history_frames=%d).",
+                "MEM-stage3: attached TemporalFoldAdapter (max_history_frames=%d).",
                 int(fold_max_history_frames),
             )
         action_expert = ActionDiT.from_pretrained(
@@ -1222,7 +1222,7 @@ class FastWAM(torch.nn.Module):
             video_in = torch.cat([history_latents, current_latent], dim=2)
             seq_history = num_history_frames
         elif self.dit_fold_current_enabled and history_images is not None:
-            # MEM-stage2-v2 fold-current: plain-encode history + current, concat them
+            # MEM-stage3 fold-current: plain-encode history + current, concat them
             # so `pre_dit` can fold history into the current frame and drop it. The
             # post-fold token sequence is the base layout (single current frame), so
             # the MoT mask uses seq_history = 0 and the action expert reads the base

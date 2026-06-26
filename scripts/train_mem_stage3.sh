@@ -1,6 +1,6 @@
 #!/bin/bash
 # ----------------------------------------------------------------------------
-# train_mem_stage2_v2.sh — MEM-stage2-v2(fold-current 路线)正式训练。
+# train_mem_stage3.sh — MEM-stage3(fold-current 路线)正式训练。
 #
 # 命名:stage2 = DiT-side 短时记忆路线;v2 = fold-current(在 stage2-v1 prepend 之上的改进)。
 #
@@ -22,7 +22,7 @@
 #
 # ⚠️ 先跑 smoke 再上多卡:
 #    python scripts/test_fold_current.py            # 无数据、秒级:验证 gate=0≡base 等不变性
-#    bash scripts/train_mem_stage2_v2_smoke.sh       # 1 step、真数据:验证训练 forward/backward
+#    bash scripts/train_mem_stage3_smoke.sh       # 1 step、真数据:验证训练 forward/backward
 # ----------------------------------------------------------------------------
 set -e
 source /opt/miniconda3/etc/profile.d/conda.sh
@@ -42,7 +42,7 @@ FOLD_DROPOUT=${FOLD_DROPOUT:-0.4}
 
 # Auto-resume:有 DeepSpeed state 就续(ZeRO 续训必须保持同卡数);否则从 base 冷启动
 # (base mem-off 49.83;strict=False 加载,fold adapter fresh-init + 零门控 → 起点==base)。
-LATEST_STATE=$(ls -d runs/mem_stage2_v2/checkpoints/state/step_* 2>/dev/null | sort -V | tail -1)
+LATEST_STATE=$(ls -d runs/mem_stage3/checkpoints/state/step_* 2>/dev/null | sort -V | tail -1)
 if [ -n "$LATEST_STATE" ]; then
   RESUME="$LATEST_STATE"
   echo "[resume] continuing training state from $RESUME (须保持同卡数)"
@@ -73,6 +73,6 @@ accelerate launch --config_file scripts/accelerate_configs/accelerate_zero1_ds.y
   wandb.mode=offline \
   wandb.workspace=yichx14-uc-irvine \
   wandb.project=fastwam-mem \
-  wandb.name=mem_stage2_v2 \
+  wandb.name=mem_stage3 \
   resume="$RESUME" \
-  output_dir=./runs/mem_stage2_v2
+  output_dir=./runs/mem_stage3

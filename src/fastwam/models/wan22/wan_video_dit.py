@@ -308,7 +308,7 @@ class Head(nn.Module):
 
 
 class TemporalFoldAdapter(nn.Module):
-    """Fold short-term visual history into the current frame's tokens (MEM-stage2-v2).
+    """Fold short-term visual history into the current frame's tokens (MEM-stage3).
 
     Runs in DiT token space (right after ``patch_embedding``). The patchified video
     grid is laid out along the temporal axis as
@@ -482,7 +482,7 @@ class WanVideoDiT(torch.nn.Module):
             
 
     def enable_history_fold(self, max_history_frames: int = 8):
-        """Attach the MEM-stage2-v2 fold-current memory adapter (additive, zero-init).
+        """Attach the MEM-stage3 fold-current memory adapter (additive, zero-init).
 
         Idempotent. The adapter folds prepended history frames into the current
         frame's tokens inside ``pre_dit`` and drops the history frames, so the rest
@@ -705,7 +705,7 @@ class WanVideoDiT(torch.nn.Module):
             )
         tokens_per_frame = (x.shape[3] // patch_h) * (x.shape[4] // patch_w)
 
-        # MEM-stage2-v2 fold-current: when the fold adapter is attached and history
+        # MEM-stage3 fold-current: when the fold adapter is attached and history
         # frames are prepended, patch-embed the full [history, current, future]
         # stack, fold history into the current frame, then DROP the history frames.
         # After this `x` is already patchified and `num_history_frames` is consumed,
