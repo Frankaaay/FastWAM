@@ -521,27 +521,40 @@ class WanVideoDiT(torch.nn.Module):
         context: torch.Tensor,
         context_mask: Optional[torch.Tensor],
         action: Optional[torch.Tensor],
+        num_history_frames: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if x.ndim != 5:
             raise ValueError(f"`latents` must be 5D [B, C, T, H, W], got shape {tuple(x.shape)}")
         num_latent_frames = x.shape[2]
+        # History frames (DiT-side memory: prepend / fold-current) are conditioning
+        # only — they carry no action. The action horizon maps onto the
+        # current+future transitions, so validate against the post-history frame
+        # count `num_current_frames`, not the raw stack length. With
+        # num_history_frames=0 this is exactly the base behaviour.
+        num_current_frames = num_latent_frames - int(num_history_frames)
+        if num_current_frames < 1:
+            raise ValueError(
+                f"num_history_frames={num_history_frames} leaves no current frame "
+                f"(num_latent_frames={num_latent_frames})"
+            )
         if context.ndim != 3:
             raise ValueError(f"`context` must be 3D [B, L, D], got shape {tuple(context.shape)}")
         if timestep.ndim != 1:
             raise ValueError(f"`timestep` must be 1D [B] or [1], got shape {tuple(timestep.shape)}")
         if self.action_conditioned:
-            allow_text_only_single_frame = (num_latent_frames == 1 and action is None)
+            allow_text_only_single_frame = (num_current_frames == 1 and action is None)
             if not allow_text_only_single_frame:
                 assert action is not None, "Action input is required for action-conditioned model."
                 if action.ndim != 3:
                     raise ValueError(f"`action` must be 3D [B, action_horizon, action_dim], got shape {tuple(action.shape)}")
                 if action.shape[2] != self.action_dim:
                     raise ValueError(f"`action` last dimension must be {self.action_dim}, got {action.shape[2]}")
-                if num_latent_frames <= 1:
-                    raise ValueError(f"video length must be > 1 for action-conditioned model, got {num_latent_frames}")
-                if action.shape[1] % (num_latent_frames - 1) != 0:
+                if num_current_frames <= 1:
+                    raise ValueError(f"video length must be > 1 for action-conditioned model, got {num_current_frames} current frame(s)")
+                if action.shape[1] % (num_current_frames - 1) != 0:
                     raise ValueError(
-                        f"action horizon must be divisible by (num_latent_frames - 1), got action_horizon={action.shape[1]}"
+                        f"action horizon must be divisible by (num_current_frames - 1), "
+                        f"got action_horizon={action.shape[1]}, num_current_frames={num_current_frames}"
                     )
         if context_mask is None:
             context_mask = torch.ones((context.shape[0], context.shape[1]), dtype=torch.bool, device=context.device)
@@ -679,6 +692,7 @@ class WanVideoDiT(torch.nn.Module):
             context=context,
             context_mask=context_mask,
             action=action,
+            num_history_frames=num_history_frames,
         )
 
         batch_size = x.shape[0]
