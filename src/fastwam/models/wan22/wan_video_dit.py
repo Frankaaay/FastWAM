@@ -384,6 +384,8 @@ class WanVideoDiT(torch.nn.Module):
         ])
         self.head = Head(hidden_dim, out_dim, patch_size, eps)
         self.freqs = precompute_freqs_cis_3d(attn_head_dim)
+        self.source_embedding = nn.Embedding(4, hidden_dim)
+        self.source_embedding_gate = nn.Parameter(torch.zeros(()))
         if has_ref_conv:
             self.ref_conv = nn.Conv2d(16, hidden_dim, kernel_size=(2, 2), stride=(2, 2))
         self.has_image_pos_emb = has_image_pos_emb
@@ -397,6 +399,75 @@ class WanVideoDiT(torch.nn.Module):
         self.use_gradient_checkpointing = use_gradient_checkpointing
         if self.use_gradient_checkpointing:
             logger.info("Using gradient checkpointing for DiT blocks. This will save memory but use more computation.")
+
+    def _normalize_temporal_position_ids(
+        self,
+        temporal_position_ids: torch.Tensor,
+        num_latent_frames: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if temporal_position_ids.ndim != 1:
+            raise ValueError(
+                "`temporal_position_ids` must be 1D [F] for shared video RoPE positions, "
+                f"got shape {tuple(temporal_position_ids.shape)}"
+            )
+        if temporal_position_ids.shape[0] != num_latent_frames:
+            raise ValueError(
+                f"`temporal_position_ids` length must be num_latent_frames({num_latent_frames}), "
+                f"got {temporal_position_ids.shape[0]}"
+            )
+        temporal_position_ids = temporal_position_ids.to(device=device, dtype=torch.long)
+        if temporal_position_ids.numel() > 0:
+            min_pos = int(temporal_position_ids.min().item())
+            max_pos = int(temporal_position_ids.max().item())
+            if min_pos < 0 or max_pos >= self.freqs[0].shape[0]:
+                raise ValueError(
+                    f"`temporal_position_ids` must be in [0, {self.freqs[0].shape[0]}), "
+                    f"got [{min_pos}, {max_pos}]"
+                )
+        return temporal_position_ids
+
+    def _normalize_video_source_ids(
+        self,
+        source_ids: torch.Tensor,
+        batch_size: int,
+        num_latent_frames: int,
+        tokens_per_frame: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        seq_len = num_latent_frames * tokens_per_frame
+        if source_ids.ndim == 1:
+            if source_ids.shape[0] == num_latent_frames:
+                source_ids = source_ids.view(1, num_latent_frames, 1).expand(
+                    batch_size, -1, tokens_per_frame
+                ).reshape(batch_size, seq_len)
+            elif source_ids.shape[0] == seq_len:
+                source_ids = source_ids.unsqueeze(0).expand(batch_size, -1)
+            else:
+                raise ValueError(
+                    f"`source_ids` length must be num_latent_frames({num_latent_frames}) "
+                    f"or seq_len({seq_len}), got {source_ids.shape[0]}"
+                )
+        elif source_ids.ndim == 2:
+            if source_ids.shape == (batch_size, num_latent_frames):
+                source_ids = source_ids.unsqueeze(-1).expand(-1, -1, tokens_per_frame).reshape(
+                    batch_size, seq_len
+                )
+            elif source_ids.shape != (batch_size, seq_len):
+                raise ValueError(
+                    f"`source_ids` must be [B, F] or [B, S], got {tuple(source_ids.shape)}"
+                )
+        else:
+            raise ValueError(f"`source_ids` must be 1D or 2D, got shape {tuple(source_ids.shape)}")
+        source_ids = source_ids.to(device=device, dtype=torch.long)
+        if source_ids.numel() > 0:
+            min_id = int(source_ids.min().item())
+            max_id = int(source_ids.max().item())
+            if min_id < 0 or max_id >= self.source_embedding.num_embeddings:
+                raise ValueError(
+                    f"`source_ids` must be in [0, {self.source_embedding.num_embeddings}), got [{min_id}, {max_id}]"
+                )
+        return source_ids
             
 
     def patchify(self, x: torch.Tensor, control_camera_latents_input: Optional[torch.Tensor] = None):
@@ -421,6 +492,7 @@ class WanVideoDiT(torch.nn.Module):
         context: torch.Tensor,
         context_mask: Optional[torch.Tensor],
         action: Optional[torch.Tensor],
+        allow_missing_action_condition: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if x.ndim != 5:
             raise ValueError(f"`latents` must be 5D [B, C, T, H, W], got shape {tuple(x.shape)}")
@@ -430,7 +502,9 @@ class WanVideoDiT(torch.nn.Module):
         if timestep.ndim != 1:
             raise ValueError(f"`timestep` must be 1D [B] or [1], got shape {tuple(timestep.shape)}")
         if self.action_conditioned:
-            allow_text_only_single_frame = (num_latent_frames == 1 and action is None)
+            allow_text_only_single_frame = (
+                action is None and (num_latent_frames == 1 or allow_missing_action_condition)
+            )
             if not allow_text_only_single_frame:
                 assert action is not None, "Action input is required for action-conditioned model."
                 if action.ndim != 3:
@@ -515,6 +589,9 @@ class WanVideoDiT(torch.nn.Module):
         action: Optional[torch.Tensor] = None,
         fuse_vae_embedding_in_latents: bool = False,
         control_camera_latents_input: Optional[torch.Tensor] = None,
+        source_ids: Optional[torch.Tensor] = None,
+        temporal_position_ids: Optional[torch.Tensor] = None,
+        allow_missing_action_condition: bool = False,
     ) -> Dict[str, Any]:
         x, timestep, context_mask = self._validate_forward_inputs(
             x=x,
@@ -522,6 +599,7 @@ class WanVideoDiT(torch.nn.Module):
             context=context,
             context_mask=context_mask,
             action=action,
+            allow_missing_action_condition=allow_missing_action_condition,
         )
 
         batch_size = x.shape[0]
@@ -589,7 +667,7 @@ class WanVideoDiT(torch.nn.Module):
             final_context_mask[:, tokens_per_frame:, context_len:] = action_group_mask.unsqueeze(0).expand(batch_size, -1, -1) # (B, seq_len, action_len)
             context_mask = final_context_mask
         elif self.action_conditioned and action is None:
-            if f != 1:
+            if f != 1 and not allow_missing_action_condition:
                 raise ValueError(
                     "Action-conditioned model requires `action` unless running single-frame text-only mode with num_latent_frames=1."
                 )
@@ -598,9 +676,27 @@ class WanVideoDiT(torch.nn.Module):
             context_mask = context_mask.unsqueeze(1).expand(-1, f * h * w, -1) # (B, seq_len, L)
 
         x_tokens = rearrange(x, "b c f h w -> b (f h w) c").contiguous()
+        if source_ids is not None:
+            source_ids = self._normalize_video_source_ids(
+                source_ids=source_ids,
+                batch_size=batch_size,
+                num_latent_frames=f,
+                tokens_per_frame=tokens_per_frame,
+                device=x_tokens.device,
+            )
+            x_tokens = x_tokens + self.source_embedding_gate.to(
+                device=x_tokens.device, dtype=x_tokens.dtype
+            ) * self.source_embedding(source_ids)
 
+        if temporal_position_ids is None:
+            temporal_freqs = self.freqs[0][:f]
+        else:
+            temporal_position_ids = self._normalize_temporal_position_ids(
+                temporal_position_ids, num_latent_frames=f, device=x_tokens.device
+            )
+            temporal_freqs = self.freqs[0][temporal_position_ids]
         freqs = torch.cat([
-            self.freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
+            temporal_freqs.view(f, 1, 1, -1).expand(f, h, w, -1),
             self.freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
             self.freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
         ], dim=-1).reshape(f * h * w, 1, -1).to(x_tokens.device)
@@ -633,6 +729,9 @@ class WanVideoDiT(torch.nn.Module):
         context_mask: Optional[torch.Tensor] = None,
         action: Optional[torch.Tensor] = None,
         fuse_vae_embedding_in_latents: bool = False,
+        source_ids: Optional[torch.Tensor] = None,
+        temporal_position_ids: Optional[torch.Tensor] = None,
+        allow_missing_action_condition: bool = False,
     ):
         pre_state = self.pre_dit(
             x=x,
@@ -641,6 +740,9 @@ class WanVideoDiT(torch.nn.Module):
             context_mask=context_mask,
             action=action,
             fuse_vae_embedding_in_latents=fuse_vae_embedding_in_latents,
+            source_ids=source_ids,
+            temporal_position_ids=temporal_position_ids,
+            allow_missing_action_condition=allow_missing_action_condition,
         )
         x_tokens = pre_state["tokens"]
         context_emb = pre_state["context"]

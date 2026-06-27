@@ -299,6 +299,10 @@ class Wan22Trainer:
         video = sample["video"]
         prompt = sample["prompt"]
         action = sample.get("action", None)
+        history_video = sample.get("history_video", None)
+        history_action = sample.get("history_action", None)
+        history_video_is_pad = sample.get("history_video_is_pad", None)
+        history_action_is_pad = sample.get("history_action_is_pad", None)
         proprio = sample.get("proprio", None)
         context = sample.get("context", None)
         context_mask = sample.get("context_mask", None)
@@ -341,6 +345,63 @@ class Wan22Trainer:
                 raise ValueError(f"`sample['action']` temporal dimension must be divisible by video frames-1={num_video_frames - 1}, got {action.shape[1]}")
             action_horizon = int(action.shape[1])
 
+        if history_video is not None:
+            if not isinstance(history_video, torch.Tensor):
+                raise TypeError(f"`sample['history_video']` must be a torch.Tensor, got {type(history_video)}")
+            if history_video.ndim == 4:
+                history_video = history_video.unsqueeze(0)
+            if history_video.ndim != 5:
+                raise ValueError(
+                    f"`sample['history_video']` must be 5D [B,3,T,H,W], got shape {tuple(history_video.shape)}"
+                )
+            if history_video.shape[0] != video.shape[0] or history_video.shape[1] != 3:
+                raise ValueError(
+                    "`sample['history_video']` batch/channel mismatch: "
+                    f"got {tuple(history_video.shape)} vs video batch={video.shape[0]}"
+                )
+
+        if history_action is not None:
+            if not isinstance(history_action, torch.Tensor):
+                raise TypeError(f"`sample['history_action']` must be a torch.Tensor, got {type(history_action)}")
+            if history_action.ndim == 2:
+                history_action = history_action.unsqueeze(0)
+            if history_action.ndim != 3:
+                raise ValueError(
+                    f"`sample['history_action']` must be 3D [B,T,a_dim], got shape {tuple(history_action.shape)}"
+                )
+            if history_action.shape[0] != video.shape[0]:
+                raise ValueError(
+                    f"`sample['history_action']` batch mismatch: got {history_action.shape[0]} vs video batch={video.shape[0]}"
+                )
+
+        if history_video_is_pad is not None:
+            if not isinstance(history_video_is_pad, torch.Tensor):
+                raise TypeError(
+                    f"`sample['history_video_is_pad']` must be a torch.Tensor, got {type(history_video_is_pad)}"
+                )
+            if history_video_is_pad.ndim == 1:
+                history_video_is_pad = history_video_is_pad.unsqueeze(0)
+            if history_video is None or history_video_is_pad.shape != history_video.shape[:1] + history_video.shape[2:3]:
+                expected = None if history_video is None else history_video.shape[:1] + history_video.shape[2:3]
+                raise ValueError(
+                    "`sample['history_video_is_pad']` shape mismatch: "
+                    f"got {tuple(history_video_is_pad.shape)} vs expected {expected}"
+                )
+
+        if history_action_is_pad is not None:
+            if not isinstance(history_action_is_pad, torch.Tensor):
+                raise TypeError(
+                    f"`sample['history_action_is_pad']` must be a torch.Tensor, got {type(history_action_is_pad)}"
+                )
+            if history_action_is_pad.ndim == 1:
+                history_action_is_pad = history_action_is_pad.unsqueeze(0)
+            if history_action is None or history_action_is_pad.shape != history_action.shape[:2]:
+                expected = None if history_action is None else history_action.shape[:2]
+                raise ValueError(
+                    "`sample['history_action_is_pad']` shape mismatch: "
+                    f"got {tuple(history_action_is_pad.shape)} vs expected {expected}"
+                )
+
         proprio = None
         if "proprio" in sample:
             proprio = sample["proprio"]
@@ -367,6 +428,10 @@ class Wan22Trainer:
             "video": video,
             "prompt": prompt,
             "action": action,
+            "history_video": history_video,
+            "history_action": history_action,
+            "history_video_is_pad": history_video_is_pad,
+            "history_action_is_pad": history_action_is_pad,
             "proprio": proprio,
             "context": context,
             "context_mask": context_mask,
@@ -395,6 +460,14 @@ class Wan22Trainer:
         prompt = sample["prompt"][0]
         video0 = sample["video"][0] # Tensor [3, T, H, W] in (-1, 1)
         action = sample["action"][0] if "action" in sample and sample["action"] is not None else None
+        history_video = sample["history_video"][0] if sample.get("history_video") is not None else None
+        history_action = sample["history_action"][0] if sample.get("history_action") is not None else None
+        history_video_is_pad = (
+            sample["history_video_is_pad"][0] if sample.get("history_video_is_pad") is not None else None
+        )
+        history_action_is_pad = (
+            sample["history_action_is_pad"][0] if sample.get("history_action_is_pad") is not None else None
+        )
         proprio = sample["proprio"][0, 0] if "proprio" in sample and sample["proprio"] is not None else None # from [1, T, d] to [d]
         input_image = video0[:, 0].unsqueeze(0)
         _, num_frames, _, _ = video0.shape
@@ -412,6 +485,15 @@ class Wan22Trainer:
             "seed": 42,
             "tiled": False,
         }
+        if getattr(model, "enable_mem_stage_v4", False):
+            infer_kwargs.update(
+                {
+                    "history_video": history_video,
+                    "history_action": history_action,
+                    "history_video_is_pad": history_video_is_pad,
+                    "history_action_is_pad": history_action_is_pad,
+                }
+            )
         if sample["context"] is not None:
             infer_kwargs["prompt"] = None
             infer_kwargs["context"] = sample["context"][0]

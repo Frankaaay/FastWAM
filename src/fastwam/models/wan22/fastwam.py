@@ -17,6 +17,13 @@ logger = get_logger(__name__)
 
 class FastWAM(torch.nn.Module):
     """MoT world model with video/action experts."""
+    SOURCE_HISTORY_VIDEO = 0
+    SOURCE_CURRENT_VIDEO = 1
+    SOURCE_HISTORY_ACTION = 2
+    SOURCE_FUTURE_ACTION = 3
+    HISTORY_ACTION_LEN = 20
+    CURRENT_TIMELINE_INDEX = 20
+    HISTORY_CONDITION_DROPOUT = 0.2
 
     def __init__(
         self,
@@ -84,6 +91,10 @@ class FastWAM(torch.nn.Module):
         self.torch_dtype = torch_dtype
         self.loss_lambda_video = float(loss_lambda_video)
         self.loss_lambda_action = float(loss_lambda_action)
+        self.history_action_len = self.HISTORY_ACTION_LEN
+        self.current_timeline_index = self.CURRENT_TIMELINE_INDEX
+        self.history_condition_dropout = self.HISTORY_CONDITION_DROPOUT
+        self.enable_mem_stage_v4 = self.__class__ is FastWAM
 
         self.to(self.device)
 
@@ -333,9 +344,70 @@ class FastWAM(torch.nn.Module):
                     "`sample['image_is_pad']` shape mismatch: "
                     f"got {tuple(image_is_pad.shape)} vs expected ({batch_size}, {num_frames})"
                 )
+
+        history_video = sample.get("history_video", None) if self.enable_mem_stage_v4 else None
+        history_video_is_pad = sample.get("history_video_is_pad", None) if self.enable_mem_stage_v4 else None
+        if history_video is not None:
+            if history_video.ndim != 5:
+                raise ValueError(
+                    f"`sample['history_video']` must be 5D [B, 3, T, H, W], got shape {tuple(history_video.shape)}"
+                )
+            if history_video.shape[0] != batch_size or history_video.shape[1] != 3:
+                raise ValueError(
+                    "`sample['history_video']` shape mismatch: "
+                    f"got {tuple(history_video.shape)} vs expected batch={batch_size}, channels=3"
+                )
+            if history_video.shape[3] != height or history_video.shape[4] != width:
+                raise ValueError(
+                    "`sample['history_video']` spatial shape must match `sample['video']`, "
+                    f"got {tuple(history_video.shape[3:])} vs {(height, width)}"
+                )
+            if history_video.shape[2] % 4 != 1:
+                raise ValueError(
+                    f"`sample['history_video']` T must satisfy T % 4 == 1, got T={history_video.shape[2]}"
+                )
+            if history_video_is_pad is not None:
+                if history_video_is_pad.ndim != 2:
+                    raise ValueError(
+                        "`sample['history_video_is_pad']` must be 2D [B, T], "
+                        f"got shape {tuple(history_video_is_pad.shape)}"
+                    )
+                if history_video_is_pad.shape != (batch_size, history_video.shape[2]):
+                    raise ValueError(
+                        "`sample['history_video_is_pad']` shape mismatch: "
+                        f"got {tuple(history_video_is_pad.shape)} vs expected {(batch_size, history_video.shape[2])}"
+                    )
+
+        history_action = sample.get("history_action", None) if self.enable_mem_stage_v4 else None
+        history_action_is_pad = sample.get("history_action_is_pad", None) if self.enable_mem_stage_v4 else None
+        if history_action is not None:
+            if history_action.ndim != 3:
+                raise ValueError(
+                    f"`sample['history_action']` must be 3D [B, T, a_dim], got shape {tuple(history_action.shape)}"
+                )
+            if history_action.shape[0] != batch_size or history_action.shape[2] != action.shape[2]:
+                raise ValueError(
+                    "`sample['history_action']` shape mismatch: "
+                    f"got {tuple(history_action.shape)} vs batch={batch_size}, action_dim={action.shape[2]}"
+                )
+            if history_action_is_pad is not None:
+                if history_action_is_pad.ndim != 2:
+                    raise ValueError(
+                        "`sample['history_action_is_pad']` must be 2D [B, T], "
+                        f"got shape {tuple(history_action_is_pad.shape)}"
+                    )
+                if history_action_is_pad.shape != history_action.shape[:2]:
+                    raise ValueError(
+                        "`sample['history_action_is_pad']` shape mismatch: "
+                        f"got {tuple(history_action_is_pad.shape)} vs expected {tuple(history_action.shape[:2])}"
+                    )
         
         input_video = video.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
         input_latents = self._encode_video_latents(input_video, tiled=tiled)
+        history_video_latents = None
+        if history_video is not None:
+            history_video_input = history_video.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
+            history_video_latents = self._encode_video_latents(history_video_input, tiled=tiled)
 
         first_frame_latents = None
         fuse_flag = False
@@ -365,21 +437,31 @@ class FastWAM(torch.nn.Module):
                 proprio=proprio.to(device=self.device, dtype=self.torch_dtype),
             )
         action = action.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
+        if history_action is not None:
+            history_action = history_action.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
 
         if action_is_pad is not None:
             action_is_pad = action_is_pad.to(device=self.device, dtype=torch.bool, non_blocking=True)
         if image_is_pad is not None:
             image_is_pad = image_is_pad.to(device=self.device, dtype=torch.bool, non_blocking=True)
+        if history_video_is_pad is not None:
+            history_video_is_pad = history_video_is_pad.to(device=self.device, dtype=torch.bool, non_blocking=True)
+        if history_action_is_pad is not None:
+            history_action_is_pad = history_action_is_pad.to(device=self.device, dtype=torch.bool, non_blocking=True)
 
         return {
             "context": context,
             "context_mask": context_mask,
             "input_latents": input_latents,
+            "history_video_latents": history_video_latents,
             "first_frame_latents": first_frame_latents,
             "fuse_vae_embedding_in_latents": fuse_flag,
             "action": action,
+            "history_action": history_action,
             "action_is_pad": action_is_pad,
             "image_is_pad": image_is_pad,
+            "history_video_is_pad": history_video_is_pad,
+            "history_action_is_pad": history_action_is_pad,
         }
 
     @torch.no_grad()
@@ -445,8 +527,415 @@ class FastWAM(torch.nn.Module):
         valid_sum = valid.sum(dim=1).clamp(min=1.0)
         return (video_loss_token * valid).sum(dim=1) / valid_sum
 
+    def _action_source_ids(
+        self,
+        batch_size: int,
+        seq_len: int,
+        source_id: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        return torch.full((batch_size, seq_len), int(source_id), dtype=torch.long, device=device)
+
+    def _action_position_ids(self, seq_len: int, start: int, device: torch.device) -> torch.Tensor:
+        return torch.arange(start, start + seq_len, dtype=torch.long, device=device)
+
+    def _history_video_source_and_position_ids(
+        self,
+        num_latent_frames: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if num_latent_frames <= 0:
+            raise ValueError(f"`num_latent_frames` must be positive, got {num_latent_frames}")
+        source_ids = torch.full(
+            (num_latent_frames,),
+            self.SOURCE_HISTORY_VIDEO,
+            dtype=torch.long,
+            device=device,
+        )
+        source_ids[-1] = self.SOURCE_CURRENT_VIDEO
+        if num_latent_frames == 1:
+            position_ids = torch.tensor([self.current_timeline_index], dtype=torch.long, device=device)
+        else:
+            position_ids = torch.linspace(
+                4,
+                self.current_timeline_index,
+                steps=num_latent_frames,
+                device=device,
+            ).round().to(dtype=torch.long)
+            position_ids[-1] = self.current_timeline_index
+        return source_ids, position_ids
+
+    def _latent_valid_from_raw_pad(
+        self,
+        raw_is_pad: Optional[torch.Tensor],
+        num_latent_frames: int,
+        batch_size: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if raw_is_pad is None:
+            return torch.ones((batch_size, num_latent_frames), dtype=torch.bool, device=device)
+        if raw_is_pad.ndim != 2:
+            raise ValueError(f"`raw_is_pad` must be 2D [B,T], got shape {tuple(raw_is_pad.shape)}")
+        if raw_is_pad.shape[0] != batch_size:
+            raise ValueError(
+                f"`raw_is_pad` batch mismatch: got {raw_is_pad.shape[0]} vs expected {batch_size}"
+            )
+        raw_is_pad = raw_is_pad.to(device=device, dtype=torch.bool)
+        if raw_is_pad.shape[1] == num_latent_frames:
+            return ~raw_is_pad
+
+        temporal_factor = int(self.vae.temporal_downsample_factor)
+        if temporal_factor <= 0:
+            raise ValueError(f"`vae.temporal_downsample_factor` must be positive, got {temporal_factor}.")
+        if raw_is_pad.shape[1] < 1 or (raw_is_pad.shape[1] - 1) % temporal_factor != 0:
+            raise ValueError(
+                "Cannot align raw padding mask with latent video steps: "
+                f"raw_steps={raw_is_pad.shape[1]}, temporal_downsample_factor={temporal_factor}."
+            )
+        latent_steps = 1 + (raw_is_pad.shape[1] - 1) // temporal_factor
+        if latent_steps != num_latent_frames:
+            raise ValueError(
+                "Raw padding mask latent length mismatch: "
+                f"mask_latent_steps={latent_steps} vs latent_frames={num_latent_frames}."
+            )
+        tail_is_pad = raw_is_pad[:, 1:]
+        latent_tail_is_pad = tail_is_pad.view(raw_is_pad.shape[0], -1, temporal_factor).all(dim=2)
+        latent_is_pad = torch.cat([raw_is_pad[:, :1], latent_tail_is_pad], dim=1)
+        return ~latent_is_pad
+
+    @staticmethod
+    def _latent_valid_to_token_valid(latent_valid: torch.Tensor, tokens_per_frame: int) -> torch.Tensor:
+        if latent_valid.ndim != 2:
+            raise ValueError(f"`latent_valid` must be 2D [B,F], got shape {tuple(latent_valid.shape)}")
+        if tokens_per_frame <= 0:
+            raise ValueError(f"`tokens_per_frame` must be positive, got {tokens_per_frame}")
+        return latent_valid.repeat_interleave(tokens_per_frame, dim=1)
+
+    def _condition_dropout_masks(
+        self,
+        batch_size: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.training and self.history_condition_dropout > 0:
+            drop_video = torch.rand((batch_size,), device=device) < self.history_condition_dropout
+            drop_action = torch.rand((batch_size,), device=device) < self.history_condition_dropout
+        else:
+            drop_video = torch.zeros((batch_size,), dtype=torch.bool, device=device)
+            drop_action = torch.zeros((batch_size,), dtype=torch.bool, device=device)
+        return drop_video, drop_action
+
+    @staticmethod
+    def _concat_kv_caches(*caches: list[dict[str, torch.Tensor]]) -> list[dict[str, torch.Tensor]]:
+        caches = [cache for cache in caches if cache]
+        if not caches:
+            raise ValueError("At least one KV cache is required.")
+        num_layers = len(caches[0])
+        for cache in caches:
+            if len(cache) != num_layers:
+                raise ValueError("All KV caches must have the same number of layers.")
+        combined: list[dict[str, torch.Tensor]] = []
+        for layer_idx in range(num_layers):
+            combined.append(
+                {
+                    "k": torch.cat([cache[layer_idx]["k"] for cache in caches], dim=1),
+                    "v": torch.cat([cache[layer_idx]["v"] for cache in caches], dim=1),
+                }
+            )
+        return combined
+
+    def _compute_action_loss(
+        self,
+        pred_action: torch.Tensor,
+        target_action: torch.Tensor,
+        action_is_pad: Optional[torch.Tensor],
+        timestep_action: torch.Tensor,
+    ) -> torch.Tensor:
+        action_loss_token = F.mse_loss(pred_action.float(), target_action.float(), reduction="none").mean(dim=2)
+        if action_is_pad is not None:
+            valid = (~action_is_pad).to(device=action_loss_token.device, dtype=action_loss_token.dtype)
+            valid_sum = valid.sum(dim=1).clamp(min=1.0)
+            action_loss_per_sample = (action_loss_token * valid).sum(dim=1) / valid_sum
+        else:
+            action_loss_per_sample = action_loss_token.mean(dim=1)
+
+        action_weight = self.train_action_scheduler.training_weight(timestep_action).to(
+            action_loss_per_sample.device, dtype=action_loss_per_sample.dtype
+        )
+        return (action_loss_per_sample * action_weight).mean()
+
+    def _training_loss_v4(self, inputs: dict[str, Any]):
+        input_latents = inputs["input_latents"]
+        history_video_latents = inputs["history_video_latents"]
+        history_action = inputs["history_action"]
+        if history_video_latents is None or history_action is None:
+            raise ValueError("mem-stage-v4 training requires both `history_video` and `history_action`.")
+
+        batch_size = input_latents.shape[0]
+        context = inputs["context"]
+        context_mask = inputs["context_mask"]
+        action = inputs["action"]
+        action_is_pad = inputs["action_is_pad"]
+        image_is_pad = inputs["image_is_pad"]
+        history_video_is_pad = inputs["history_video_is_pad"]
+        history_action_is_pad = inputs["history_action_is_pad"]
+
+        noise_video = torch.randn_like(input_latents)
+        timestep_video = self.train_video_scheduler.sample_training_t(
+            batch_size=batch_size,
+            device=self.device,
+            dtype=input_latents.dtype,
+        )
+        latents = self.train_video_scheduler.add_noise(input_latents, noise_video, timestep_video)
+        target_video = self.train_video_scheduler.training_target(input_latents, noise_video, timestep_video)
+
+        if inputs["first_frame_latents"] is not None:
+            latents[:, :, 0:1] = inputs["first_frame_latents"]
+
+        noise_action = torch.randn_like(action)
+        timestep_action = self.train_action_scheduler.sample_training_t(
+            batch_size=batch_size,
+            device=self.device,
+            dtype=action.dtype,
+        )
+        noisy_action = self.train_action_scheduler.add_noise(action, noise_action, timestep_action)
+        target_action = self.train_action_scheduler.training_target(action, noise_action, timestep_action)
+
+        future_source_ids = self._action_source_ids(
+            batch_size=batch_size,
+            seq_len=action.shape[1],
+            source_id=self.SOURCE_FUTURE_ACTION,
+            device=action.device,
+        )
+        future_position_ids = self._action_position_ids(
+            seq_len=action.shape[1],
+            start=self.current_timeline_index,
+            device=action.device,
+        )
+
+        video_pre = self.video_expert.pre_dit(
+            x=latents,
+            timestep=timestep_video,
+            context=context,
+            context_mask=context_mask,
+            action=action,
+            fuse_vae_embedding_in_latents=inputs["fuse_vae_embedding_in_latents"],
+        )
+
+        action_pre_for_video = self.action_expert.pre_dit(
+            action_tokens=noisy_action,
+            timestep=timestep_action,
+            context=context,
+            context_mask=context_mask,
+            source_ids=future_source_ids,
+            position_ids=future_position_ids,
+        )
+
+        attention_mask = self._build_mot_attention_mask(
+            video_seq_len=video_pre["tokens"].shape[1],
+            action_seq_len=action_pre_for_video["tokens"].shape[1],
+            video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
+            device=video_pre["tokens"].device,
+        )
+        tokens_out = self.mot(
+            embeds_all={
+                "video": video_pre["tokens"],
+                "action": action_pre_for_video["tokens"],
+            },
+            attention_mask=attention_mask,
+            freqs_all={
+                "video": video_pre["freqs"],
+                "action": action_pre_for_video["freqs"],
+            },
+            context_all={
+                "video": {
+                    "context": video_pre["context"],
+                    "mask": video_pre["context_mask"],
+                },
+                "action": {
+                    "context": action_pre_for_video["context"],
+                    "mask": action_pre_for_video["context_mask"],
+                },
+            },
+            t_mod_all={
+                "video": video_pre["t_mod"],
+                "action": action_pre_for_video["t_mod"],
+            },
+        )
+
+        pred_video = self.video_expert.post_dit(tokens_out["video"], video_pre)
+        include_initial_video_step = inputs["first_frame_latents"] is None
+        if inputs["first_frame_latents"] is not None:
+            pred_video = pred_video[:, :, 1:]
+            target_video = target_video[:, :, 1:]
+
+        loss_video_per_sample = self._compute_video_loss_per_sample(
+            pred_video=pred_video,
+            target_video=target_video,
+            image_is_pad=image_is_pad,
+            include_initial_video_step=include_initial_video_step,
+        )
+        video_weight = self.train_video_scheduler.training_weight(timestep_video).to(
+            loss_video_per_sample.device, dtype=loss_video_per_sample.dtype
+        )
+        loss_video = (loss_video_per_sample * video_weight).mean()
+
+        clean_timestep = torch.zeros((batch_size,), device=self.device, dtype=history_video_latents.dtype)
+        video_source_ids, video_position_ids = self._history_video_source_and_position_ids(
+            num_latent_frames=history_video_latents.shape[2],
+            device=history_video_latents.device,
+        )
+        history_video_pre = self.video_expert.pre_dit(
+            x=history_video_latents,
+            timestep=clean_timestep,
+            context=context,
+            context_mask=context_mask,
+            action=None,
+            fuse_vae_embedding_in_latents=inputs["fuse_vae_embedding_in_latents"],
+            source_ids=video_source_ids,
+            temporal_position_ids=video_position_ids,
+            allow_missing_action_condition=True,
+        )
+        history_video_attention_mask = self.video_expert.build_video_to_video_mask(
+            video_seq_len=history_video_pre["tokens"].shape[1],
+            video_tokens_per_frame=int(history_video_pre["meta"]["tokens_per_frame"]),
+            device=history_video_pre["tokens"].device,
+        )
+        history_video_latent_valid = self._latent_valid_from_raw_pad(
+            raw_is_pad=history_video_is_pad,
+            num_latent_frames=history_video_latents.shape[2],
+            batch_size=batch_size,
+            device=history_video_latents.device,
+        )
+        history_video_token_valid = self._latent_valid_to_token_valid(
+            history_video_latent_valid,
+            tokens_per_frame=int(history_video_pre["meta"]["tokens_per_frame"]),
+        )
+
+        history_source_ids = self._action_source_ids(
+            batch_size=batch_size,
+            seq_len=history_action.shape[1],
+            source_id=self.SOURCE_HISTORY_ACTION,
+            device=history_action.device,
+        )
+        history_position_ids = self._action_position_ids(
+            seq_len=history_action.shape[1],
+            start=0,
+            device=history_action.device,
+        )
+        clean_action_timestep = torch.zeros((batch_size,), device=self.device, dtype=history_action.dtype)
+        history_action_pre = self.action_expert.pre_dit(
+            action_tokens=history_action,
+            timestep=clean_action_timestep,
+            context=context,
+            context_mask=context_mask,
+            source_ids=history_source_ids,
+            position_ids=history_position_ids,
+        )
+        if history_action_is_pad is None:
+            history_action_valid = torch.ones(
+                (batch_size, history_action.shape[1]),
+                dtype=torch.bool,
+                device=history_action.device,
+            )
+        else:
+            history_action_valid = ~history_action_is_pad
+
+        drop_history_video, drop_history_action = self._condition_dropout_masks(
+            batch_size=batch_size,
+            device=action.device,
+        )
+        video_history_latent = video_source_ids.eq(self.SOURCE_HISTORY_VIDEO).view(1, -1)
+        history_video_read_latent_valid = history_video_latent_valid & (
+            ~video_history_latent | ~drop_history_video.view(-1, 1)
+        )
+        history_video_read_token_valid = self._latent_valid_to_token_valid(
+            history_video_read_latent_valid,
+            tokens_per_frame=int(history_video_pre["meta"]["tokens_per_frame"]),
+        )
+        history_action_read_valid = history_action_valid & ~drop_history_action.view(-1, 1)
+
+        history_video_cache = self.mot.prefill_video_cache(
+            video_tokens=history_video_pre["tokens"],
+            video_freqs=history_video_pre["freqs"],
+            video_t_mod=history_video_pre["t_mod"],
+            video_context_payload={
+                "context": history_video_pre["context"],
+                "mask": history_video_pre["context_mask"],
+            },
+            video_attention_mask=history_video_attention_mask,
+            video_key_valid_mask=history_video_read_token_valid,
+        )
+        history_action_attention_mask = torch.ones(
+            (history_action.shape[1], history_action.shape[1]),
+            dtype=torch.bool,
+            device=history_action.device,
+        )
+        history_action_cache = self.mot.prefill_action_cache(
+            action_tokens=history_action_pre["tokens"],
+            action_freqs=history_action_pre["freqs"],
+            action_t_mod=history_action_pre["t_mod"],
+            action_context_payload={
+                "context": history_action_pre["context"],
+                "mask": history_action_pre["context_mask"],
+            },
+            action_attention_mask=history_action_attention_mask,
+            action_key_valid_mask=history_action_valid,
+        )
+        condition_cache = self._concat_kv_caches(history_video_cache, history_action_cache)
+        condition_key_valid = torch.cat(
+            [history_video_read_token_valid, history_action_read_valid],
+            dim=1,
+        )
+
+        action_pre = self.action_expert.pre_dit(
+            action_tokens=noisy_action,
+            timestep=timestep_action,
+            context=context,
+            context_mask=context_mask,
+            source_ids=future_source_ids,
+            position_ids=future_position_ids,
+        )
+        if action_is_pad is None:
+            action_key_valid = torch.ones(
+                (batch_size, action.shape[1]),
+                dtype=torch.bool,
+                device=action.device,
+            )
+        else:
+            action_key_valid = ~action_is_pad
+        action_tokens = self.mot.forward_action_with_condition_cache(
+            action_tokens=action_pre["tokens"],
+            action_freqs=action_pre["freqs"],
+            action_t_mod=action_pre["t_mod"],
+            action_context_payload={
+                "context": action_pre["context"],
+                "mask": action_pre["context_mask"],
+            },
+            condition_kv_cache=condition_cache,
+            condition_key_valid_mask=condition_key_valid,
+            action_key_valid_mask=action_key_valid,
+        )
+        pred_action = self.action_expert.post_dit(action_tokens, action_pre)
+        loss_action = self._compute_action_loss(
+            pred_action=pred_action,
+            target_action=target_action,
+            action_is_pad=action_is_pad,
+            timestep_action=timestep_action,
+        )
+
+        loss_total = self.loss_lambda_video * loss_video + self.loss_lambda_action * loss_action
+        loss_dict = {
+            "loss_video": self.loss_lambda_video * float(loss_video.detach().item()),
+            "loss_action": self.loss_lambda_action * float(loss_action.detach().item()),
+        }
+        return loss_total, loss_dict
+
     def training_loss(self, sample, tiled: bool = False):
         inputs = self.build_inputs(sample, tiled=tiled)
+        if self.enable_mem_stage_v4 and (
+            inputs["history_video_latents"] is not None or inputs["history_action"] is not None
+        ):
+            return self._training_loss_v4(inputs)
         input_latents = inputs["input_latents"]
         batch_size = input_latents.shape[0]
         context = inputs["context"]
@@ -723,6 +1212,55 @@ class FastWAM(torch.nn.Module):
         return self.action_expert.post_dit(action_tokens, action_pre)
 
     @torch.no_grad()
+    def _predict_action_noise_with_condition_cache(
+        self,
+        latents_action: torch.Tensor,
+        timestep_action: torch.Tensor,
+        context: torch.Tensor,
+        context_mask: torch.Tensor,
+        condition_kv_cache: list[dict[str, torch.Tensor]],
+        condition_key_valid_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size = latents_action.shape[0]
+        future_source_ids = self._action_source_ids(
+            batch_size=batch_size,
+            seq_len=latents_action.shape[1],
+            source_id=self.SOURCE_FUTURE_ACTION,
+            device=latents_action.device,
+        )
+        future_position_ids = self._action_position_ids(
+            seq_len=latents_action.shape[1],
+            start=self.current_timeline_index,
+            device=latents_action.device,
+        )
+        action_pre = self.action_expert.pre_dit(
+            action_tokens=latents_action,
+            timestep=timestep_action,
+            context=context,
+            context_mask=context_mask,
+            source_ids=future_source_ids,
+            position_ids=future_position_ids,
+        )
+        action_key_valid = torch.ones(
+            (batch_size, latents_action.shape[1]),
+            dtype=torch.bool,
+            device=latents_action.device,
+        )
+        action_tokens = self.mot.forward_action_with_condition_cache(
+            action_tokens=action_pre["tokens"],
+            action_freqs=action_pre["freqs"],
+            action_t_mod=action_pre["t_mod"],
+            action_context_payload={
+                "context": action_pre["context"],
+                "mask": action_pre["context_mask"],
+            },
+            condition_kv_cache=condition_kv_cache,
+            condition_key_valid_mask=condition_key_valid_mask,
+            action_key_valid_mask=action_key_valid,
+        )
+        return self.action_expert.post_dit(action_tokens, action_pre)
+
+    @torch.no_grad()
     def infer_joint(
         self,
         prompt: Optional[str],
@@ -730,6 +1268,10 @@ class FastWAM(torch.nn.Module):
         num_video_frames: int,
         action_horizon: int,
         action: Optional[torch.Tensor] = None, # NOTE: this is gt action for conditioning videos, not for action expert
+        history_video: Optional[torch.Tensor] = None,
+        history_action: Optional[torch.Tensor] = None,
+        history_video_is_pad: Optional[torch.Tensor] = None,
+        history_action_is_pad: Optional[torch.Tensor] = None,
         proprio: Optional[torch.Tensor] = None,
         context: Optional[torch.Tensor] = None,
         context_mask: Optional[torch.Tensor] = None,
@@ -743,13 +1285,27 @@ class FastWAM(torch.nn.Module):
         test_action_with_infer_action: bool = True,
     ) -> dict[str, Any]:
         self.eval()
-        if test_action_with_infer_action:
+        history_requested = history_video is not None or history_action is not None
+        if history_requested and not self.enable_mem_stage_v4:
+            raise ValueError("mem-stage-v4 history inference is only enabled for base FastWAM.")
+        use_history_action = self.enable_mem_stage_v4 and history_requested
+        should_run_action_only = test_action_with_infer_action or use_history_action
+        action_only_out = None
+        if should_run_action_only:
             if seed is None:
-                raise ValueError("`test_action_with_infer_action=True` requires non-null `seed`.")
+                raise ValueError("Action-only inference comparison/history path requires non-null `seed`.")
             action_only_out = self.infer_action(
                 prompt=prompt,
                 input_image=input_image.clone(),
                 action_horizon=action_horizon,
+                history_video=history_video.clone() if isinstance(history_video, torch.Tensor) else history_video,
+                history_action=history_action.clone() if isinstance(history_action, torch.Tensor) else history_action,
+                history_video_is_pad=(
+                    history_video_is_pad.clone() if isinstance(history_video_is_pad, torch.Tensor) else history_video_is_pad
+                ),
+                history_action_is_pad=(
+                    history_action_is_pad.clone() if isinstance(history_action_is_pad, torch.Tensor) else history_action_is_pad
+                ),
                 context=context.clone() if context is not None else None,
                 context_mask=context_mask.clone() if context_mask is not None else None,
                 num_inference_steps=num_inference_steps,
@@ -890,7 +1446,9 @@ class FastWAM(torch.nn.Module):
             latents_video[:, :, 0:1] = first_frame_latents.clone()
 
         action_out = latents_action[0].detach().to(device="cpu", dtype=torch.float32)
-        if test_action_with_infer_action:
+        if use_history_action:
+            action_out = action_only_out
+        elif test_action_with_infer_action:
             if not torch.allclose(action_out, action_only_out, atol=1e-2, rtol=1e-2):
                 max_abs_diff = (action_out - action_only_out).abs().max().item()
                 logger.warning(
@@ -908,6 +1466,10 @@ class FastWAM(torch.nn.Module):
         prompt: Optional[str],
         input_image: torch.Tensor,
         action_horizon: int,
+        history_video: Optional[torch.Tensor] = None,
+        history_action: Optional[torch.Tensor] = None,
+        history_video_is_pad: Optional[torch.Tensor] = None,
+        history_action_is_pad: Optional[torch.Tensor] = None,
         proprio: Optional[torch.Tensor] = None,
         context: Optional[torch.Tensor] = None,
         context_mask: Optional[torch.Tensor] = None,
@@ -990,36 +1552,186 @@ class FastWAM(torch.nn.Module):
                 proprio=proprio,
             )
 
-        timestep_video = torch.zeros(
-            (first_frame_latents.shape[0],),
-            dtype=first_frame_latents.dtype,
-            device=self.device,
-        )
-        video_pre = self.video_expert.pre_dit(
-            x=first_frame_latents,
-            timestep=timestep_video,
-            context=context,
-            context_mask=context_mask,
-            action=None,
-            fuse_vae_embedding_in_latents=fuse_flag,
-        )
-        video_seq_len = int(video_pre["tokens"].shape[1])
-        attention_mask = self._build_mot_attention_mask(
-            video_seq_len=video_seq_len,
-            action_seq_len=latents_action.shape[1],
-            video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
-            device=video_pre["tokens"].device,
-        )
-        video_kv_cache = self.mot.prefill_video_cache(
-            video_tokens=video_pre["tokens"],
-            video_freqs=video_pre["freqs"],
-            video_t_mod=video_pre["t_mod"],
-            video_context_payload={
-                "context": video_pre["context"],
-                "mask": video_pre["context_mask"],
-            },
-            video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
-        )
+        history_requested = history_video is not None or history_action is not None
+        if history_requested and not self.enable_mem_stage_v4:
+            raise ValueError("mem-stage-v4 history inference is only enabled for base FastWAM.")
+        use_history_condition = self.enable_mem_stage_v4 and history_requested
+        if use_history_condition and (history_video is None or history_action is None):
+            raise ValueError("v4 history inference requires both `history_video` and `history_action`.")
+
+        condition_kv_cache = None
+        condition_key_valid_mask = None
+        attention_mask = None
+        video_kv_cache = None
+        video_seq_len = 0
+        if use_history_condition:
+            if history_video.ndim == 4:
+                history_video = history_video.unsqueeze(0)
+            if history_video.ndim != 5 or history_video.shape[0] != 1 or history_video.shape[1] != 3:
+                raise ValueError(
+                    "`history_video` must have shape [3,T,H,W] or [1,3,T,H,W], "
+                    f"got {tuple(history_video.shape)}"
+                )
+            if history_video.shape[3] != height or history_video.shape[4] != width:
+                raise ValueError(
+                    "`history_video` spatial shape must match `input_image`, "
+                    f"got {tuple(history_video.shape[3:])} vs {(height, width)}"
+                )
+            if history_video.shape[2] % 4 != 1:
+                raise ValueError(f"`history_video` T must satisfy T % 4 == 1, got {history_video.shape[2]}")
+            if history_action.ndim == 2:
+                history_action = history_action.unsqueeze(0)
+            if history_action.ndim != 3 or history_action.shape[0] != 1:
+                raise ValueError(
+                    "`history_action` must have shape [T,D] or [1,T,D], "
+                    f"got {tuple(history_action.shape)}"
+                )
+            if history_action.shape[2] != self.action_expert.action_dim:
+                raise ValueError(
+                    f"`history_action` last dim must be {self.action_expert.action_dim}, got {history_action.shape[2]}"
+                )
+            if history_video_is_pad is not None:
+                if history_video_is_pad.ndim == 1:
+                    history_video_is_pad = history_video_is_pad.unsqueeze(0)
+                if history_video_is_pad.shape != (1, history_video.shape[2]):
+                    raise ValueError(
+                        "`history_video_is_pad` shape mismatch: "
+                        f"got {tuple(history_video_is_pad.shape)} vs expected {(1, history_video.shape[2])}"
+                    )
+                history_video_is_pad = history_video_is_pad.to(device=self.device, dtype=torch.bool)
+            if history_action_is_pad is not None:
+                if history_action_is_pad.ndim == 1:
+                    history_action_is_pad = history_action_is_pad.unsqueeze(0)
+                if history_action_is_pad.shape != history_action.shape[:2]:
+                    raise ValueError(
+                        "`history_action_is_pad` shape mismatch: "
+                        f"got {tuple(history_action_is_pad.shape)} vs expected {tuple(history_action.shape[:2])}"
+                    )
+                history_action_is_pad = history_action_is_pad.to(device=self.device, dtype=torch.bool)
+
+            history_video = history_video.to(device=self.device, dtype=self.torch_dtype)
+            history_action = history_action.to(device=self.device, dtype=self.torch_dtype)
+            history_video_latents = self._encode_video_latents(history_video, tiled=tiled)
+            clean_video_timestep = torch.zeros((1,), device=self.device, dtype=history_video_latents.dtype)
+            video_source_ids, video_position_ids = self._history_video_source_and_position_ids(
+                num_latent_frames=history_video_latents.shape[2],
+                device=history_video_latents.device,
+            )
+            history_video_pre = self.video_expert.pre_dit(
+                x=history_video_latents,
+                timestep=clean_video_timestep,
+                context=context,
+                context_mask=context_mask,
+                action=None,
+                fuse_vae_embedding_in_latents=fuse_flag,
+                source_ids=video_source_ids,
+                temporal_position_ids=video_position_ids,
+                allow_missing_action_condition=True,
+            )
+            history_video_attention_mask = self.video_expert.build_video_to_video_mask(
+                video_seq_len=history_video_pre["tokens"].shape[1],
+                video_tokens_per_frame=int(history_video_pre["meta"]["tokens_per_frame"]),
+                device=history_video_pre["tokens"].device,
+            )
+            history_video_latent_valid = self._latent_valid_from_raw_pad(
+                raw_is_pad=history_video_is_pad,
+                num_latent_frames=history_video_latents.shape[2],
+                batch_size=1,
+                device=history_video_latents.device,
+            )
+            history_video_token_valid = self._latent_valid_to_token_valid(
+                history_video_latent_valid,
+                tokens_per_frame=int(history_video_pre["meta"]["tokens_per_frame"]),
+            )
+            history_video_cache = self.mot.prefill_video_cache(
+                video_tokens=history_video_pre["tokens"],
+                video_freqs=history_video_pre["freqs"],
+                video_t_mod=history_video_pre["t_mod"],
+                video_context_payload={
+                    "context": history_video_pre["context"],
+                    "mask": history_video_pre["context_mask"],
+                },
+                video_attention_mask=history_video_attention_mask,
+                video_key_valid_mask=history_video_token_valid,
+            )
+
+            history_source_ids = self._action_source_ids(
+                batch_size=1,
+                seq_len=history_action.shape[1],
+                source_id=self.SOURCE_HISTORY_ACTION,
+                device=history_action.device,
+            )
+            history_position_ids = self._action_position_ids(
+                seq_len=history_action.shape[1],
+                start=0,
+                device=history_action.device,
+            )
+            clean_action_timestep = torch.zeros((1,), device=self.device, dtype=history_action.dtype)
+            history_action_pre = self.action_expert.pre_dit(
+                action_tokens=history_action,
+                timestep=clean_action_timestep,
+                context=context,
+                context_mask=context_mask,
+                source_ids=history_source_ids,
+                position_ids=history_position_ids,
+            )
+            if history_action_is_pad is None:
+                history_action_valid = torch.ones(
+                    (1, history_action.shape[1]),
+                    dtype=torch.bool,
+                    device=history_action.device,
+                )
+            else:
+                history_action_valid = ~history_action_is_pad
+            history_action_attention_mask = torch.ones(
+                (history_action.shape[1], history_action.shape[1]),
+                dtype=torch.bool,
+                device=history_action.device,
+            )
+            history_action_cache = self.mot.prefill_action_cache(
+                action_tokens=history_action_pre["tokens"],
+                action_freqs=history_action_pre["freqs"],
+                action_t_mod=history_action_pre["t_mod"],
+                action_context_payload={
+                    "context": history_action_pre["context"],
+                    "mask": history_action_pre["context_mask"],
+                },
+                action_attention_mask=history_action_attention_mask,
+                action_key_valid_mask=history_action_valid,
+            )
+            condition_kv_cache = self._concat_kv_caches(history_video_cache, history_action_cache)
+            condition_key_valid_mask = torch.cat([history_video_token_valid, history_action_valid], dim=1)
+        else:
+            timestep_video = torch.zeros(
+                (first_frame_latents.shape[0],),
+                dtype=first_frame_latents.dtype,
+                device=self.device,
+            )
+            video_pre = self.video_expert.pre_dit(
+                x=first_frame_latents,
+                timestep=timestep_video,
+                context=context,
+                context_mask=context_mask,
+                action=None,
+                fuse_vae_embedding_in_latents=fuse_flag,
+            )
+            video_seq_len = int(video_pre["tokens"].shape[1])
+            attention_mask = self._build_mot_attention_mask(
+                video_seq_len=video_seq_len,
+                action_seq_len=latents_action.shape[1],
+                video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
+                device=video_pre["tokens"].device,
+            )
+            video_kv_cache = self.mot.prefill_video_cache(
+                video_tokens=video_pre["tokens"],
+                video_freqs=video_pre["freqs"],
+                video_t_mod=video_pre["t_mod"],
+                video_context_payload={
+                    "context": video_pre["context"],
+                    "mask": video_pre["context_mask"],
+                },
+                video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
+            )
 
         infer_timesteps_action, infer_deltas_action = self.infer_action_scheduler.build_inference_schedule(
             num_inference_steps=num_inference_steps,
@@ -1030,15 +1742,25 @@ class FastWAM(torch.nn.Module):
         for step_t_action, step_delta_action in zip(infer_timesteps_action, infer_deltas_action):
             timestep_action = step_t_action.unsqueeze(0).to(dtype=latents_action.dtype, device=self.device)
 
-            pred_action_posi = self._predict_action_noise_with_cache(
-                latents_action=latents_action,
-                timestep_action=timestep_action,
-                context=context,
-                context_mask=context_mask,
-                video_kv_cache=video_kv_cache,
-                attention_mask=attention_mask,
-                video_seq_len=video_seq_len,
-            )
+            if use_history_condition:
+                pred_action_posi = self._predict_action_noise_with_condition_cache(
+                    latents_action=latents_action,
+                    timestep_action=timestep_action,
+                    context=context,
+                    context_mask=context_mask,
+                    condition_kv_cache=condition_kv_cache,
+                    condition_key_valid_mask=condition_key_valid_mask,
+                )
+            else:
+                pred_action_posi = self._predict_action_noise_with_cache(
+                    latents_action=latents_action,
+                    timestep_action=timestep_action,
+                    context=context,
+                    context_mask=context_mask,
+                    video_kv_cache=video_kv_cache,
+                    attention_mask=attention_mask,
+                    video_seq_len=video_seq_len,
+                )
             pred_action = pred_action_posi
 
             latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
@@ -1055,6 +1777,10 @@ class FastWAM(torch.nn.Module):
         num_frames: int,
         action: Optional[torch.Tensor] = None,
         action_horizon: Optional[int] = None,
+        history_video: Optional[torch.Tensor] = None,
+        history_action: Optional[torch.Tensor] = None,
+        history_video_is_pad: Optional[torch.Tensor] = None,
+        history_action_is_pad: Optional[torch.Tensor] = None,
         proprio: Optional[torch.Tensor] = None,
         context: Optional[torch.Tensor] = None,
         context_mask: Optional[torch.Tensor] = None,
@@ -1073,6 +1799,10 @@ class FastWAM(torch.nn.Module):
             num_video_frames=num_frames,
             action_horizon=action_horizon,
             action=action,
+            history_video=history_video,
+            history_action=history_action,
+            history_video_is_pad=history_video_is_pad,
+            history_action_is_pad=history_action_is_pad,
             proprio=proprio,
             context=context,
             context_mask=context_mask,
@@ -1090,6 +1820,7 @@ class FastWAM(torch.nn.Module):
             "mot": self.mot.state_dict(),
             "step": step,
             "torch_dtype": str(self.torch_dtype),
+            "mem_stage_v4": True,
         }
         if self.proprio_encoder is not None:
             payload["proprio_encoder"] = self.proprio_encoder.state_dict()
@@ -1100,7 +1831,19 @@ class FastWAM(torch.nn.Module):
     def load_checkpoint(self, path, optimizer=None):
         payload = torch.load(path, map_location="cpu")
         if "mot" in payload:
-            self.mot.load_state_dict(payload["mot"], strict=False)
+            missing_keys, unexpected_keys = self.mot.load_state_dict(payload["mot"], strict=False)
+            if payload.get("mem_stage_v4", False) and (missing_keys or unexpected_keys):
+                raise ValueError(
+                    "mem-stage-v4 checkpoint did not restore MoT weights strictly: "
+                    f"missing={missing_keys[:10]}{'...' if len(missing_keys) > 10 else ''}, "
+                    f"unexpected={unexpected_keys[:10]}{'...' if len(unexpected_keys) > 10 else ''}"
+                )
+            if missing_keys or unexpected_keys:
+                logger.warning(
+                    "Loaded MoT checkpoint with non-strict key diff: missing=%s unexpected=%s",
+                    missing_keys[:10],
+                    unexpected_keys[:10],
+                )
         elif "dit" in payload:
             logger.warning("Loading legacy `dit` checkpoint into video expert only.")
             self.video_expert.load_state_dict(payload["dit"], strict=False)

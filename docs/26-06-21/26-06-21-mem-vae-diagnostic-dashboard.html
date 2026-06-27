@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MEM-VAE Diagnostic Dashboard</title>
+  <style>
+    :root {
+      --bg: #fff7f2;
+      --surface: #ffffff;
+      --surface2: #fff0e6;
+      --border: rgba(35, 24, 21, 0.10);
+      --text: #231815;
+      --muted: #746661;
+      --accent: #c2410c;
+      --accent2: #0f766e;
+      --accent3: #b45309;
+      --danger: #be123c;
+      --ok: #15803d;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      --sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #160f0c;
+        --surface: #211815;
+        --surface2: #2b1d18;
+        --border: rgba(255,255,255,0.10);
+        --text: #f8e7df;
+        --muted: #c9aaa0;
+        --accent: #fb923c;
+        --accent2: #5eead4;
+        --accent3: #fbbf24;
+        --danger: #fb7185;
+        --ok: #86efac;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      color: var(--text);
+      background:
+        radial-gradient(circle at 16% 10%, rgba(194,65,12,0.14), transparent 30%),
+        radial-gradient(circle at 88% 18%, rgba(15,118,110,0.12), transparent 28%),
+        linear-gradient(180deg, var(--bg), color-mix(in srgb, var(--bg) 86%, #000 14%));
+      min-height: 100vh;
+    }
+    .wrap {
+      max-width: 1380px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 190px 1fr;
+      gap: 0 34px;
+      padding: 28px;
+    }
+    .toc {
+      position: sticky;
+      top: 20px;
+      align-self: start;
+      max-height: calc(100dvh - 40px);
+      overflow-y: auto;
+      padding: 12px 0;
+    }
+    .toc-title {
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 10px;
+      margin-bottom: 10px;
+    }
+    .toc a {
+      display: block;
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 12px;
+      line-height: 1.35;
+      padding: 7px 8px;
+      border-left: 2px solid transparent;
+      border-radius: 5px;
+      margin-bottom: 2px;
+    }
+    .toc a:hover, .toc a.active {
+      color: var(--text);
+      background: var(--surface2);
+      border-left-color: var(--accent);
+    }
+    .main { min-width: 0; }
+    header {
+      background: color-mix(in srgb, var(--surface) 92%, var(--accent) 8%);
+      border: 1px solid color-mix(in srgb, var(--border) 60%, var(--accent) 40%);
+      border-radius: 12px;
+      padding: 26px;
+      margin-bottom: 18px;
+      box-shadow: 0 12px 28px rgba(0,0,0,0.08);
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 34px;
+      letter-spacing: 0;
+      line-height: 1.12;
+    }
+    .subtitle {
+      margin: 0;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    }
+    .span-3 { grid-column: span 3; }
+    .span-4 { grid-column: span 4; }
+    .span-6 { grid-column: span 6; }
+    .span-8 { grid-column: span 8; }
+    .span-12 { grid-column: span 12; }
+    .label {
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 1.2px;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .big {
+      font-size: 28px;
+      font-weight: 700;
+      line-height: 1;
+    }
+    .note {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+      margin-top: 8px;
+    }
+    .sec-head {
+      grid-column: span 12;
+      font-family: var(--mono);
+      color: var(--accent);
+      font-size: 12px;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      margin-top: 10px;
+      scroll-margin-top: 30px;
+    }
+    .bars { display: grid; gap: 9px; }
+    .bar-row {
+      display: grid;
+      grid-template-columns: 145px 1fr 58px;
+      align-items: center;
+      gap: 10px;
+      font-size: 12px;
+    }
+    .bar-track {
+      height: 14px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--surface2) 72%, var(--border) 28%);
+      overflow: hidden;
+    }
+    .bar {
+      height: 100%;
+      border-radius: inherit;
+      background: var(--accent2);
+    }
+    .bar.warn { background: var(--accent3); }
+    .bar.bad { background: var(--danger); }
+    .bar.good { background: var(--ok); }
+    .value {
+      text-align: right;
+      font-family: var(--mono);
+      color: var(--muted);
+      font-size: 11px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    th, td {
+      text-align: left;
+      padding: 9px 8px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    th {
+      font-family: var(--mono);
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    code {
+      font-family: var(--mono);
+      font-size: 11px;
+      background: var(--surface2);
+      padding: 2px 5px;
+      border-radius: 4px;
+    }
+    .spark {
+      display: flex;
+      align-items: end;
+      gap: 8px;
+      height: 120px;
+      padding-top: 10px;
+    }
+    .spark-col {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+    .spark-bar {
+      width: 100%;
+      max-width: 34px;
+      background: var(--accent);
+      border-radius: 6px 6px 2px 2px;
+      min-height: 2px;
+    }
+    .spark-col small {
+      writing-mode: vertical-rl;
+      transform: rotate(180deg);
+      white-space: nowrap;
+      font-size: 10px;
+      color: var(--muted);
+      height: 50px;
+    }
+    .legend {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 8px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+      display: inline-block;
+    }
+    .dot.teal { background: var(--accent2); }
+    .dot.bad { background: var(--danger); }
+    .dot.ok { background: var(--ok); }
+    @media (max-width: 1000px) {
+      .wrap { grid-template-columns: 1fr; padding: 0 18px 28px; }
+      .toc {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        display: flex;
+        gap: 4px;
+        overflow-x: auto;
+        max-height: none;
+        background: var(--bg);
+        border-bottom: 1px solid var(--border);
+        margin: 0 -18px 18px;
+        padding: 10px 18px;
+      }
+      .toc-title { display: none; }
+      .toc a {
+        white-space: nowrap;
+        flex-shrink: 0;
+        border-left: none;
+        border-bottom: 2px solid transparent;
+      }
+      .toc a.active { border-bottom-color: var(--accent); }
+      .span-3, .span-4, .span-6, .span-8, .span-12 { grid-column: span 12; }
+      header { margin-top: 18px; }
+      .bar-row { grid-template-columns: 110px 1fr 52px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <nav class="toc" id="toc">
+      <div class="toc-title">Contents</div>
+      <a href="#summary">结论</a>
+      <a href="#eval">评测</a>
+      <a href="#drift">权重漂移</a>
+      <a href="#latent">Latent</a>
+      <a href="#config">阶段配置</a>
+      <a href="#next">下一步</a>
+    </nav>
+    <main class="main">
+      <header id="summary">
+        <h1>MEM-VAE 训练诊断可视化</h1>
+        <p class="subtitle">远端实际 ckpt + summary.csv + VAE latent 对比。结论：memory path 分布偏移存在；stage3 full-DiT 解冻是大崩拐点。</p>
+      </header>
+
+      <section class="grid">
+        <div class="card span-3">
+          <div class="label">MEMOFF Full</div>
+          <div class="big">49.83%</div>
+          <div class="note">release/mem-off 参考线，10030 cases。</div>
+        </div>
+        <div class="card span-3">
+          <div class="label">Stage1 Full</div>
+          <div class="big">45.64%</div>
+          <div class="note">memory-only 小幅下降。</div>
+        </div>
+        <div class="card span-3">
+          <div class="label">Stage3 Best PILOT</div>
+          <div class="big">17.50%</div>
+          <div class="note">step3000 H4，200 cases。</div>
+        </div>
+        <div class="card span-3">
+          <div class="label">Real Latent rel_l2</div>
+          <div class="big">1.306</div>
+          <div class="note">真实样本，gate=0，history+current vs current。</div>
+        </div>
+
+        <div class="sec-head" id="eval">1. 评测结果</div>
+        <div class="card span-8">
+          <div class="label">Success Rate</div>
+          <div class="bars">
+            <div class="bar-row"><span>MEMOFF Full</span><div class="bar-track"><div class="bar good" style="width:49.83%"></div></div><span class="value">49.83</span></div>
+            <div class="bar-row"><span>Stage1 Full</span><div class="bar-track"><div class="bar" style="width:45.64%"></div></div><span class="value">45.64</span></div>
+            <div class="bar-row"><span>Stage2 Full</span><div class="bar-track"><div class="bar" style="width:46.43%"></div></div><span class="value">46.43</span></div>
+            <div class="bar-row"><span>S3 step1000</span><div class="bar-track"><div class="bar bad" style="width:2%"></div></div><span class="value">2.00</span></div>
+            <div class="bar-row"><span>S3 step2000</span><div class="bar-track"><div class="bar bad" style="width:12.5%"></div></div><span class="value">12.50</span></div>
+            <div class="bar-row"><span>S3 step3000</span><div class="bar-track"><div class="bar bad" style="width:17.5%"></div></div><span class="value">17.50</span></div>
+            <div class="bar-row"><span>S3 step4000</span><div class="bar-track"><div class="bar bad" style="width:17%"></div></div><span class="value">17.00</span></div>
+          </div>
+          <div class="legend">
+            <span class="pill"><span class="dot ok"></span>Full 评测</span>
+            <span class="pill"><span class="dot bad"></span>Stage3 PILOT 200 cases</span>
+          </div>
+        </div>
+        <div class="card span-4">
+          <div class="label">Interpretation</div>
+          <p class="note">Stage1/2 没有大崩；stage3 一解冻全 DiT 后，PILOT 直接掉到 2% 到 17.5%。这支持“解冻 DiT 是大拐点”。</p>
+          <p class="note">Stage2 full eval 是 8429 cases，少了 Noise 维度，不能和 10030 cases 严格同口径，但仍显示没有 stage3 那种崩盘。</p>
+        </div>
+
+        <div class="sec-head" id="drift">2. Checkpoint 权重漂移</div>
+        <div class="card span-6">
+          <div class="label">Stage3: relative L2 vs release</div>
+          <div class="bars">
+            <div class="bar-row"><span>video patch</span><div class="bar-track"><div class="bar warn" style="width:15.95%"></div></div><span class="value">0.160</span></div>
+            <div class="bar-row"><span>video blocks</span><div class="bar-track"><div class="bar warn" style="width:27.44%"></div></div><span class="value">0.274</span></div>
+            <div class="bar-row"><span>action blocks</span><div class="bar-track"><div class="bar warn" style="width:16.48%"></div></div><span class="value">0.165</span></div>
+            <div class="bar-row"><span>action head</span><div class="bar-track"><div class="bar bad" style="width:93%"></div></div><span class="value">1.862</span></div>
+            <div class="bar-row"><span>proprio</span><div class="bar-track"><div class="bar bad" style="width:71%"></div></div><span class="value">1.426</span></div>
+          </div>
+          <div class="note">上图为 stage3 step500。step1000/4000 几乎同量级，说明主要漂移在前 500 step 内已经发生。</div>
+        </div>
+        <div class="card span-6">
+          <div class="label">Stage3 step500 -> step4000 delta</div>
+          <div class="bars">
+            <div class="bar-row"><span>video patch</span><div class="bar-track"><div class="bar" style="width:0.86%"></div></div><span class="value">0.0086</span></div>
+            <div class="bar-row"><span>video blocks</span><div class="bar-track"><div class="bar" style="width:1.37%"></div></div><span class="value">0.0137</span></div>
+            <div class="bar-row"><span>action blocks</span><div class="bar-track"><div class="bar" style="width:0.67%"></div></div><span class="value">0.0067</span></div>
+            <div class="bar-row"><span>action head</span><div class="bar-track"><div class="bar" style="width:0.79%"></div></div><span class="value">0.0079</span></div>
+            <div class="bar-row"><span>proprio</span><div class="bar-track"><div class="bar" style="width:0.13%"></div></div><span class="value">0.0013</span></div>
+          </div>
+          <div class="note">后续变化很小，所以“训练后期慢慢崩”不是主要现象。</div>
+        </div>
+
+        <div class="sec-head" id="latent">3. VAE Latent No-op 验证</div>
+        <div class="card span-6">
+          <div class="label">Synthetic gate=0 control</div>
+          <div class="bars">
+            <div class="bar-row"><span>K0 zero</span><div class="bar-track"><div class="bar good" style="width:0%"></div></div><span class="value">0.000</span></div>
+            <div class="bar-row"><span>K4 zero</span><div class="bar-track"><div class="bar bad" style="width:69%"></div></div><span class="value">1.379</span></div>
+            <div class="bar-row"><span>K4 repeat</span><div class="bar-track"><div class="bar warn" style="width:46%"></div></div><span class="value">0.922</span></div>
+            <div class="bar-row"><span>K4 random</span><div class="bar-track"><div class="bar warn" style="width:28%"></div></div><span class="value">0.558</span></div>
+            <div class="bar-row"><span>K16 random</span><div class="bar-track"><div class="bar warn" style="width:30%"></div></div><span class="value">0.598</span></div>
+          </div>
+          <div class="note">K=0 完全相等；K>0 后即使 gate=0 也明显偏移。</div>
+        </div>
+        <div class="card span-6">
+          <div class="label">Real sample idx=1234</div>
+          <div class="bars">
+            <div class="bar-row"><span>fresh gate0</span><div class="bar-track"><div class="bar bad" style="width:65%"></div></div><span class="value">1.306</span></div>
+            <div class="bar-row"><span>stage1</span><div class="bar-track"><div class="bar warn" style="width:33%"></div></div><span class="value">0.666</span></div>
+            <div class="bar-row"><span>stage2</span><div class="bar-track"><div class="bar bad" style="width:65%"></div></div><span class="value">1.304</span></div>
+            <div class="bar-row"><span>stage3</span><div class="bar-track"><div class="bar bad" style="width:65%"></div></div><span class="value">1.306</span></div>
+          </div>
+          <div class="note">Stage1 的 temporal params 把真实样本 latent 偏移从 1.306 降到 0.666；stage3 几乎回到 fresh gate0。</div>
+        </div>
+
+        <div class="sec-head" id="config">4. 阶段配置差异</div>
+        <div class="card span-12">
+          <table>
+            <thead><tr><th>阶段</th><th>Resume</th><th>LR</th><th>训练参数</th><th>含义</th></tr></thead>
+            <tbody>
+              <tr><td>stage1</td><td><code>fastwam_release/libero_uncond_2cam224.pt</code></td><td>1e-4</td><td>4 VAE temporal params</td><td>只让 memory branch 学补偿。</td></tr>
+              <tr><td>stage2</td><td><code>stage1 step_021700.pt</code></td><td>3e-5</td><td>4 VAE temporal params + patch embedding</td><td>冻结 DiT 主体，只调输入接口。</td></tr>
+              <tr><td>stage3</td><td><code>fastwam_release/libero_uncond_2cam224.pt</code></td><td>1e-5</td><td>4 VAE temporal params + full DiT + proprio</td><td>不是从 stage2 继续，变量混入较多。</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="sec-head" id="next">5. 下一步实验优先级</div>
+        <div class="card span-12">
+          <table>
+            <thead><tr><th>优先级</th><th>实验</th><th>验证什么</th></tr></thead>
+            <tbody>
+              <tr><td>1</td><td>stage3 从 stage2 step6000 继续，而不是 release</td><td>拆分“full DiT 解冻”和“错误 warm start”两个变量。</td></tr>
+              <tr><td>2</td><td>冻结 action head/proprio，只解冻 video patch + 少量 video blocks</td><td>确认 action/proprio 大漂移是否是策略崩盘直接原因。</td></tr>
+              <tr><td>3</td><td>给 <code>z_mem</code> 加 identity consistency loss</td><td>验证 memory latent 分布偏移是否可被约束。</td></tr>
+              <tr><td>4</td><td>把 memory 设计成 <code>z_single + gated_residual(history)</code></td><td>让 gate=0 在数学上严格 no-op。</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script>
+  (function() {
+    const toc = document.getElementById('toc');
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links.map(link => {
+      const id = link.getAttribute('href').slice(1);
+      return { link, el: document.getElementById(id) };
+    }).filter(x => x.el);
+    const observer = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (!entry.isIntersecting) return;
+        links.forEach(l => l.classList.remove('active'));
+        const item = sections.find(s => s.el === entry.target);
+        if (item) item.link.classList.add('active');
+      });
+    }, { rootMargin: '-10% 0px -78% 0px' });
+    sections.forEach(s => observer.observe(s.el));
+    links.forEach(link => {
+      link.addEventListener('click', e => {
+        e.preventDefault();
+        const id = link.getAttribute('href').slice(1);
+        const el = document.getElementById(id);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    });
+  })();
+  </script>
+</body>
+</html>

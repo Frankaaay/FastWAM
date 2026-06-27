@@ -35,9 +35,15 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         global_sample_stride: int = 1,
     ):
         assert len(dataset_dirs) > 0, "At least one dataset directory is required"
-        assert past_action_size == 0
-        assert past_obs_size == 0
-        assert action_size == obs_size - 1, "In this dataset, action_size should be obs_size - 1"
+        if action_size <= 0:
+            raise ValueError(f"`action_size` must be positive, got {action_size}")
+        if obs_size <= 0:
+            raise ValueError(f"`obs_size` must be positive, got {obs_size}")
+        if past_action_size < 0 or past_obs_size < 0:
+            raise ValueError(
+                f"`past_action_size` and `past_obs_size` must be non-negative, "
+                f"got {past_action_size} and {past_obs_size}"
+            )
         
         self.dataset_dirs = dataset_dirs
         self.shape_meta = shape_meta

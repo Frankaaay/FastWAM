@@ -30,7 +30,12 @@ class ActionHead(nn.Module):
 
 
 class ActionDiT(nn.Module):
-    ACTION_BACKBONE_SKIP_PREFIXES = ("action_encoder.", "head.")
+    ACTION_BACKBONE_SKIP_PREFIXES = (
+        "action_encoder.",
+        "head.",
+        "source_embedding.",
+        "source_embedding_gate",
+    )
     ACTION_BACKBONE_META_KEYS = (
         "hidden_dim",
         "ffn_dim",
@@ -97,8 +102,64 @@ class ActionDiT(nn.Module):
         )
         self.head = nn.Linear(hidden_dim, action_dim)
         self.freqs = precompute_freqs_cis(attn_head_dim, end=1024)
+        self.source_embedding = nn.Embedding(4, hidden_dim)
+        self.source_embedding_gate = nn.Parameter(torch.zeros(()))
 
         self.use_gradient_checkpointing = use_gradient_checkpointing
+
+    def _normalize_source_ids(
+        self,
+        source_ids: torch.Tensor,
+        batch_size: int,
+        seq_len: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if source_ids.ndim == 1:
+            if source_ids.shape[0] != seq_len:
+                raise ValueError(
+                    f"`source_ids` length must be seq_len({seq_len}), got {source_ids.shape[0]}"
+                )
+            source_ids = source_ids.unsqueeze(0).expand(batch_size, -1)
+        elif source_ids.ndim == 2:
+            if source_ids.shape != (batch_size, seq_len):
+                raise ValueError(
+                    f"`source_ids` must be [B, T] = {(batch_size, seq_len)}, got {tuple(source_ids.shape)}"
+                )
+        else:
+            raise ValueError(f"`source_ids` must be 1D or 2D, got shape {tuple(source_ids.shape)}")
+        source_ids = source_ids.to(device=device, dtype=torch.long)
+        if source_ids.numel() > 0:
+            min_id = int(source_ids.min().item())
+            max_id = int(source_ids.max().item())
+            if min_id < 0 or max_id >= self.source_embedding.num_embeddings:
+                raise ValueError(
+                    f"`source_ids` must be in [0, {self.source_embedding.num_embeddings}), got [{min_id}, {max_id}]"
+                )
+        return source_ids
+
+    def _normalize_position_ids(
+        self,
+        position_ids: torch.Tensor,
+        seq_len: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if position_ids.ndim != 1:
+            raise ValueError(
+                f"`position_ids` must be 1D [T] for shared RoPE positions, got shape {tuple(position_ids.shape)}"
+            )
+        if position_ids.shape[0] != seq_len:
+            raise ValueError(
+                f"`position_ids` length must be seq_len({seq_len}), got {position_ids.shape[0]}"
+            )
+        position_ids = position_ids.to(device=device, dtype=torch.long)
+        if position_ids.numel() > 0:
+            min_pos = int(position_ids.min().item())
+            max_pos = int(position_ids.max().item())
+            if min_pos < 0 or max_pos >= self.freqs.shape[0]:
+                raise ValueError(
+                    f"`position_ids` must be in [0, {self.freqs.shape[0]}), got [{min_pos}, {max_pos}]"
+                )
+        return position_ids
 
     @classmethod
     def backbone_key_set(cls, keys) -> set[str]:
@@ -229,6 +290,8 @@ class ActionDiT(nn.Module):
         timestep: torch.Tensor,
         context: torch.Tensor,
         context_mask: Optional[torch.Tensor] = None,
+        source_ids: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
         if action_tokens.ndim != 3:
             raise ValueError(
@@ -272,18 +335,29 @@ class ActionDiT(nn.Module):
                 )
 
         seq_len = action_tokens.shape[1]
-        if seq_len > self.freqs.shape[0]:
+        if position_ids is None and seq_len > self.freqs.shape[0]:
             raise ValueError(
                 f"Action token length {seq_len} exceeds RoPE cache {self.freqs.shape[0]}."
             )
+        if position_ids is not None:
+            position_ids = self._normalize_position_ids(position_ids, seq_len, action_tokens.device)
 
         t = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, timestep))
         t_mod = self.time_projection(t).unflatten(1, (6, self.hidden_dim))
 
         tokens = self.action_encoder(action_tokens)
+        if source_ids is not None:
+            source_ids = self._normalize_source_ids(source_ids, batch_size, seq_len, tokens.device)
+            tokens = tokens + self.source_embedding_gate.to(
+                device=tokens.device, dtype=tokens.dtype
+            ) * self.source_embedding(source_ids)
         context_emb = self.text_embedding(context)
         context_attn_mask = context_mask.unsqueeze(1).expand(-1, seq_len, -1)
-        freqs = self.freqs[:seq_len].view(seq_len, 1, -1).to(tokens.device)
+        if position_ids is None:
+            freqs = self.freqs[:seq_len]
+        else:
+            freqs = self.freqs[position_ids]
+        freqs = freqs.view(seq_len, 1, -1).to(tokens.device)
 
         return {
             "tokens": tokens,
@@ -307,12 +381,16 @@ class ActionDiT(nn.Module):
         timestep: torch.Tensor,
         context: torch.Tensor,
         context_mask: Optional[torch.Tensor] = None,
+        source_ids: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         pre_state = self.pre_dit(
             action_tokens=action_tokens,
             timestep=timestep,
             context=context,
             context_mask=context_mask,
+            source_ids=source_ids,
+            position_ids=position_ids,
         )
         x = pre_state["tokens"]
         context = pre_state["context"]

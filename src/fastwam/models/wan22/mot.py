@@ -97,6 +97,74 @@ class MoT(nn.Module):
         return _forward(q_cat, k_cat, v_cat)
 
     @staticmethod
+    def _normalize_attention_mask(
+        attention_mask: torch.Tensor,
+        query_len: int,
+        key_len: int,
+        name: str,
+    ) -> torch.Tensor:
+        if attention_mask.dtype != torch.bool:
+            attention_mask = attention_mask.to(dtype=torch.bool)
+        if attention_mask.ndim == 2:
+            if attention_mask.shape != (query_len, key_len):
+                raise ValueError(
+                    f"`{name}` must be [Q,K] = {(query_len, key_len)}, got {tuple(attention_mask.shape)}"
+                )
+            return attention_mask
+        if attention_mask.ndim == 3:
+            if attention_mask.shape[1:] != (query_len, key_len):
+                raise ValueError(
+                    f"`{name}` must be [B,Q,K] with Q,K={(query_len, key_len)}, got {tuple(attention_mask.shape)}"
+                )
+            return attention_mask.unsqueeze(1)
+        if attention_mask.ndim == 4:
+            if attention_mask.shape[-2:] != (query_len, key_len):
+                raise ValueError(
+                    f"`{name}` must be [B,H,Q,K] with Q,K={(query_len, key_len)}, got {tuple(attention_mask.shape)}"
+                )
+            return attention_mask
+        raise ValueError(f"`{name}` must be 2D, 3D, or 4D, got shape {tuple(attention_mask.shape)}")
+
+    @staticmethod
+    def _apply_key_valid_mask(
+        attention_mask: torch.Tensor,
+        key_valid_mask: Optional[torch.Tensor],
+        query_len: int,
+        key_len: int,
+        name: str,
+        ensure_non_empty: bool = True,
+    ) -> torch.Tensor:
+        mask = MoT._normalize_attention_mask(
+            attention_mask=attention_mask,
+            query_len=query_len,
+            key_len=key_len,
+            name=name,
+        )
+        if key_valid_mask is None:
+            return mask
+        if key_valid_mask.ndim != 2:
+            raise ValueError(
+                f"`key_valid_mask` for `{name}` must be 2D [B,K], got shape {tuple(key_valid_mask.shape)}"
+            )
+        if key_valid_mask.shape[1] != key_len:
+            raise ValueError(
+                f"`key_valid_mask` for `{name}` key length mismatch: "
+                f"mask={key_valid_mask.shape[1]} vs expected={key_len}"
+            )
+        key_valid_mask = key_valid_mask.to(device=mask.device, dtype=torch.bool)
+        if mask.ndim == 2:
+            mask = mask.view(1, 1, query_len, key_len)
+        elif mask.ndim == 3:
+            mask = mask.unsqueeze(1)
+        masked = mask & key_valid_mask[:, None, None, :]
+        if ensure_non_empty:
+            empty_rows = ~masked.any(dim=-1, keepdim=True)
+            if empty_rows.any():
+                fallback = mask.expand(masked.shape[0], -1, -1, -1)
+                masked = torch.where(empty_rows, fallback, masked)
+        return masked
+
+    @staticmethod
     def _apply_expert_post_block(
         block,
         residual_x: torch.Tensor,
@@ -261,6 +329,7 @@ class MoT(nn.Module):
         video_t_mod: torch.Tensor,
         video_context_payload: Optional[dict],
         video_attention_mask: torch.Tensor,
+        video_key_valid_mask: Optional[torch.Tensor] = None,
     ) -> list[dict[str, torch.Tensor]]:
         """Prefill video branch once and cache per-layer K/V for action denoising.
 
@@ -272,6 +341,7 @@ class MoT(nn.Module):
                 - `context`: encoder states [B, L, D]
                 - `mask`: attention mask [B, Sv, L] or [B, 1, Sv, L]
             video_attention_mask: Video self-attention mask, shape [Sv, Sv].
+            video_key_valid_mask: Optional batch key visibility mask [B, Sv].
 
         Returns:
             Layer-wise cache list with length `num_layers`.
@@ -281,19 +351,15 @@ class MoT(nn.Module):
         """
         if "video" not in self.mixtures:
             raise ValueError("MoT requires `video` expert for `prefill_video_cache`.")
-        if video_attention_mask.ndim != 2:
-            raise ValueError(
-                f"`video_attention_mask` must be 2D [S,S], got shape {tuple(video_attention_mask.shape)}"
-            )
-        if video_attention_mask.shape[0] != video_attention_mask.shape[1]:
-            raise ValueError(
-                f"`video_attention_mask` must be square, got shape {tuple(video_attention_mask.shape)}"
-            )
-        if video_attention_mask.shape[0] != video_tokens.shape[1]:
-            raise ValueError(
-                "`video_attention_mask` seq length mismatch: "
-                f"mask={video_attention_mask.shape[0]} vs tokens={video_tokens.shape[1]}"
-            )
+        video_seq_len = int(video_tokens.shape[1])
+        video_attention_mask = self._apply_key_valid_mask(
+            attention_mask=video_attention_mask,
+            key_valid_mask=video_key_valid_mask,
+            query_len=video_seq_len,
+            key_len=video_seq_len,
+            name="video_attention_mask",
+            ensure_non_empty=True,
+        )
 
         expert = self.mixtures["video"]
         x = video_tokens
@@ -336,6 +402,74 @@ class MoT(nn.Module):
                 use_gradient_checkpointing=use_gradient_checkpointing,
                 mixed_slice=mixed,
                 context_payload=video_context_payload,
+            )
+            kv_cache.append({"k": k, "v": v})
+        return kv_cache
+
+    def prefill_action_cache(
+        self,
+        action_tokens: torch.Tensor,
+        action_freqs: torch.Tensor,
+        action_t_mod: torch.Tensor,
+        action_context_payload: Optional[dict],
+        action_attention_mask: torch.Tensor,
+        action_key_valid_mask: Optional[torch.Tensor] = None,
+    ) -> list[dict[str, torch.Tensor]]:
+        """Prefill an action condition branch and cache per-layer K/V.
+
+        This is used by mem-stage-v4 for history actions. The cached branch is
+        clean conditioning, while the future action branch is still denoised.
+        """
+        if "action" not in self.mixtures:
+            raise ValueError("MoT requires `action` expert for `prefill_action_cache`.")
+        action_seq_len = int(action_tokens.shape[1])
+        action_attention_mask = self._apply_key_valid_mask(
+            attention_mask=action_attention_mask,
+            key_valid_mask=action_key_valid_mask,
+            query_len=action_seq_len,
+            key_len=action_seq_len,
+            name="action_attention_mask",
+            ensure_non_empty=True,
+        )
+
+        expert = self.mixtures["action"]
+        x = action_tokens
+        kv_cache: list[dict[str, torch.Tensor]] = []
+        for layer_idx in range(self.num_layers):
+            block = expert.blocks[layer_idx]
+            (
+                q,
+                k,
+                v,
+                residual_x,
+                gate_msa,
+                shift_mlp,
+                scale_mlp,
+                gate_mlp,
+                use_gradient_checkpointing,
+            ) = self._build_expert_attention_io(
+                expert=expert,
+                block=block,
+                x=x,
+                freqs=action_freqs,
+                t_mod=action_t_mod,
+            )
+            mixed = self._mixed_attention(
+                q_cat=q,
+                k_cat=k,
+                v_cat=v,
+                attention_mask=action_attention_mask,
+            )
+            x = self._apply_post_with_optional_checkpoint(
+                block=block,
+                residual_x=residual_x,
+                gate_msa=gate_msa,
+                shift_mlp=shift_mlp,
+                scale_mlp=scale_mlp,
+                gate_mlp=gate_mlp,
+                use_gradient_checkpointing=use_gradient_checkpointing,
+                mixed_slice=mixed,
+                context_payload=action_context_payload,
             )
             kv_cache.append({"k": k, "v": v})
         return kv_cache
@@ -425,6 +559,126 @@ class MoT(nn.Module):
             # Mixed attention: action queries attend to cached video K/V plus current action K/V.
             k_cat = torch.cat([k_video, k_action], dim=1)
             v_cat = torch.cat([v_video, v_action], dim=1)
+            mixed = self._mixed_attention(
+                q_cat=q_action,
+                k_cat=k_cat,
+                v_cat=v_cat,
+                attention_mask=action_attention_mask,
+            )
+            x = self._apply_post_with_optional_checkpoint(
+                block=block,
+                residual_x=residual_x,
+                gate_msa=gate_msa,
+                shift_mlp=shift_mlp,
+                scale_mlp=scale_mlp,
+                gate_mlp=gate_mlp,
+                use_gradient_checkpointing=use_gradient_checkpointing,
+                mixed_slice=mixed,
+                context_payload=action_context_payload,
+            )
+        return x
+
+    def forward_action_with_condition_cache(
+        self,
+        action_tokens: torch.Tensor,
+        action_freqs: torch.Tensor,
+        action_t_mod: torch.Tensor,
+        action_context_payload: Optional[dict],
+        condition_kv_cache: list[dict[str, torch.Tensor]],
+        condition_key_valid_mask: Optional[torch.Tensor] = None,
+        action_key_valid_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Run future action denoising against cached video/action conditions."""
+        if "action" not in self.mixtures:
+            raise ValueError("MoT requires `action` expert for `forward_action_with_condition_cache`.")
+        if len(condition_kv_cache) != self.num_layers:
+            raise ValueError(
+                f"`condition_kv_cache` must contain {self.num_layers} layers, got {len(condition_kv_cache)}."
+            )
+
+        action_seq_len = int(action_tokens.shape[1])
+        condition_seq_len = int(condition_kv_cache[0]["k"].shape[1]) if condition_kv_cache else 0
+        total_key_len = condition_seq_len + action_seq_len
+        base_mask = torch.ones(
+            (action_seq_len, total_key_len),
+            dtype=torch.bool,
+            device=action_tokens.device,
+        )
+        if condition_key_valid_mask is not None and action_key_valid_mask is not None:
+            key_valid_mask = torch.cat(
+                [
+                    condition_key_valid_mask.to(device=action_tokens.device, dtype=torch.bool),
+                    action_key_valid_mask.to(device=action_tokens.device, dtype=torch.bool),
+                ],
+                dim=1,
+            )
+        elif condition_key_valid_mask is not None:
+            batch_size = condition_key_valid_mask.shape[0]
+            action_valid = torch.ones(
+                (batch_size, action_seq_len),
+                dtype=torch.bool,
+                device=action_tokens.device,
+            )
+            key_valid_mask = torch.cat(
+                [condition_key_valid_mask.to(device=action_tokens.device, dtype=torch.bool), action_valid],
+                dim=1,
+            )
+        elif action_key_valid_mask is not None:
+            batch_size = action_key_valid_mask.shape[0]
+            condition_valid = torch.ones(
+                (batch_size, condition_seq_len),
+                dtype=torch.bool,
+                device=action_tokens.device,
+            )
+            key_valid_mask = torch.cat(
+                [condition_valid, action_key_valid_mask.to(device=action_tokens.device, dtype=torch.bool)],
+                dim=1,
+            )
+        else:
+            key_valid_mask = None
+
+        action_attention_mask = self._apply_key_valid_mask(
+            attention_mask=base_mask,
+            key_valid_mask=key_valid_mask,
+            query_len=action_seq_len,
+            key_len=total_key_len,
+            name="condition_action_attention_mask",
+            ensure_non_empty=True,
+        )
+
+        expert = self.mixtures["action"]
+        x = action_tokens
+        for layer_idx in range(self.num_layers):
+            block = expert.blocks[layer_idx]
+            (
+                q_action,
+                k_action,
+                v_action,
+                residual_x,
+                gate_msa,
+                shift_mlp,
+                scale_mlp,
+                gate_mlp,
+                use_gradient_checkpointing,
+            ) = self._build_expert_attention_io(
+                expert=expert,
+                block=block,
+                x=x,
+                freqs=action_freqs,
+                t_mod=action_t_mod,
+            )
+            layer_cache = condition_kv_cache[layer_idx]
+            if "k" not in layer_cache or "v" not in layer_cache:
+                raise ValueError(f"`condition_kv_cache[{layer_idx}]` must contain `k` and `v`.")
+            k_condition = layer_cache["k"]
+            v_condition = layer_cache["v"]
+            if k_condition.shape[1] != condition_seq_len or v_condition.shape[1] != condition_seq_len:
+                raise ValueError(
+                    f"`condition_kv_cache[{layer_idx}]` seq len mismatch, expected {condition_seq_len}."
+                )
+
+            k_cat = torch.cat([k_condition, k_action], dim=1)
+            v_cat = torch.cat([v_condition, v_action], dim=1)
             mixed = self._mixed_attention(
                 q_cat=q_action,
                 k_cat=k_cat,

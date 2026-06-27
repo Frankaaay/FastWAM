@@ -1,0 +1,97 @@
+section,experiment,source,metric,value,unit,notes
+eval,MEMOFF_FULL,evaluate_results/libero_plus/libero_uncond_2cam224_1e-4/MEMOFF_20260618_143153/summary.csv,total_success_rate,49.83,percent,Full LIBERO-plus; 4998/10030
+eval,MEMOFF_FULL,evaluate_results/libero_plus/libero_uncond_2cam224_1e-4/MEMOFF_20260618_143153/summary.csv,successes,4998,count,
+eval,MEMOFF_FULL,evaluate_results/libero_plus/libero_uncond_2cam224_1e-4/MEMOFF_20260618_143153/summary.csv,total_cases,10030,count,
+eval,stage1_FULL,evaluate_results/libero_plus/libero_uncond_2cam224_1e-4/FULL_20260617_180757/summary.csv,total_success_rate,45.64,percent,Full LIBERO-plus; 4578/10030
+eval,stage1_FULL,evaluate_results/libero_plus/libero_uncond_2cam224_1e-4/FULL_20260617_180757/summary.csv,successes,4578,count,
+eval,stage1_FULL,evaluate_results/libero_plus/libero_uncond_2cam224_1e-4/FULL_20260617_180757/summary.csv,total_cases,10030,count,
+eval,stage2_step3000_FULL,evaluate_results/libero_plus/stage2_step3000_FULL/summary.csv,total_success_rate,46.43,percent,Full eval subset without Noise column; 3914/8429
+eval,stage2_step3000_FULL,evaluate_results/libero_plus/stage2_step3000_FULL/summary.csv,successes,3914,count,
+eval,stage2_step3000_FULL,evaluate_results/libero_plus/stage2_step3000_FULL/summary.csv,total_cases,8429,count,
+eval,stage1_PILOT_step3000_H16,evaluate_results/libero_plus/PILOT_step3000_H16/summary.csv,total_success_rate,49.50,percent,200-case PILOT
+eval,stage1_PILOT_step5000_H16,evaluate_results/libero_plus/PILOT_step5000_H16/summary.csv,total_success_rate,49.00,percent,200-case PILOT
+eval,stage1_PILOT_step6000_H16,evaluate_results/libero_plus/PILOT_step6000_H16/summary.csv,total_success_rate,46.00,percent,200-case PILOT
+eval,stage1_PILOT_step6000_H4,evaluate_results/libero_plus/PILOT_step6000_H4/summary.csv,total_success_rate,45.50,percent,200-case PILOT
+eval,stage3_PILOT_step1000_H4,evaluate_results/libero_plus/stage3_PILOT_step1000_H4/summary.csv,total_success_rate,2.00,percent,200-case PILOT
+eval,stage3_PILOT_step2000_H4,evaluate_results/libero_plus/stage3_PILOT_step2000_H4/summary.csv,total_success_rate,12.50,percent,200-case PILOT
+eval,stage3_PILOT_step3000_H4,evaluate_results/libero_plus/stage3_PILOT_step3000_H4/summary.csv,total_success_rate,17.50,percent,200-case PILOT
+eval,stage3_PILOT_step4000_H4,evaluate_results/libero_plus/stage3_PILOT_step4000_H4/summary.csv,total_success_rate,17.00,percent,200-case PILOT
+config,stage1,runs/mem_temporal_libero/config.yaml,learning_rate,0.0001,lr,train_temporal_only=true; warm_start=true
+config,stage1,runs/mem_temporal_libero/config.yaml,batch_size,16,count,
+config,stage2,runs/mem_temporal_libero_stage2/config.yaml,learning_rate,0.00003,lr,train_temporal_only=true; warm_start=false; unfreeze_patch_embed=true
+config,stage2,runs/mem_temporal_libero_stage2.log,resume_checkpoint,runs/mem_temporal_libero/checkpoints/weights/step_021700.pt,path,loaded 4 VAE-memory temporal params
+config,stage3,runs/mem_temporal_libero_stage3/config.yaml,learning_rate,0.00001,lr,train_temporal_only=false; warm_start=true; unfreeze_patch_embed=false
+config,stage3,runs/mem_temporal_libero_stage3/wandb/offline-run-20260620_133813-at0tme9z/files/output.log,resume_checkpoint,checkpoints/fastwam_release/libero_uncond_2cam224.pt,path,release checkpoint has no vae_memory
+weight_drift,stage1_21700,runs/mem_temporal_libero/checkpoints/weights/step_021700.pt,mot_all_rel_l2,0,ratio,relative to release
+weight_drift,stage1_21700,runs/mem_temporal_libero/checkpoints/weights/step_021700.pt,proprio_encoder_rel_l2,0,ratio,relative to release
+weight_drift,stage1_21700,runs/mem_temporal_libero/checkpoints/weights/step_021700.pt,vae_temporal_gate,0.83203125,value,
+weight_drift,stage2_3000,runs/mem_temporal_libero_stage2/checkpoints/weights/step_003000.pt,video_patch_embedding_rel_l2,0.2588537,ratio,relative to release
+weight_drift,stage2_6000,runs/mem_temporal_libero_stage2/checkpoints/weights/step_006000.pt,video_patch_embedding_rel_l2,0.2714524,ratio,relative to release
+weight_drift,stage2_6000,runs/mem_temporal_libero_stage2/checkpoints/weights/step_006000.pt,vae_temporal_gate,0.080078125,value,
+weight_drift,stage3_0500,runs/mem_temporal_libero_stage3/checkpoints/weights/step_000500.pt,video_patch_embedding_rel_l2,0.1595376,ratio,relative to release
+weight_drift,stage3_0500,runs/mem_temporal_libero_stage3/checkpoints/weights/step_000500.pt,video_blocks_rel_l2,0.2743809,ratio,relative to release
+weight_drift,stage3_0500,runs/mem_temporal_libero_stage3/checkpoints/weights/step_000500.pt,action_blocks_other_rel_l2,0.1647984,ratio,relative to release
+weight_drift,stage3_0500,runs/mem_temporal_libero_stage3/checkpoints/weights/step_000500.pt,action_head_rel_l2,1.862426,ratio,relative to release
+weight_drift,stage3_0500,runs/mem_temporal_libero_stage3/checkpoints/weights/step_000500.pt,proprio_encoder_rel_l2,1.426230,ratio,relative to release
+weight_drift,stage3_1000,runs/mem_temporal_libero_stage3/checkpoints/weights/step_001000.pt,video_blocks_rel_l2,0.2741303,ratio,relative to release
+weight_drift,stage3_1000,runs/mem_temporal_libero_stage3/checkpoints/weights/step_001000.pt,action_head_rel_l2,1.860582,ratio,relative to release
+weight_drift,stage3_1000,runs/mem_temporal_libero_stage3/checkpoints/weights/step_001000.pt,proprio_encoder_rel_l2,1.426217,ratio,relative to release
+weight_drift,stage3_4000,runs/mem_temporal_libero_stage3/checkpoints/weights/step_004000.pt,video_patch_embedding_rel_l2,0.1587710,ratio,relative to release
+weight_drift,stage3_4000,runs/mem_temporal_libero_stage3/checkpoints/weights/step_004000.pt,video_blocks_rel_l2,0.2737000,ratio,relative to release
+weight_drift,stage3_4000,runs/mem_temporal_libero_stage3/checkpoints/weights/step_004000.pt,action_blocks_other_rel_l2,0.1649520,ratio,relative to release
+weight_drift,stage3_4000,runs/mem_temporal_libero_stage3/checkpoints/weights/step_004000.pt,action_head_rel_l2,1.858973,ratio,relative to release
+weight_drift,stage3_4000,runs/mem_temporal_libero_stage3/checkpoints/weights/step_004000.pt,proprio_encoder_rel_l2,1.426185,ratio,relative to release
+weight_drift,stage3_4000,runs/mem_temporal_libero_stage3/checkpoints/weights/step_004000.pt,vae_temporal_gate,0.0016555786,value,
+weight_delta,stage3_0500_to_4000,derived from step_000500.pt and step_004000.pt,video_patch_embedding_rel_l2,0.008593036,ratio,step500 as denominator
+weight_delta,stage3_0500_to_4000,derived from step_000500.pt and step_004000.pt,video_blocks_rel_l2,0.01372899,ratio,step500 as denominator
+weight_delta,stage3_0500_to_4000,derived from step_000500.pt and step_004000.pt,action_blocks_other_rel_l2,0.006706514,ratio,step500 as denominator
+weight_delta,stage3_0500_to_4000,derived from step_000500.pt and step_004000.pt,action_head_rel_l2,0.007876023,ratio,step500 as denominator
+weight_delta,stage3_0500_to_4000,derived from step_000500.pt and step_004000.pt,proprio_encoder_rel_l2,0.001311383,ratio,step500 as denominator
+latent_random,fresh_gate0_K0_zero,synthetic random current + no history,rel_l2,0,ratio,control; encode_memory equals encode
+latent_random,fresh_gate0_K0_zero,synthetic random current + no history,cosine,1,ratio,control; encode_memory equals encode
+latent_random,fresh_gate0_K4_zero,synthetic current + 4 zero history frames,rel_l2,1.379350,ratio,temporal_gate forced 0
+latent_random,fresh_gate0_K4_repeat,synthetic current + 4 repeated current history frames,rel_l2,0.921776,ratio,temporal_gate forced 0
+latent_random,fresh_gate0_K4_random,synthetic current + 4 random history frames,rel_l2,0.558340,ratio,temporal_gate forced 0
+latent_random,fresh_gate0_K16_zero,synthetic current + 16 zero history frames,rel_l2,1.461572,ratio,temporal_gate forced 0
+latent_random,fresh_gate0_K16_repeat,synthetic current + 16 repeated current history frames,rel_l2,0.919460,ratio,temporal_gate forced 0
+latent_random,fresh_gate0_K16_random,synthetic current + 16 random history frames,rel_l2,0.597823,ratio,temporal_gate forced 0
+latent_random,stage1_21700_K4_random,synthetic current + 4 random history frames,rel_l2,0.636559,ratio,actual vae_memory loaded
+latent_random,stage1_21700_K16_random,synthetic current + 16 random history frames,rel_l2,0.582125,ratio,actual vae_memory loaded
+latent_random,stage1_21700_K16_repeat,synthetic current + 16 repeated current history frames,rel_l2,0.610107,ratio,actual vae_memory loaded
+latent_random,stage2_6000_K4_random,synthetic current + 4 random history frames,rel_l2,0.651426,ratio,actual vae_memory loaded
+latent_random,stage2_6000_K16_random,synthetic current + 16 random history frames,rel_l2,0.708799,ratio,actual vae_memory loaded
+latent_random,stage2_6000_K16_repeat,synthetic current + 16 repeated current history frames,rel_l2,0.952831,ratio,actual vae_memory loaded
+latent_random,stage3_4000_K4_random,synthetic current + 4 random history frames,rel_l2,0.558343,ratio,actual vae_memory loaded
+latent_random,stage3_4000_K16_random,synthetic current + 16 random history frames,rel_l2,0.597818,ratio,actual vae_memory loaded
+latent_random,stage3_4000_K16_repeat,synthetic current + 16 repeated current history frames,rel_l2,0.919436,ratio,actual vae_memory loaded
+latent_real,sample_1234,RobotVideoDataset from stage3 config,dataset_len,277713,count,
+latent_real,sample_1234,RobotVideoDataset from stage3 config,video_shape,"[3,9,224,448]",shape,
+latent_real,sample_1234,RobotVideoDataset from stage3 config,history_shape,"[3,4,224,448]",shape,
+latent_real,fresh_gate0_sample_1234,actual training sample idx=1234,rel_l2,1.3061008,ratio,temporal_gate forced 0
+latent_real,fresh_gate0_sample_1234,actual training sample idx=1234,cosine,0.5717559,ratio,
+latent_real,fresh_gate0_sample_1234,actual training sample idx=1234,mean_abs,0.4550667,value,
+latent_real,fresh_gate0_sample_1234,actual training sample idx=1234,max_abs,4.0859375,value,
+latent_real,stage1_21700_sample_1234,actual training sample idx=1234,rel_l2,0.6658195,ratio,actual vae_memory loaded
+latent_real,stage1_21700_sample_1234,actual training sample idx=1234,cosine,0.7520684,ratio,
+latent_real,stage1_21700_sample_1234,actual training sample idx=1234,mean_abs,0.2375108,value,
+latent_real,stage1_21700_sample_1234,actual training sample idx=1234,max_abs,1.9375,value,
+latent_real,stage2_6000_sample_1234,actual training sample idx=1234,rel_l2,1.3036162,ratio,actual vae_memory loaded
+latent_real,stage2_6000_sample_1234,actual training sample idx=1234,cosine,0.5786446,ratio,
+latent_real,stage2_6000_sample_1234,actual training sample idx=1234,mean_abs,0.4442683,value,
+latent_real,stage2_6000_sample_1234,actual training sample idx=1234,max_abs,4.2734375,value,
+latent_real,stage3_4000_sample_1234,actual training sample idx=1234,rel_l2,1.3061141,ratio,actual vae_memory loaded
+latent_real,stage3_4000_sample_1234,actual training sample idx=1234,cosine,0.5717857,ratio,
+latent_real,stage3_4000_sample_1234,actual training sample idx=1234,mean_abs,0.4550890,value,
+latent_real,stage3_4000_sample_1234,actual training sample idx=1234,max_abs,4.0859375,value,
+diffmap_real,fresh_gate0_sample_1234,actual training sample idx=1234,diffmap_min,0.175979,value,mean abs across latent channels; 14x28 map
+diffmap_real,fresh_gate0_sample_1234,actual training sample idx=1234,diffmap_p50,0.398542,value,
+diffmap_real,fresh_gate0_sample_1234,actual training sample idx=1234,diffmap_p90,0.739672,value,
+diffmap_real,fresh_gate0_sample_1234,actual training sample idx=1234,diffmap_max,1.105782,value,
+diffmap_real,stage2_6000_sample_1234,actual training sample idx=1234,diffmap_min,0.134222,value,mean abs across latent channels; 14x28 map
+diffmap_real,stage2_6000_sample_1234,actual training sample idx=1234,diffmap_p50,0.378493,value,
+diffmap_real,stage2_6000_sample_1234,actual training sample idx=1234,diffmap_p90,0.760568,value,
+diffmap_real,stage2_6000_sample_1234,actual training sample idx=1234,diffmap_max,1.114703,value,
+diffmap_real,stage3_4000_sample_1234,actual training sample idx=1234,diffmap_min,0.176365,value,mean abs across latent channels; 14x28 map
+diffmap_real,stage3_4000_sample_1234,actual training sample idx=1234,diffmap_p50,0.398597,value,
+diffmap_real,stage3_4000_sample_1234,actual training sample idx=1234,diffmap_p90,0.739457,value,
+diffmap_real,stage3_4000_sample_1234,actual training sample idx=1234,diffmap_max,1.105802,value,

@@ -299,6 +299,6 @@ class FastWAMProcessor(BaseProcessor):
             for trans in reversed(self.action_state_transforms):
                 data = trans.backward(data)
 
-        start_obs_step = self.num_obs_steps - 1
+        start_obs_step = getattr(self, "future_action_start_step", self.num_obs_steps - 1)
         data["action"] = dict_apply(data["action"], lambda x: x[:, start_obs_step:, :])
         return data

@@ -23,6 +23,9 @@ logger = get_logger(__name__)
 DEFAULT_PROMPT = "A video recorded from a robot's point of view executing the following instruction: {task}"
 
 class RobotVideoDataset(torch.utils.data.Dataset):
+    HISTORY_ACTION_LEN = 20
+    HISTORY_VIDEO_PAST_STEPS = 16
+
     def __init__(
         self,
         dataset_dirs,
@@ -43,24 +46,38 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         concat_multi_camera: str = "horizontal", # "horizontal", "vertical", "robotwin", or None
         override_instruction: Optional[str] = None, # whether to hardcode a specific instruction for all samples, for debugging
     ):
-        self.lerobot_dataset = BaseLerobotDataset(
-            dataset_dirs=dataset_dirs,
-            shape_meta=OmegaConf.to_container(shape_meta, resolve=True),
-            obs_size=num_frames,
-            action_size=num_frames - 1,
-            val_set_proportion=val_set_proportion,
-            is_training_set=is_training_set,
-            global_sample_stride=global_sample_stride,
-        )
-    
         self.num_frames = num_frames
         self.action_video_freq_ratio = action_video_freq_ratio
-        
+        self.history_action_len = self.HISTORY_ACTION_LEN
+        self.history_video_past_steps = self.HISTORY_VIDEO_PAST_STEPS
+        self.future_action_len = num_frames - 1
+        self.current_raw_index = self.history_video_past_steps
+        self.raw_num_frames = self.history_video_past_steps + num_frames
+
         assert (num_frames - 1) % self.action_video_freq_ratio == 0, \
             f"num_frames-1 must be divisible by action_video_freq_ratio, got {num_frames - 1} and {self.action_video_freq_ratio}"
         assert ((num_frames - 1) // self.action_video_freq_ratio) % 4 == 0, \
             f"video frames must be divisible by 4 for tokenization, got {(num_frames - 1) // self.action_video_freq_ratio}"
-        self.video_sample_indices = list(range(0, num_frames, self.action_video_freq_ratio))
+        assert self.history_video_past_steps % self.action_video_freq_ratio == 0, \
+            f"history_video_past_steps must be divisible by action_video_freq_ratio, got {self.history_video_past_steps}"
+        self.history_video_sample_indices = list(
+            range(0, self.current_raw_index + 1, self.action_video_freq_ratio)
+        )
+        self.video_sample_indices = list(
+            range(self.current_raw_index, self.current_raw_index + num_frames, self.action_video_freq_ratio)
+        )
+
+        self.lerobot_dataset = BaseLerobotDataset(
+            dataset_dirs=dataset_dirs,
+            shape_meta=OmegaConf.to_container(shape_meta, resolve=True),
+            obs_size=self.raw_num_frames,
+            past_obs_size=self.history_video_past_steps,
+            action_size=self.history_action_len + self.future_action_len,
+            past_action_size=self.history_action_len,
+            val_set_proportion=val_set_proportion,
+            is_training_set=is_training_set,
+            global_sample_stride=global_sample_stride,
+        )
 
         self.camera_key = camera_key
         self.lerobot_dataset._set_return_images(True)
@@ -85,6 +102,9 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         if processor is not None:
             if isinstance(processor, DictConfig):
                 processor = instantiate(processor)
+            if hasattr(processor, "num_obs_steps"):
+                processor.num_obs_steps = self.raw_num_frames
+            processor.future_action_start_step = self.history_action_len
             if not pretrained_norm_stats:
                 if not is_training_set:
                     raise ValueError("pretrained_norm_stats must be provided for validation/test sets since we don't want to calculate stats on them.")
@@ -112,6 +132,61 @@ class RobotVideoDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.lerobot_dataset)
 
+    def _select_and_format_video(self, pixel_values: torch.Tensor, indices: list[int]) -> torch.Tensor:
+        video = pixel_values
+        num_cameras = 1
+        if video.ndim == 5:
+            video = video[:, indices, :, :, :]  # [num_cameras, T_video, C, H, W]
+            num_cameras, t_video, c, h, w = video.shape
+        else:
+            assert video.ndim == 4, f"Expected video to have shape [T, C, H, W], but got {video.shape}"
+            video = video[indices, :, :, :]  # [T_video, C, H, W]
+            t_video, c, h, w = video.shape
+
+        video = video.reshape(num_cameras, t_video, c, h, w)
+        if self.concat_multi_camera == "robotwin":
+            if num_cameras != 3:
+                raise ValueError(
+                    f"`concat_multi_camera='robotwin'` requires exactly 3 cameras, got {num_cameras}"
+                )
+            cam_top = transforms_F.resize(
+                video[0],
+                size=[256, 320],
+                interpolation=transforms_F.InterpolationMode.BILINEAR,
+                antialias=True,
+            )
+            cam_left = transforms_F.resize(
+                video[1],
+                size=[128, 160],
+                interpolation=transforms_F.InterpolationMode.BILINEAR,
+                antialias=True,
+            )
+            cam_right = transforms_F.resize(
+                video[2],
+                size=[128, 160],
+                interpolation=transforms_F.InterpolationMode.BILINEAR,
+                antialias=True,
+            )
+            bottom = torch.cat([cam_left, cam_right], dim=-1)
+            video = torch.cat([cam_top, bottom], dim=-2)
+        elif num_cameras > 1:
+            if self.concat_multi_camera == "horizontal":
+                video = torch.cat([video[i] for i in range(num_cameras)], dim=-1)
+            elif self.concat_multi_camera == "vertical":
+                video = torch.cat([video[i] for i in range(num_cameras)], dim=-2)
+            else:
+                raise ValueError(
+                    f"Invalid concat_multi_camera: {self.concat_multi_camera}. "
+                    "Expected one of: horizontal, vertical, robotwin."
+                )
+        else:
+            video = video.squeeze(0)
+
+        video = self.resize_transform(video)
+        video = self.crop_transform(video)
+        video = self.normalize_transform(video)
+        return video.permute(1, 0, 2, 3)  # [C, T_video, H, W], range [-1, 1]
+
     def _get(self, idx):
         sample_idx = idx
         sample = None
@@ -136,71 +211,26 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 break
 
             sample_idx = np.random.randint(len(self.lerobot_dataset))
-        
+
         image_is_pad = sample["image_is_pad"]
 
-        video = sample["pixel_values"]  # [T, C, H, W] or [num_cameras, T, C, H, W]
-        num_cameras = 1
-        if video.ndim == 5:
-            video = video[:, self.video_sample_indices, :, :, :] # [num_cameras, T_video, C, H, W]
-            num_cameras, T_video, C, H, W = video.shape
-        else:
-            assert video.ndim == 4, f"Expected video to have shape [T, C, H, W], but got {video.shape}"
-            video = video[self.video_sample_indices, :, :, :] # [T_video, C, H, W]
-            T_video, C, H, W = video.shape
+        pixel_values = sample["pixel_values"]  # [T, C, H, W] or [num_cameras, T, C, H, W]
+        history_video = self._select_and_format_video(pixel_values, self.history_video_sample_indices)
+        video = self._select_and_format_video(pixel_values, self.video_sample_indices)
+        history_video_is_pad = image_is_pad[self.history_video_sample_indices]
         image_is_pad = image_is_pad[self.video_sample_indices]
-
-        video = video.view(num_cameras, T_video, C, H, W)  # [num_cameras, T_video, C, H, W]
-        if self.concat_multi_camera == "robotwin":
-            if num_cameras != 3:
-                raise ValueError(
-                    f"`concat_multi_camera='robotwin'` requires exactly 3 cameras, got {num_cameras}"
-                )
-            cam_top = transforms_F.resize(
-                video[0],
-                size=[256, 320],
-                interpolation=transforms_F.InterpolationMode.BILINEAR,
-                antialias=True,
-            )  # [T_video, C, 256, 320]
-            cam_left = transforms_F.resize(
-                video[1],
-                size=[128, 160],
-                interpolation=transforms_F.InterpolationMode.BILINEAR,
-                antialias=True,
-            )  # [T_video, C, 128, 160]
-            cam_right = transforms_F.resize(
-                video[2],
-                size=[128, 160],
-                interpolation=transforms_F.InterpolationMode.BILINEAR,
-                antialias=True,
-            )  # [T_video, C, 128, 160]
-            bottom = torch.cat([cam_left, cam_right], dim=-1)  # [T_video, C, 128, 320]
-            video = torch.cat([cam_top, bottom], dim=-2)  # [T_video, C, 384, 320]
-        elif num_cameras > 1:
-            if self.concat_multi_camera == "horizontal":
-                video = torch.cat([video[i] for i in range(num_cameras)], dim=-1)  # [T_video, C, H, num_cameras*W]
-            elif self.concat_multi_camera == "vertical":
-                video = torch.cat([video[i] for i in range(num_cameras)], dim=-2)  # [T_video, C, num_cameras*H, W]
-            else:
-                raise ValueError(
-                    f"Invalid concat_multi_camera: {self.concat_multi_camera}. "
-                    "Expected one of: horizontal, vertical, robotwin."
-                )
-        else:
-            video = video.squeeze(0)  # [T_video, C, H, W]
-
-        # final resize and normalization
-        video = self.resize_transform(video)
-        video = self.crop_transform(video)
-        video = self.normalize_transform(video)  # [T_video, C, H, W]
-
-        video = video.permute(1, 0, 2, 3) # [C, T_video, H, W], range [-1, 1]
 
         # Proxy (from lerobot): 
         #   action: [num_frames-1, action_dim] # start from t0, except the last frame
         #   proprio: [num_frames, proprio_dim] # start from t0 to the last frame, aligned with video frames
-        action = sample["action"] # [T-1, action_dim]
-        proprio = sample["proprio"][:-1, :] # [T-1, state_dim]， to align with action
+        raw_action = sample["action"] # [history + future, action_dim]
+        raw_proprio = sample["proprio"] # [history_obs + future_obs, state_dim]
+        history_action = raw_action[:self.history_action_len, :]
+        action = raw_action[self.history_action_len:self.history_action_len + self.future_action_len, :]
+        proprio = raw_proprio[self.current_raw_index:self.current_raw_index + self.future_action_len, :]
+        history_action_is_pad = sample["action_is_pad"][:self.history_action_len]
+        action_is_pad = sample["action_is_pad"][self.history_action_len:self.history_action_len + self.future_action_len]
+        proprio_is_pad = sample["proprio_is_pad"][self.current_raw_index:self.current_raw_index + self.future_action_len]
         if video.shape[1] <= 1:
             raise ValueError(f"`video` must have at least 2 frames, got shape {tuple(video.shape)}")
         if action.shape[0] % (video.shape[1] - 1) != 0:
@@ -222,14 +252,18 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         
         data = {
             "video": video,
+            "history_video": history_video,
             "action": action,
+            "history_action": history_action,
             "proprio": proprio,
             "prompt": instruction,
             "context": context,
             "context_mask": context_mask,
             "image_is_pad": image_is_pad,
-            "action_is_pad": sample["action_is_pad"],
-            "proprio_is_pad": sample["proprio_is_pad"],
+            "history_video_is_pad": history_video_is_pad,
+            "action_is_pad": action_is_pad,
+            "history_action_is_pad": history_action_is_pad,
+            "proprio_is_pad": proprio_is_pad,
         }
         return data
 
