@@ -334,6 +334,7 @@ class WanVideoDiT(torch.nn.Module):
         action_dim: int = 7,
         action_group_causal_mask_mode = "causal",
         video_attention_mask_mode: str = "bidirectional",
+        num_source_embeddings: int = 5,
         use_gradient_checkpointing: bool = False,
     ):
         super().__init__()
@@ -384,7 +385,9 @@ class WanVideoDiT(torch.nn.Module):
         ])
         self.head = Head(hidden_dim, out_dim, patch_size, eps)
         self.freqs = precompute_freqs_cis_3d(attn_head_dim)
-        self.source_embedding = nn.Embedding(4, hidden_dim)
+        if num_source_embeddings <= 0:
+            raise ValueError(f"`num_source_embeddings` must be positive, got {num_source_embeddings}")
+        self.source_embedding = nn.Embedding(num_source_embeddings, hidden_dim)
         self.source_embedding_gate = nn.Parameter(torch.zeros(()))
         if has_ref_conv:
             self.ref_conv = nn.Conv2d(16, hidden_dim, kernel_size=(2, 2), stride=(2, 2))
@@ -549,11 +552,17 @@ class WanVideoDiT(torch.nn.Module):
         video_seq_len: int,
         video_tokens_per_frame: int,
         device: torch.device,
+        clean_prefix_latent_frames: int = 1,
     ) -> torch.Tensor:
         if video_seq_len <= 0:
             raise ValueError(f"`video_seq_len` must be positive, got {video_seq_len}")
         if video_tokens_per_frame <= 0:
             raise ValueError(f"`video_tokens_per_frame` must be positive, got {video_tokens_per_frame}")
+        clean_prefix_latent_frames = int(clean_prefix_latent_frames)
+        if clean_prefix_latent_frames < 0:
+            raise ValueError(
+                f"`clean_prefix_latent_frames` must be non-negative, got {clean_prefix_latent_frames}"
+            )
 
         if self.video_attention_mask_mode == "bidirectional":
             return torch.ones((video_seq_len, video_seq_len), dtype=torch.bool, device=device)
@@ -574,8 +583,9 @@ class WanVideoDiT(torch.nn.Module):
 
         if self.video_attention_mask_mode == "first_frame_causal":
             video_mask = torch.ones((video_seq_len, video_seq_len), dtype=torch.bool, device=device)
-            first_frame_tokens = min(video_tokens_per_frame, video_seq_len)
-            video_mask[:first_frame_tokens, first_frame_tokens:] = False
+            clean_prefix_tokens = min(clean_prefix_latent_frames * video_tokens_per_frame, video_seq_len)
+            if clean_prefix_tokens > 0:
+                video_mask[:clean_prefix_tokens, clean_prefix_tokens:] = False
             return video_mask
 
         raise ValueError(f"Unsupported video attention mask mode: {self.video_attention_mask_mode}")
@@ -592,6 +602,7 @@ class WanVideoDiT(torch.nn.Module):
         source_ids: Optional[torch.Tensor] = None,
         temporal_position_ids: Optional[torch.Tensor] = None,
         allow_missing_action_condition: bool = False,
+        clean_prefix_latent_frames: int = 1,
     ) -> Dict[str, Any]:
         x, timestep, context_mask = self._validate_forward_inputs(
             x=x,
@@ -611,6 +622,12 @@ class WanVideoDiT(torch.nn.Module):
                 f"got HxW=({x.shape[3]}, {x.shape[4]}), patch=({patch_h}, {patch_w})"
             )
         tokens_per_frame = (x.shape[3] // patch_h) * (x.shape[4] // patch_w)
+        clean_prefix_latent_frames = int(clean_prefix_latent_frames)
+        if clean_prefix_latent_frames < 0 or clean_prefix_latent_frames > x.shape[2]:
+            raise ValueError(
+                "`clean_prefix_latent_frames` must be in "
+                f"[0, {x.shape[2]}], got {clean_prefix_latent_frames}"
+            )
 
         if self.seperated_timestep and fuse_vae_embedding_in_latents:
             if not hasattr(self, "patch_size") or len(self.patch_size) < 3:
@@ -621,7 +638,8 @@ class WanVideoDiT(torch.nn.Module):
                 dtype=timestep.dtype,
                 device=timestep.device,
             ) * timestep.view(batch_size, 1, 1)
-            token_timesteps[:, 0, :] = 0
+            if clean_prefix_latent_frames > 0:
+                token_timesteps[:, :clean_prefix_latent_frames, :] = 0
             token_timesteps = token_timesteps.reshape(batch_size, -1)
             token_t_emb = sinusoidal_embedding_1d(self.freq_dim, token_timesteps.reshape(-1))
             t = self.time_embedding(token_t_emb).reshape(batch_size, -1, self.hidden_dim)
@@ -732,6 +750,7 @@ class WanVideoDiT(torch.nn.Module):
         source_ids: Optional[torch.Tensor] = None,
         temporal_position_ids: Optional[torch.Tensor] = None,
         allow_missing_action_condition: bool = False,
+        clean_prefix_latent_frames: int = 1,
     ):
         pre_state = self.pre_dit(
             x=x,
@@ -743,6 +762,7 @@ class WanVideoDiT(torch.nn.Module):
             source_ids=source_ids,
             temporal_position_ids=temporal_position_ids,
             allow_missing_action_condition=allow_missing_action_condition,
+            clean_prefix_latent_frames=clean_prefix_latent_frames,
         )
         x_tokens = pre_state["tokens"]
         context_emb = pre_state["context"]
@@ -753,6 +773,7 @@ class WanVideoDiT(torch.nn.Module):
             video_seq_len=x_tokens.shape[1],
             video_tokens_per_frame=int(pre_state["meta"]["tokens_per_frame"]),
             device=x_tokens.device,
+            clean_prefix_latent_frames=clean_prefix_latent_frames,
         ) if self.video_attention_mask_mode != "bidirectional" else None # special rule for faster speed
 
         for block in self.blocks:

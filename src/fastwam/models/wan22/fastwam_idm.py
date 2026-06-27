@@ -416,7 +416,7 @@ class FastWAMIDM(FastWAMJoint):
             video_tokens_per_frame=int(video_pre_cond["meta"]["tokens_per_frame"]),
             device=video_pre_cond["tokens"].device,
         )
-        video_kv_cache = self.mot.prefill_video_cache(
+        video_kv_cache, _video_tokens = self.mot.prefill_video_cache(
             video_tokens=video_pre_cond["tokens"],
             video_freqs=video_pre_cond["freqs"],
             video_t_mod=video_pre_cond["t_mod"],
