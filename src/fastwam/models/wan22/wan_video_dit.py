@@ -496,10 +496,17 @@ class WanVideoDiT(torch.nn.Module):
         context_mask: Optional[torch.Tensor],
         action: Optional[torch.Tensor],
         allow_missing_action_condition: bool = False,
+        clean_prefix_latent_frames: int = 1,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if x.ndim != 5:
             raise ValueError(f"`latents` must be 5D [B, C, T, H, W], got shape {tuple(x.shape)}")
         num_latent_frames = x.shape[2]
+        clean_prefix_latent_frames = int(clean_prefix_latent_frames)
+        if clean_prefix_latent_frames < 0 or clean_prefix_latent_frames > num_latent_frames:
+            raise ValueError(
+                "`clean_prefix_latent_frames` must be in "
+                f"[0, {num_latent_frames}], got {clean_prefix_latent_frames}"
+            )
         if context.ndim != 3:
             raise ValueError(f"`context` must be 3D [B, L, D], got shape {tuple(context.shape)}")
         if timestep.ndim != 1:
@@ -514,11 +521,17 @@ class WanVideoDiT(torch.nn.Module):
                     raise ValueError(f"`action` must be 3D [B, action_horizon, action_dim], got shape {tuple(action.shape)}")
                 if action.shape[2] != self.action_dim:
                     raise ValueError(f"`action` last dimension must be {self.action_dim}, got {action.shape[2]}")
-                if num_latent_frames <= 1:
-                    raise ValueError(f"video length must be > 1 for action-conditioned model, got {num_latent_frames}")
-                if action.shape[1] % (num_latent_frames - 1) != 0:
+                num_temporal_groups = num_latent_frames - clean_prefix_latent_frames
+                if num_temporal_groups <= 0:
                     raise ValueError(
-                        f"action horizon must be divisible by (num_latent_frames - 1), got action_horizon={action.shape[1]}"
+                        "Action-conditioned video requires at least one future latent frame beyond the clean prefix, "
+                        f"got num_latent_frames={num_latent_frames}, clean_prefix={clean_prefix_latent_frames}."
+                    )
+                if action.shape[1] % num_temporal_groups != 0:
+                    raise ValueError(
+                        "action horizon must be divisible by "
+                        f"(num_latent_frames - clean_prefix_latent_frames)={num_temporal_groups}, "
+                        f"got action_horizon={action.shape[1]}"
                     )
         if context_mask is None:
             context_mask = torch.ones((context.shape[0], context.shape[1]), dtype=torch.bool, device=context.device)
@@ -611,6 +624,7 @@ class WanVideoDiT(torch.nn.Module):
             context_mask=context_mask,
             action=action,
             allow_missing_action_condition=allow_missing_action_condition,
+            clean_prefix_latent_frames=clean_prefix_latent_frames,
         )
 
         batch_size = x.shape[0]
