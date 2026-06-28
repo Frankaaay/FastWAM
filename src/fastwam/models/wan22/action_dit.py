@@ -75,6 +75,8 @@ class ActionDiT(nn.Module):
             raise ValueError(f"`attn_head_dim` must be > 0, got {attn_head_dim}")
         if attn_head_dim % 2 != 0:
             raise ValueError(f"`attn_head_dim` must be even for RoPE, got {attn_head_dim}")
+        self.rope_cache_len = 1024
+        self.rope_theta = 10000.0
 
         self.action_encoder = nn.Linear(action_dim, hidden_dim)
         self.text_embedding = nn.Sequential(
@@ -101,11 +103,30 @@ class ActionDiT(nn.Module):
             ]
         )
         self.head = nn.Linear(hidden_dim, action_dim)
-        self.freqs = precompute_freqs_cis(attn_head_dim, end=1024)
+        self.register_buffer(
+            "freqs",
+            precompute_freqs_cis(attn_head_dim, end=self.rope_cache_len, theta=self.rope_theta),
+            persistent=False,
+        )
         self.source_embedding = nn.Embedding(4, hidden_dim)
         self.source_embedding_gate = nn.Parameter(torch.zeros(()))
 
         self.use_gradient_checkpointing = use_gradient_checkpointing
+
+    def _reset_rope_cache(self, device: torch.device):
+        self._buffers["freqs"] = precompute_freqs_cis(
+            self.attn_head_dim, end=self.rope_cache_len, theta=self.rope_theta
+        ).to(device=device)
+
+    def _apply(self, fn):
+        freqs = self._buffers.pop("freqs", None)
+        try:
+            result = super()._apply(fn)
+        finally:
+            if freqs is not None:
+                self._buffers["freqs"] = freqs
+        self._reset_rope_cache(device=self.action_encoder.weight.device)
+        return result
 
     def _normalize_source_ids(
         self,

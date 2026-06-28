@@ -358,6 +358,8 @@ class WanVideoDiT(torch.nn.Module):
             raise ValueError(
                 f"`attn_head_dim` must be even for RoPE, got {attn_head_dim}"
             )
+        self.rope_cache_len = 1024
+        self.rope_theta = 10000.0
         
         self.action_conditioned = action_conditioned
         self.action_dim = action_dim
@@ -384,7 +386,12 @@ class WanVideoDiT(torch.nn.Module):
             for _ in range(num_layers)
         ])
         self.head = Head(hidden_dim, out_dim, patch_size, eps)
-        self.freqs = precompute_freqs_cis_3d(attn_head_dim)
+        freqs_t, freqs_h, freqs_w = precompute_freqs_cis_3d(
+            attn_head_dim, end=self.rope_cache_len, theta=self.rope_theta
+        )
+        self.register_buffer("freqs_t", freqs_t, persistent=False)
+        self.register_buffer("freqs_h", freqs_h, persistent=False)
+        self.register_buffer("freqs_w", freqs_w, persistent=False)
         if num_source_embeddings <= 0:
             raise ValueError(f"`num_source_embeddings` must be positive, got {num_source_embeddings}")
         self.source_embedding = nn.Embedding(num_source_embeddings, hidden_dim)
@@ -402,6 +409,28 @@ class WanVideoDiT(torch.nn.Module):
         self.use_gradient_checkpointing = use_gradient_checkpointing
         if self.use_gradient_checkpointing:
             logger.info("Using gradient checkpointing for DiT blocks. This will save memory but use more computation.")
+
+    @property
+    def freqs(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self.freqs_t, self.freqs_h, self.freqs_w
+
+    def _reset_rope_cache(self, device: torch.device):
+        freqs_t, freqs_h, freqs_w = precompute_freqs_cis_3d(
+            self.attn_head_dim, end=self.rope_cache_len, theta=self.rope_theta
+        )
+        self._buffers["freqs_t"] = freqs_t.to(device=device)
+        self._buffers["freqs_h"] = freqs_h.to(device=device)
+        self._buffers["freqs_w"] = freqs_w.to(device=device)
+
+    def _apply(self, fn):
+        rope_names = ("freqs_t", "freqs_h", "freqs_w")
+        rope_buffers = {name: self._buffers.pop(name) for name in rope_names if name in self._buffers}
+        try:
+            result = super()._apply(fn)
+        finally:
+            self._buffers.update(rope_buffers)
+        self._reset_rope_cache(device=self.patch_embedding.weight.device)
+        return result
 
     def _normalize_temporal_position_ids(
         self,
