@@ -78,13 +78,17 @@ class FastWAMOnlineHistoryBuffer:
                 f"Current observation for step {current_step} is required before building history condition."
             )
 
-        zero_frame = torch.zeros_like(current_frame)
+        # 缺失的历史帧用最早已记录帧做边缘填充，匹配训练集 LeRobot 的 index clamp 行为
+        # （越界 query 被 clamp 到 ep_start，即重复 episode 首帧）。否则 episode 起步时缺失帧
+        # 用零填充，会让 VAE 时间压缩后的 current_video latent 与训练不一致（current 永不 dropout）。
+        earliest_step = min(frames_by_step)
+        earliest_frame = frames_by_step[earliest_step]
         frames = []
         video_is_pad = []
         for offset in self.video_offsets:
             frame = frames_by_step.get(current_step + offset)
             if frame is None:
-                frames.append(zero_frame)
+                frames.append(earliest_frame)
                 video_is_pad.append(True)
             else:
                 frames.append(frame)

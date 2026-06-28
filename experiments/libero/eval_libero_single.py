@@ -294,6 +294,30 @@ def _denormalize_action(action: torch.Tensor, processor: FastWAMProcessor) -> np
     return denorm.numpy()
 
 
+def _libero_command_to_model_action(command_action: np.ndarray, processor: FastWAMProcessor) -> np.ndarray:
+    command_action = np.asarray(command_action, dtype=np.float32)
+    if command_action.ndim == 1:
+        command_action = command_action[None, :]
+    if command_action.ndim != 2:
+        raise ValueError(f"Expected LIBERO command action [T,D] or [D], got {tuple(command_action.shape)}")
+
+    action_meta = processor.shape_meta["action"]
+    if len(action_meta) != 1:
+        raise ValueError(
+            "LIBERO eval currently expects a single merged action key in shape_meta['action']."
+        )
+
+    # env command 约定：-1=open, +1=close；训练/model 归一化前约定：0=close, 1=open。
+    # 这里记录的是 policy stack 最终发出的 command，不使用 simulator 特权运动信息。
+    train_action = command_action.copy()
+    train_action[..., -1] = (1.0 - train_action[..., -1]) * 0.5
+
+    action_key = action_meta[0]["key"]
+    normalizer = processor.normalizer.normalizers["action"][action_key]
+    model_action = normalizer.forward(torch.as_tensor(train_action, dtype=torch.float32))
+    return model_action.numpy()
+
+
 def _predict_action_chunk(
     obs: dict,
     task_description: str,
@@ -307,7 +331,7 @@ def _predict_action_chunk(
     input_w: int,
     input_h: int,
     model_device: str,
-) -> tuple[np.ndarray, np.ndarray, dict]:
+) -> tuple[np.ndarray, dict]:
     num_inference_steps_cfg = cfg.EVALUATION.get("num_inference_steps", None)
     if num_inference_steps_cfg is None:
         num_inference_steps = int(cfg.get("eval_num_inference_steps", 20))
@@ -356,7 +380,6 @@ def _predict_action_chunk(
     with torch.no_grad():
         pred = model.infer_action(**infer_kwargs)
     model_action = pred["action"]  # [T, D]
-    model_action_np = model_action.detach().to(dtype=torch.float32, device="cpu").numpy()
 
     action = _denormalize_action(model_action, processor)[0]  # [T, D]
 
@@ -366,7 +389,7 @@ def _predict_action_chunk(
     action = invert_gripper_action(action)
     if bool(cfg.EVALUATION.get("binarize_gripper", False)):
         action[..., -1] = np.sign(action[..., -1])
-    return action, model_action_np, imgs
+    return action, imgs
 
 
 def _get_max_steps(task_suite_name: str) -> int:
@@ -412,8 +435,6 @@ def run_single_episode(
     if use_action_ensembler:
         ensembler = ActionEnsembler()
         ensembler.reset()
-        model_action_ensembler = ActionEnsembler()
-        model_action_ensembler.reset()
 
     replay_images = []
     pending_actions: list[tuple[list[float], np.ndarray]] = []
@@ -430,7 +451,7 @@ def run_single_episode(
 
         policy_step = t - num_steps_wait
         if len(pending_actions) == 0:
-            action_chunk, model_action_chunk, imgs = _predict_action_chunk(
+            action_chunk, imgs = _predict_action_chunk(
                 obs=obs,
                 task_description=task_description,
                 model=model,
@@ -445,20 +466,17 @@ def run_single_episode(
             )
             if use_action_ensembler:
                 ensembler.add_actions(action_chunk, t)
-                model_action_ensembler.add_actions(model_action_chunk, t)
-                pending_actions = [
-                    (
-                        ensembler.get_action(ts).tolist(),
-                        np.asarray(model_action_ensembler.get_action(ts), dtype=np.float32),
-                    )
-                    for ts in range(t, t + replan_steps)
-                ]
+                pending_actions = []
+                for ts in range(t, t + replan_steps):
+                    env_action = np.asarray(ensembler.get_action(ts), dtype=np.float32)
+                    model_action = _libero_command_to_model_action(env_action, processor)[0]
+                    pending_actions.append((env_action.tolist(), model_action))
             else:
                 n_exec = min(replan_steps, action_chunk.shape[0])
                 pending_actions = [
                     (
-                        action_chunk[i].tolist(),
-                        np.asarray(model_action_chunk[i], dtype=np.float32),
+                        np.asarray(action_chunk[i], dtype=np.float32).tolist(),
+                        _libero_command_to_model_action(np.asarray(action_chunk[i], dtype=np.float32), processor)[0],
                     )
                     for i in range(n_exec)
                 ]
