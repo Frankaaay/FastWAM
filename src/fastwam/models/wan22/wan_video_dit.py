@@ -662,27 +662,32 @@ class WanVideoDiT(torch.nn.Module):
             context = torch.cat([context, action_emb], dim=1) # (B, context_len + action_len, dim)
 
             # new mask
-            num_temporal_groups = f - 1 # first latent frame do not attend to actions
+            # clean prefix（v4 的 history/current video condition）不 attend action；
+            # 只有 prefix 之后的 future latent 帧按组 attend 对应的 action token。
+            # clean_prefix_latent_frames 默认 1，等价于原 FastWAM「第一帧不看 action」的行为。
+            num_temporal_groups = f - clean_prefix_latent_frames
             if num_temporal_groups <= 0:
                 raise ValueError(
-                    "Action-conditioned context mask requires at least 2 latent frames when `action` is provided."
+                    "Action-conditioned context mask requires at least one future latent frame "
+                    f"beyond the clean prefix, got f={f}, clean_prefix={clean_prefix_latent_frames}."
                 )
             assert action_emb.shape[1] % num_temporal_groups == 0, \
                 f"Action embedding length {action_emb.shape[1]} must be divisible by number of temporal groups {num_temporal_groups}"
-            # Each latent frame (from the 2nd one) attends to the corresponding group of action tokens
+            # Each future latent frame attends to the corresponding group of action tokens
             action_group_mask = create_group_causal_attn_mask(
                 num_temporal_groups=num_temporal_groups,
                 num_query_per_group=tokens_per_frame,
                 num_key_per_group=action_len // num_temporal_groups,
                 mode=self.action_group_causal_mask_mode,
-            ).to(context.device) # ((f-1)*tokens_per_frame, action_len)
+            ).to(context.device) # (num_temporal_groups*tokens_per_frame, action_len)
 
+            clean_prefix_tokens = clean_prefix_latent_frames * tokens_per_frame
             seq_len = f * h * w # query length
             final_context_mask = torch.zeros((batch_size, seq_len, context.shape[1]), dtype=torch.bool, device=context.device) # (B, seq_len, L + action_len)
             # all latent frames attend to text tokens
             final_context_mask[:, :, :context_len] = context_mask.unsqueeze(1).expand(-1, seq_len, -1) # (B, seq_len, L)
-            # latent frames from the 2nd one attend to action tokens
-            final_context_mask[:, tokens_per_frame:, context_len:] = action_group_mask.unsqueeze(0).expand(batch_size, -1, -1) # (B, seq_len, action_len)
+            # future latent frames (after clean prefix) attend to action tokens
+            final_context_mask[:, clean_prefix_tokens:, context_len:] = action_group_mask.unsqueeze(0).expand(batch_size, -1, -1) # (B, seq_len, action_len)
             context_mask = final_context_mask
         elif self.action_conditioned and action is None:
             if f != 1 and not allow_missing_action_condition:

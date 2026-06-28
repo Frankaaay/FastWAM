@@ -751,13 +751,14 @@ class FastWAM(torch.nn.Module):
         latents = self.train_video_scheduler.add_noise(input_latents, noise_video, timestep_video)
         target_video = self.train_video_scheduler.training_target(input_latents, noise_video, timestep_video)
 
-        if inputs["first_frame_latents"] is not None:
-            latents[:, :, 0:1] = inputs["first_frame_latents"]
         if input_latents.shape[2] <= 1:
             raise ValueError("mem-stage-v4 video loss requires at least one future video latent frame.")
         clean_prefix_latent_frames = int(history_video_latents.shape[2])
         if clean_prefix_latent_frames <= 0:
             raise ValueError("mem-stage-v4 requires non-empty `history_video_latents`.")
+        # 注意：当前观测 V[t] 由 history_video 的最后一帧（current_video）承载，
+        # 因此这里直接丢弃 input_latents 的第 0 帧，避免与 history 重复；
+        # 原 FastWAM 中「latents[:,:,0:1] = first_frame_latents」在 v4 下是 no-op（随后即被丢弃），故移除。
         future_noisy_latents = latents[:, :, 1:]
         target_video = target_video[:, :, 1:]
         combined_video_latents = torch.cat([history_video_latents, future_noisy_latents], dim=2)
@@ -788,16 +789,18 @@ class FastWAM(torch.nn.Module):
             total_latent_frames=combined_video_latents.shape[2],
             device=combined_video_latents.device,
         )
+        # 与原 FastWAM 一致：把 future action 作为 video 分支的条件（仅当 action_conditioned=True 时生效）。
+        # combined 路径下，clean prefix（history/current）不 attend action，
+        # 只有 future video latent 帧按组 attend future action；group 数 = f - clean_prefix。
         video_pre = self.video_expert.pre_dit(
             x=combined_video_latents,
             timestep=timestep_video,
             context=context,
             context_mask=context_mask,
-            action=None,
+            action=action,
             fuse_vae_embedding_in_latents=inputs["fuse_vae_embedding_in_latents"],
             source_ids=video_source_ids,
             temporal_position_ids=video_position_ids,
-            allow_missing_action_condition=True,
             clean_prefix_latent_frames=clean_prefix_latent_frames,
         )
 
@@ -967,8 +970,10 @@ class FastWAM(torch.nn.Module):
 
     def training_loss(self, sample, tiled: bool = False):
         inputs = self.build_inputs(sample, tiled=tiled)
+        # v4 要求 history_video 与 history_action 成对出现（_training_loss_v4 内部强校验），
+        # 这里用 AND 保持触发条件与该不变量一致：缺任一字段则回退原 FastWAM 路径。
         if self.enable_mem_stage_v4 and (
-            inputs["history_video_latents"] is not None or inputs["history_action"] is not None
+            inputs["history_video_latents"] is not None and inputs["history_action"] is not None
         ):
             return self._training_loss_v4(inputs)
         input_latents = inputs["input_latents"]
@@ -1343,6 +1348,9 @@ class FastWAM(torch.nn.Module):
                 video_seq_len=history_video_pre["tokens"].shape[1],
                 video_tokens_per_frame=int(history_video_pre["meta"]["tokens_per_frame"]),
                 device=history_video_pre["tokens"].device,
+                # 推理时 history window 全部是 clean condition，前缀内部应双向可见，
+                # 与训练 combined 路径（clean_prefix = 全部 history latent 帧）保持一致。
+                clean_prefix_latent_frames=history_video_latents.shape[2],
             )
             history_video_latent_valid = self._latent_valid_from_raw_pad(
                 raw_is_pad=history_video_is_pad,
