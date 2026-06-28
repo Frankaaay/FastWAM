@@ -2,7 +2,6 @@ import logging
 import os
 import sys
 import time
-import inspect
 from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -26,6 +25,7 @@ if str(SRC_ROOT) not in sys.path:
 from fastwam.datasets.lerobot.processors.fastwam_processor import FastWAMProcessor
 from fastwam.datasets.lerobot.robot_video_dataset import DEFAULT_PROMPT
 from fastwam.datasets.lerobot.utils.normalizer import load_dataset_stats_from_json
+from experiments.fastwam_online_history import FastWAMOnlineHistoryBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +154,7 @@ class WorldActionRobotWinPolicy:
         rand_device: str,
         tiled: bool,
         timing_enabled: bool,
-        num_video_frames: int,
+        action_video_freq_ratio: int,
     ) -> None:
         model_cfg_copy = OmegaConf.create(OmegaConf.to_container(model_cfg, resolve=True))
         model_cfg_copy.load_text_encoder = True
@@ -177,9 +177,14 @@ class WorldActionRobotWinPolicy:
         self.rand_device = str(rand_device)
         self.tiled = bool(tiled)
         self.timing_enabled = bool(timing_enabled)
-        self._num_video_frames = int(num_video_frames)
 
-        self.pending_actions: deque[np.ndarray] = deque()
+        self.history_buffer = FastWAMOnlineHistoryBuffer(
+            action_dim=int(self.model.action_expert.action_dim),
+            history_action_len=int(getattr(self.model, "history_action_len", 20)),
+            history_video_past_steps=16,
+            action_video_freq_ratio=int(action_video_freq_ratio),
+        )
+        self.pending_actions: deque[tuple[np.ndarray, np.ndarray]] = deque()
         self.episode_count = 0
         self.step_count = 0
         self._timing_rollout = {"infer_s": 0.0, "sim_s": 0.0}
@@ -233,8 +238,12 @@ class WorldActionRobotWinPolicy:
         image_tensor = image_tensor * (2.0 / 255.0) - 1.0
         return image_tensor
 
-    def _infer_action_chunk(self, observation: Dict[str, Any], instruction: str) -> np.ndarray:
-        image_tensor = self._build_robotwin_image_tensor(observation)
+    def _infer_action_chunk(
+        self,
+        observation: Dict[str, Any],
+        instruction: str,
+        image_tensor: torch.Tensor,
+    ) -> tuple[np.ndarray, np.ndarray]:
         state_vector = np.asarray(observation["joint_action"]["vector"], dtype=np.float32)
         proprio = self._normalize_state(state_vector)
 
@@ -252,8 +261,14 @@ class WorldActionRobotWinPolicy:
             "rand_device": self.rand_device,
             "tiled": self.tiled,
         }
-        if "num_video_frames" in inspect.signature(self.model.infer_action).parameters:
-            infer_kwargs["num_video_frames"] = int(self._num_video_frames)
+        if FastWAMOnlineHistoryBuffer.enabled_for_model(self.model):
+            infer_kwargs.update(
+                self.history_buffer.build_condition(
+                    current_step=self.step_count,
+                    device=self.model.device,
+                    dtype=self.model.torch_dtype,
+                )
+            )
         infer_t0 = time.perf_counter() if self.timing_enabled else 0.0
         with torch.no_grad():
             pred = self.model.infer_action(**infer_kwargs)
@@ -261,19 +276,39 @@ class WorldActionRobotWinPolicy:
             self._timing_rollout["infer_s"] += time.perf_counter() - infer_t0
 
         action_tensor = pred["action"]  # [T, D]
+        model_action_chunk = action_tensor.detach().to(dtype=torch.float32, device="cpu").numpy()
         action_chunk = self._denormalize_action(action_tensor)[0]  # [T, D]
-        return action_chunk
+        return action_chunk, model_action_chunk
 
-    def _fill_action_queue(self, observation: Dict[str, Any], instruction: str) -> None:
-        action_chunk = self._infer_action_chunk(observation=observation, instruction=instruction)
+    def _fill_action_queue(
+        self,
+        observation: Dict[str, Any],
+        instruction: str,
+        image_tensor: torch.Tensor,
+    ) -> None:
+        action_chunk, model_action_chunk = self._infer_action_chunk(
+            observation=observation,
+            instruction=instruction,
+            image_tensor=image_tensor,
+        )
         n_exec = min(self.replan_steps, action_chunk.shape[0])
         for i in range(n_exec):
-            self.pending_actions.append(np.asarray(action_chunk[i], dtype=np.float32))
+            self.pending_actions.append(
+                (
+                    np.asarray(action_chunk[i], dtype=np.float32),
+                    np.asarray(model_action_chunk[i], dtype=np.float32),
+                )
+            )
 
     def should_request_observation(self) -> bool:
-        return not self.pending_actions
+        return True
 
     def step(self, task_env, observation: Optional[Dict[str, Any]]) -> None:
+        image_tensor = None
+        if observation is not None:
+            image_tensor = self._build_robotwin_image_tensor(observation)
+            self.history_buffer.record_observation(self.step_count, image_tensor)
+
         if not self.pending_actions:
             if observation is None:
                 raise ValueError(
@@ -281,17 +316,23 @@ class WorldActionRobotWinPolicy:
                     "(replan step for fastwam)."
                 )
             instruction = task_env.get_instruction()
-            self._fill_action_queue(observation=observation, instruction=instruction)
+            assert image_tensor is not None
+            self._fill_action_queue(
+                observation=observation,
+                instruction=instruction,
+                image_tensor=image_tensor,
+            )
 
         if not self.pending_actions:
             logger.warning("No action generated; skip current eval step.")
             return
 
-        action = self.pending_actions.popleft()
+        action, model_action = self.pending_actions.popleft()
         sim_t0 = time.perf_counter() if self.timing_enabled else 0.0
         task_env.take_action(action, action_type="qpos")
         if self.timing_enabled:
             self._timing_rollout["sim_s"] += time.perf_counter() - sim_t0
+        self.history_buffer.record_action(model_action)
         self.step_count += 1
 
     def reset_timing_rollout(self) -> None:
@@ -306,6 +347,7 @@ class WorldActionRobotWinPolicy:
 
     def reset(self) -> None:
         self.pending_actions.clear()
+        self.history_buffer.reset()
         self.episode_count += 1
         self.step_count = 0
         self.reset_timing_rollout()
@@ -386,7 +428,7 @@ def get_model(usr_args: Dict[str, Any]):
         rand_device=rand_device,
         tiled=tiled,
         timing_enabled=timing_enabled,
-        num_video_frames=(int(cfg.data.train.num_frames) - 1) // int(cfg.data.train.action_video_freq_ratio) + 1,
+        action_video_freq_ratio=int(cfg.data.train.action_video_freq_ratio),
     )
     return policy
 

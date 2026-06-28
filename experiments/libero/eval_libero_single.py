@@ -1,11 +1,9 @@
 import json
-import inspect
 import logging
 import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
 
 import hydra
 import numpy as np
@@ -32,9 +30,9 @@ from experiments.libero.libero_utils import (
     get_libero_image,
     invert_gripper_action,
     quat2axisangle,
-    save_prediction_video,
     save_rollout_video,
 )
+from experiments.fastwam_online_history import FastWAMOnlineHistoryBuffer
 from fastwam.datasets.lerobot.processors.fastwam_processor import FastWAMProcessor
 from fastwam.datasets.lerobot.utils.normalizer import load_dataset_stats_from_json
 from fastwam.utils.pytorch_utils import set_global_seed
@@ -181,7 +179,7 @@ def _normalize_proprio(
     return state_batch["state"][state_key]
 
 
-def _obs_to_model_input(
+def _obs_to_model_image(
     obs: dict,
     cfg: DictConfig,
     processor: FastWAMProcessor,
@@ -236,6 +234,27 @@ def _obs_to_model_input(
     x = torch.tensor(rgb).permute(2, 0, 1).unsqueeze(0).to(device=device, dtype=dtype)
     x = x * (2.0 / 255.0) - 1.0
 
+    return x, imgs
+
+
+def _obs_to_model_input(
+    obs: dict,
+    cfg: DictConfig,
+    processor: FastWAMProcessor,
+    width: int,
+    height: int,
+    device: str,
+    dtype: torch.dtype,
+):
+    x, imgs = _obs_to_model_image(
+        obs,
+        cfg=cfg,
+        processor=processor,
+        width=width,
+        height=height,
+        device=device,
+        dtype=dtype,
+    )
     proprio = _normalize_proprio(_extract_sim_state(obs), processor)
 
     return x, proprio, imgs
@@ -275,99 +294,20 @@ def _denormalize_action(action: torch.Tensor, processor: FastWAMProcessor) -> np
     return denorm.numpy()
 
 
-def _get_num_video_frames(cfg: DictConfig) -> int:
-    return (int(cfg.data.train.num_frames) - 1) // int(cfg.data.train.action_video_freq_ratio) + 1
-
-
-def _validate_visualize_future_video_cfg(cfg: DictConfig) -> None:
-    if not bool(cfg.EVALUATION.get("visualize_future_video", False)):
-        return
-
-    action_conditioned = cfg.model.video_dit_config.get("action_conditioned", None)
-    if action_conditioned is not False:
-        raise ValueError(
-            "EVALUATION.visualize_future_video=true requires "
-            "model.video_dit_config.action_conditioned=false."
-        )
-
-
-def _select_predicted_future_frames(pred_video: list[Image.Image], cfg: DictConfig) -> list[Image.Image]:
-    if len(pred_video) == 0:
-        raise ValueError("`infer_joint` returned an empty predicted video.")
-
-    replan_steps = int(cfg.EVALUATION.get("replan_steps", 5))
-    action_video_freq_ratio = int(cfg.data.train.action_video_freq_ratio)
-    num_future_frames = replan_steps // action_video_freq_ratio
-    keep_frames = 1 + num_future_frames
-    return list(pred_video[:keep_frames])
-
-
-def _get_future_frame_capture_steps(cfg: DictConfig) -> list[int]:
-    replan_steps = int(cfg.EVALUATION.get("replan_steps", 5))
-    action_video_freq_ratio = int(cfg.data.train.action_video_freq_ratio)
-    num_future_frames = replan_steps // action_video_freq_ratio
-    return [step_idx * action_video_freq_ratio for step_idx in range(num_future_frames + 1)]
-
-
-def _frame_to_rgb_array(frame: Any) -> np.ndarray:
-    if isinstance(frame, dict):
-        images = []
-        for value in frame.values():
-            value_array = np.array(value) if isinstance(value, Image.Image) else np.array(value, copy=True)
-            images.append(value_array)
-        return np.concatenate(images, axis=1)
-    if isinstance(frame, Image.Image):
-        return np.array(frame.convert("RGB"))
-    return np.array(frame, copy=True)
-
-
-def _compute_clip_mean_psnr(
-    gt_frames: list[Any],
-    pred_frames: list[Any],
-    eps: float = 1e-8,
-) -> Optional[float]:
-    if len(gt_frames) == 0 or len(pred_frames) == 0:
-        return None
-    assert len(gt_frames) == len(pred_frames), (
-        "GT/pred frame count mismatch for PSNR: "
-        f"len(gt_frames)={len(gt_frames)} len(pred_frames)={len(pred_frames)}. "
-        "This indicates temporal misalignment in future-video capture."
-    )
-    num_frames = len(gt_frames)
-
-    frame_psnr_values = []
-    for gt_frame, pred_frame in zip(gt_frames[:num_frames], pred_frames[:num_frames]):
-        gt_image = _frame_to_rgb_array(gt_frame)
-        pred_image = _frame_to_rgb_array(pred_frame)
-        target_h, target_w = pred_image.shape[:2]
-        if gt_image.shape[:2] != (target_h, target_w):
-            gt_image = np.array(
-                Image.fromarray(gt_image).resize((target_w, target_h), resample=Image.BILINEAR)
-            )
-
-        gt_f32 = gt_image.astype(np.float32)
-        pred_f32 = pred_image.astype(np.float32)
-        mse = float(np.mean((pred_f32 - gt_f32) ** 2))
-        psnr = 10.0 * np.log10((255.0 * 255.0) / max(mse, eps))
-        frame_psnr_values.append(float(psnr))
-
-    if len(frame_psnr_values) == 0:
-        return None
-    return float(np.mean(frame_psnr_values))
-
-
 def _predict_action_chunk(
     obs: dict,
     task_description: str,
     model: torch.nn.Module,
     processor: FastWAMProcessor,
     cfg: DictConfig,
+    history_buffer: FastWAMOnlineHistoryBuffer,
     *,
+    current_step: int,
     action_horizon: int,
     input_w: int,
     input_h: int,
     model_device: str,
-) -> tuple[np.ndarray, dict, Optional[list[Image.Image]]]:
+) -> tuple[np.ndarray, np.ndarray, dict]:
     num_inference_steps_cfg = cfg.EVALUATION.get("num_inference_steps", None)
     if num_inference_steps_cfg is None:
         num_inference_steps = int(cfg.get("eval_num_inference_steps", 20))
@@ -385,6 +325,7 @@ def _predict_action_chunk(
         device=model_device,
         dtype=model.torch_dtype,
     )
+    history_buffer.record_observation(current_step, image)
 
     infer_kwargs = {
         "prompt": prompt,
@@ -403,22 +344,21 @@ def _predict_action_chunk(
         "rand_device": str(cfg.EVALUATION.get("rand_device", "cpu")),
         "tiled": bool(cfg.EVALUATION.get("tiled", False)),
     }
-    visualize_future_video = bool(cfg.EVALUATION.get("visualize_future_video", False))
-    predicted_future_frames = None
-    if visualize_future_video:
-        infer_kwargs["num_video_frames"] = _get_num_video_frames(cfg)
-    elif "num_video_frames" in inspect.signature(model.infer_action).parameters:
-        infer_kwargs["num_video_frames"] = _get_num_video_frames(cfg)
+    if FastWAMOnlineHistoryBuffer.enabled_for_model(model):
+        infer_kwargs.update(
+            history_buffer.build_condition(
+                current_step=current_step,
+                device=model_device,
+                dtype=model.torch_dtype,
+            )
+        )
 
     with torch.no_grad():
-        if visualize_future_video:
-            pred = model.infer_joint(**infer_kwargs)
-            predicted_future_frames = _select_predicted_future_frames(pred["video"], cfg)
-        else:
-            pred = model.infer_action(**infer_kwargs)
-    action = pred["action"]  # [T, D]
+        pred = model.infer_action(**infer_kwargs)
+    model_action = pred["action"]  # [T, D]
+    model_action_np = model_action.detach().to(dtype=torch.float32, device="cpu").numpy()
 
-    action = _denormalize_action(action, processor)[0]  # [T, D]
+    action = _denormalize_action(model_action, processor)[0]  # [T, D]
 
     # The dataloader flips the sign of the gripper action to align with other datasets
     # (0 = close, 1 = open), so flip it back (-1 = open, +1 = close) before executing the action
@@ -426,7 +366,7 @@ def _predict_action_chunk(
     action = invert_gripper_action(action)
     if bool(cfg.EVALUATION.get("binarize_gripper", False)):
         action[..., -1] = np.sign(action[..., -1])
-    return action, imgs, predicted_future_frames
+    return action, model_action_np, imgs
 
 
 def _get_max_steps(task_suite_name: str) -> int:
@@ -455,27 +395,28 @@ def run_single_episode(
     input_w: int,
     input_h: int,
     model_device: str,
-) -> tuple[bool, list, list[dict[str, Any]], Optional[float]]:
+) -> tuple[bool, list]:
     max_steps = _get_max_steps(cfg.EVALUATION.task_suite_name)
     replan_steps = int(cfg.EVALUATION.get("replan_steps", 5))
     num_steps_wait = int(cfg.EVALUATION.get("num_steps_wait", 5))
     use_action_ensembler = bool(cfg.EVALUATION.get("use_action_ensembler", False))
-    visualize_future_video = bool(cfg.EVALUATION.get("visualize_future_video", False))
-    capture_steps = set(_get_future_frame_capture_steps(cfg)[1:])
+    history_buffer = FastWAMOnlineHistoryBuffer(
+        action_dim=int(model.action_expert.action_dim),
+        history_action_len=int(getattr(model, "history_action_len", 20)),
+        history_video_past_steps=16,
+        action_video_freq_ratio=int(cfg.data.train.action_video_freq_ratio),
+    )
 
     env.reset()
     obs = env.set_init_state(initial_state)
     if use_action_ensembler:
         ensembler = ActionEnsembler()
         ensembler.reset()
+        model_action_ensembler = ActionEnsembler()
+        model_action_ensembler.reset()
 
     replay_images = []
-    predicted_future_video_clips: list[dict[str, Any]] = []
-    episode_future_clip_psnr: list[float] = []
-    pending_actions: list[list[float]] = []
-    current_predicted_future_clip: Optional[dict[str, Any]] = None
-    current_replan_step = 0
-    current_replan_idx = -1
+    pending_actions: list[tuple[list[float], np.ndarray]] = []
 
     t = 0
     done = False
@@ -487,98 +428,63 @@ def run_single_episode(
             t += 1
             continue
 
+        policy_step = t - num_steps_wait
         if len(pending_actions) == 0:
-            action_chunk, imgs, predicted_future_frames = _predict_action_chunk(
+            action_chunk, model_action_chunk, imgs = _predict_action_chunk(
                 obs=obs,
                 task_description=task_description,
                 model=model,
                 processor=processor,
                 cfg=cfg,
+                history_buffer=history_buffer,
+                current_step=policy_step,
                 action_horizon=action_horizon,
                 input_w=input_w,
                 input_h=input_h,
                 model_device=model_device,
             )
-            if predicted_future_frames is not None:
-                current_replan_idx += 1
-                current_predicted_future_clip = {
-                    "replan_idx": current_replan_idx,
-                    "gt_frames": [imgs.copy()],
-                    "pred_frames": predicted_future_frames,
-                }
-            else:
-                current_predicted_future_clip = None
-            current_replan_step = 0
             if use_action_ensembler:
                 ensembler.add_actions(action_chunk, t)
-                pending_actions = [ensembler.get_action(ts).tolist() for ts in range(t, t + replan_steps)]
+                model_action_ensembler.add_actions(model_action_chunk, t)
+                pending_actions = [
+                    (
+                        ensembler.get_action(ts).tolist(),
+                        np.asarray(model_action_ensembler.get_action(ts), dtype=np.float32),
+                    )
+                    for ts in range(t, t + replan_steps)
+                ]
             else:
-                pending_actions = action_chunk[:replan_steps].tolist()
+                n_exec = min(replan_steps, action_chunk.shape[0])
+                pending_actions = [
+                    (
+                        action_chunk[i].tolist(),
+                        np.asarray(model_action_chunk[i], dtype=np.float32),
+                    )
+                    for i in range(n_exec)
+                ]
             replay_images.append(imgs.copy())
         else:
-            imgs = get_libero_image(obs)
+            image, imgs = _obs_to_model_image(
+                obs,
+                cfg=cfg,
+                processor=processor,
+                width=input_w,
+                height=input_h,
+                device=model_device,
+                dtype=model.torch_dtype,
+            )
+            history_buffer.record_observation(policy_step, image)
             replay_images.append(imgs.copy())
 
-        obs, _, done, _ = env.step(pending_actions.pop(0))
-        if visualize_future_video and current_predicted_future_clip is not None:
-            current_replan_step += 1
-            if current_replan_step in capture_steps:
-                current_predicted_future_clip["gt_frames"].append(get_libero_image(obs))
-            if done or len(pending_actions) == 0:
-                expected_frame_count = 1 + sum(
-                    1 for capture_step in capture_steps if capture_step <= current_replan_step
-                )
-                gt_len = len(current_predicted_future_clip["gt_frames"])
-                pred_len = len(current_predicted_future_clip["pred_frames"])
-                assert gt_len == expected_frame_count, (
-                    "GT future frames do not match expected capture count: "
-                    f"gt_len={gt_len} expected={expected_frame_count} "
-                    f"episode={episode_idx} replan={current_predicted_future_clip['replan_idx']} "
-                    f"current_replan_step={current_replan_step} capture_steps={sorted(capture_steps)}."
-                )
-                assert pred_len >= expected_frame_count, (
-                    "Predicted future frames shorter than expected capture count: "
-                    f"pred_len={pred_len} expected={expected_frame_count} "
-                    f"episode={episode_idx} replan={current_predicted_future_clip['replan_idx']}."
-                )
-                if pred_len != expected_frame_count:
-                    logging.info(
-                        "Align predicted clip length to executed steps: "
-                        "episode=%s replan=%s done=%s expected=%s pred_full=%s",
-                        episode_idx,
-                        current_predicted_future_clip["replan_idx"],
-                        done,
-                        expected_frame_count,
-                        pred_len,
-                    )
-                current_predicted_future_clip["pred_frames"] = current_predicted_future_clip["pred_frames"][
-                    :expected_frame_count
-                ]
-                assert len(current_predicted_future_clip["gt_frames"]) == len(
-                    current_predicted_future_clip["pred_frames"]
-                ), (
-                    "GT/pred frame count mismatch after alignment: "
-                    f"len(gt_frames)={len(current_predicted_future_clip['gt_frames'])} "
-                    f"len(pred_frames)={len(current_predicted_future_clip['pred_frames'])} "
-                    f"episode={episode_idx} replan={current_predicted_future_clip['replan_idx']}."
-                )
-                clip_psnr = _compute_clip_mean_psnr(
-                    current_predicted_future_clip["gt_frames"],
-                    current_predicted_future_clip["pred_frames"],
-                )
-                if clip_psnr is not None:
-                    episode_future_clip_psnr.append(clip_psnr)
-                predicted_future_video_clips.append(current_predicted_future_clip)
-                current_predicted_future_clip = None
+        env_action, model_action = pending_actions.pop(0)
+        obs, _, done, _ = env.step(env_action)
+        history_buffer.record_action(model_action)
         if done:
             break
         t += 1
     pbar.close()
 
-    episode_mean_psnr = (
-        float(np.mean(episode_future_clip_psnr)) if len(episode_future_clip_psnr) > 0 else None
-    )
-    return bool(done), replay_images, predicted_future_video_clips, episode_mean_psnr
+    return bool(done), replay_images
 
 
 def run_single_task(
@@ -588,7 +494,6 @@ def run_single_task(
     processor: FastWAMProcessor,
     cfg: DictConfig,
     video_dir: Path,
-    predicted_video_dir: Path,
     *,
     action_horizon: int,
     input_w: int,
@@ -596,19 +501,15 @@ def run_single_task(
     model_device: str,
 ) -> dict:
     env, task_description = get_libero_env(task, LIBERO_ENV_RESOLUTION, cfg.get("seed"))
-    visualize_future_video = bool(cfg.EVALUATION.get("visualize_future_video", False))
     results = {
         "successes": 0,
         "failure_episodes": [],
         "success_episodes": [],
         "task_description": task_description,
     }
-    if visualize_future_video:
-        results["episode_future_video_psnr"] = []
-        results["future_video_psnr_mean"] = None
 
     for trial_idx in range(int(cfg.EVALUATION.num_trials)):
-        success, replay_images, predicted_future_video_clips, episode_mean_psnr = run_single_episode(
+        success, replay_images = run_single_episode(
             env=env,
             initial_state=initial_states[trial_idx],
             task_description=task_description,
@@ -626,8 +527,6 @@ def run_single_task(
             results["success_episodes"].append(trial_idx)
         else:
             results["failure_episodes"].append(trial_idx)
-        if visualize_future_video:
-            results["episode_future_video_psnr"].append(episode_mean_psnr)
 
         save_rollout_video(
             video_dir,
@@ -636,42 +535,7 @@ def run_single_task(
             success=success,
             task_description=task_description,
         )
-        if visualize_future_video:
-            if len(predicted_future_video_clips) == 0:
-                logging.warning(
-                    "No predicted future frames collected for task %s trial %s.",
-                    cfg.EVALUATION.task_id,
-                    trial_idx,
-                )
-            else:
-                all_gt_frames = []
-                all_pred_frames = []
-                for clip in predicted_future_video_clips:
-                    all_gt_frames.extend(clip["gt_frames"])
-                    all_pred_frames.extend(clip["pred_frames"])
-                    save_prediction_video(
-                        predicted_video_dir,
-                        clip["gt_frames"],
-                        clip["pred_frames"],
-                        f"task{cfg.EVALUATION.task_id}_trial{trial_idx}",
-                        clip["replan_idx"],
-                        success=success,
-                        task_description=task_description,
-                    )
-                save_prediction_video(
-                    predicted_video_dir,
-                    all_gt_frames,
-                    all_pred_frames,
-                    f"task{cfg.EVALUATION.task_id}_trial{trial_idx}",
-                    "all",
-                    success=success,
-                    task_description=task_description,
-                )
 
-    if visualize_future_video:
-        valid_episode_psnr = [x for x in results["episode_future_video_psnr"] if x is not None]
-        if len(valid_episode_psnr) > 0:
-            results["future_video_psnr_mean"] = float(np.mean(valid_episode_psnr))
     return results
 
 
@@ -686,7 +550,6 @@ def eval_single_process(cfg: DictConfig):
 
     if cfg.ckpt is None:
         raise ValueError("cfg.ckpt must not be None.")
-    _validate_visualize_future_video_cfg(cfg)
 
     env_num = int(cfg.EVALUATION.get("env_num", 1))
     if env_num != 1:
@@ -727,9 +590,6 @@ def eval_single_process(cfg: DictConfig):
     local_log_dir.mkdir(parents=True, exist_ok=True)
     video_dir = local_log_dir / cfg.EVALUATION.task_suite_name / "videos"
     video_dir.mkdir(parents=True, exist_ok=True)
-    predicted_video_dir = local_log_dir / cfg.EVALUATION.task_suite_name / "predicted_videos"
-    if bool(cfg.EVALUATION.get("visualize_future_video", False)):
-        predicted_video_dir.mkdir(parents=True, exist_ok=True)
 
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[cfg.EVALUATION.task_suite_name]()
@@ -760,7 +620,6 @@ def eval_single_process(cfg: DictConfig):
         processor=processor,
         cfg=cfg,
         video_dir=video_dir,
-        predicted_video_dir=predicted_video_dir,
         action_horizon=action_horizon,
         input_w=input_w,
         input_h=input_h,
@@ -780,8 +639,6 @@ def eval_single_process(cfg: DictConfig):
         f"Task {cfg.EVALUATION.task_id} completed: "
         f"{results['successes']}/{cfg.EVALUATION.num_trials} successes"
     )
-    if results.get("future_video_psnr_mean") is not None:
-        print(f"Task {cfg.EVALUATION.task_id} future-video PSNR mean: {results['future_video_psnr_mean']:.4f}")
     print(f"Time taken: {results['duration']:.2f} seconds")
     return results
 
