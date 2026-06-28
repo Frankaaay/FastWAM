@@ -112,7 +112,7 @@ next replan:
   pending or unexecuted predicted actions are ignored
 ```
 
-当前模型接口已经能消费 `history_video/history_action`，但真实 online rollout 还需要在环境执行侧补 `executed_action_history_buffer` 和 history video window 维护。离线 trainer eval 传入的是 dataset 中的真实 history 字段，只能验证模型接口和离线路径，不能代替 online buffer 语义。
+当前模型接口已经能消费 `history_video/history_action`，online rollout 侧也已补 `FastWAMOnlineHistoryBuffer`：LIBERO 与 RobotWin 在真实执行 action 后写入 normalized/model-space history action，并在每个 policy step 记录当前观测，用 `V[t-16], V[t-12], V[t-8], V[t-4], V[t]` 构造 history video。离线 trainer eval 传入的是 dataset 中的真实 history 字段；online eval 现在覆盖真实 rollout buffer 语义。
 
 ### 4.2 v4 推理入口约束
 
@@ -123,6 +123,7 @@ next replan:
 - v4 inference 输出是 future action chunk，不输出 future video。
 - `runtime.run_inference` 应调用 `model.infer_action` 并保存/返回 action tensor。
 - trainer eval 只验证 action-only inference 和 action L1/L2，不再计算 rollout video PSNR/SSIM。
+- LIBERO / RobotWin online eval 只调用 `infer_action`；RobotWin 即使启用 `skip_get_obs_within_replan`，policy 也会声明每步需要 observation，以维护 history video window。
 - FastWAMJoint、FastWAMIDM 及其 Hydra 配置不属于 v4 支持范围，已从当前分支删除。
 
 ## 五、建议的实现形态
@@ -248,6 +249,9 @@ action attention score scale = 32 x 248
 - video cache prefill 统一返回 cache 和 tokens：`src/fastwam/models/wan22/mot.py:325`
 - history action cache prefill：`src/fastwam/models/wan22/mot.py:409`
 - future action 读 condition cache：`src/fastwam/models/wan22/mot.py:581`
+- online history buffer：`experiments/fastwam_online_history.py`
+- LIBERO online history 接入：`experiments/libero/eval_libero_single.py`
+- RobotWin online history 接入：`experiments/robotwin/fastwam_policy/deploy_policy.py`
 - A2 action source embedding 注入点：`src/fastwam/models/wan22/action_dit.py:348`，即 `tokens = self.action_encoder(action_tokens)` 之后、生成 Q/K/V 之前。
 - A2 video source embedding 注入点：`src/fastwam/models/wan22/wan_video_dit.py:697`，即 video latent patch flatten 成 `x_tokens` 之后、进入 MoT / blocks 之前。
 - dataset history video/action 窗口：`src/fastwam/datasets/lerobot/robot_video_dataset.py:63`、`src/fastwam/datasets/lerobot/robot_video_dataset.py:228`
