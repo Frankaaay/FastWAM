@@ -505,6 +505,7 @@ def run_single_episode(
     return bool(done), replay_images
 
 
+
 def run_single_task(
     task,
     initial_states,
@@ -519,6 +520,7 @@ def run_single_task(
     model_device: str,
 ) -> dict:
     env, task_description = get_libero_env(task, LIBERO_ENV_RESOLUTION, cfg.get("seed"))
+    save_video = bool(cfg.EVALUATION.get("save_video", True))
     results = {
         "successes": 0,
         "failure_episodes": [],
@@ -546,16 +548,16 @@ def run_single_task(
         else:
             results["failure_episodes"].append(trial_idx)
 
-        save_rollout_video(
-            video_dir,
-            replay_images,
-            f"task{cfg.EVALUATION.task_id}_trial{trial_idx}",
-            success=success,
-            task_description=task_description,
-        )
+        if save_video:
+            save_rollout_video(
+                video_dir,
+                replay_images,
+                f"task{cfg.EVALUATION.task_id}_trial{trial_idx}",
+                success=success,
+                task_description=task_description,
+            )
 
     return results
-
 
 @hydra.main(version_base="1.3", config_path="../../configs", config_name="sim_libero.yaml")
 def eval_single_process(cfg: DictConfig):
