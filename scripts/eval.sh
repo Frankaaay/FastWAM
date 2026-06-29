@@ -1,18 +1,27 @@
 #!/bin/bash
 # Unified LIBERO / LIBERO-plus eval launcher for mem-stage-v4.
 #
-# Defaults:
-#   bash eval.sh                         # standard LIBERO, 4 suites, 50 trials/task
-#   BENCH=libero_plus bash eval.sh       # LIBERO-plus, noise-inclusive, 1 trial/case
-#   BENCH=libero_plus PILOT=200 bash eval.sh
+# Presets. Use EVAL to switch mode, then override only the variables you mean to change:
+#   bash eval.sh                         # custom mode; BENCH defaults to standard LIBERO
+#   EVAL=libero_full bash eval.sh        # standard LIBERO, 4 suites x 10 tasks, 50 trials/task
+#   EVAL=libero_pilot bash eval.sh       # standard LIBERO smoke pilot, default PILOT=8, TRIALS=1
+#   EVAL=plus_full bash eval.sh          # LIBERO-plus full 10030 cases, INCLUDE_NOISE=1, TRIALS=1
+#   EVAL=plus_pilot bash eval.sh         # LIBERO-plus pilot, default PILOT=200, INCLUDE_NOISE=1
+#   EVAL=case200 bash eval.sh            # alias of plus_pilot
 #
-# Common overrides:
+# Low-level overrides:
+#   BENCH=libero|libero_plus             # custom bench selection when EVAL=custom
+#   PILOT=0                              # 0 means full set; >0 means evenly sampled cases
+#   TRIALS=50                            # standard LIBERO default; LIBERO-plus default is 1
 #   CKPT=/path/to/step_xxxxxx.pt
 #   STATS=/path/to/libero_uncond_2cam224_dataset_stats.json
 #   NUM_GPUS=8 GPU_OFFSET=0 MAX_PER_GPU=1 SAVE_VIDEO=false
 #   OUT=/path/to/output_dir
 #   REDIRECT_COMMON_FILES=false          # required on the H200 local checkpoint layout
+#   LIBERO_ORIG_PATH=/data/home/frank/projects/LIBERO
+#   LIBERO_CONFIG_PATH=$HOME/.libero_orig
 #   EXTRA_OVERRIDES='EVALUATION.replan_steps=10 model.foo=bar'
+#   DRY_RUN=1                            # generate shards and print config, but do not launch workers
 
 set -u
 
@@ -20,7 +29,39 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT" || exit 1
 
-BENCH=${BENCH:-libero}
+EVAL=${EVAL:-custom}
+case "$EVAL" in
+    custom)
+        BENCH=${BENCH:-libero}
+        ;;
+    libero_full)
+        BENCH=${BENCH:-libero}
+        PILOT=${PILOT:-0}
+        TRIALS=${TRIALS:-50}
+        ;;
+    libero_pilot)
+        BENCH=${BENCH:-libero}
+        PILOT=${PILOT:-8}
+        TRIALS=${TRIALS:-1}
+        ;;
+    plus_full|libero_plus_full)
+        BENCH=${BENCH:-libero_plus}
+        PILOT=${PILOT:-0}
+        TRIALS=${TRIALS:-1}
+        INCLUDE_NOISE=${INCLUDE_NOISE:-1}
+        ;;
+    plus_pilot|libero_plus_pilot|case200)
+        BENCH=${BENCH:-libero_plus}
+        PILOT=${PILOT:-200}
+        TRIALS=${TRIALS:-1}
+        INCLUDE_NOISE=${INCLUDE_NOISE:-1}
+        ;;
+    *)
+        echo "[FATAL] EVAL must be one of: custom, libero_full, libero_pilot, plus_full, plus_pilot, case200; got: $EVAL"
+        exit 1
+        ;;
+esac
+
 if [ "$BENCH" != "libero" ] && [ "$BENCH" != "libero_plus" ]; then
     echo "[FATAL] BENCH must be 'libero' or 'libero_plus', got: $BENCH"
     exit 1
@@ -31,9 +72,10 @@ source /opt/miniconda3/etc/profile.d/conda.sh && conda activate fastwam \
   || { echo "[FATAL] failed to activate conda env: fastwam"; exit 1; }
 
 if [ "$BENCH" = "libero" ]; then
-    export PYTHONPATH=/data/home/frank/projects/LIBERO${PYTHONPATH:+:$PYTHONPATH}
+    LIBERO_ORIG_PATH=${LIBERO_ORIG_PATH:-/data/home/frank/projects/LIBERO}
+    export PYTHONPATH=$LIBERO_ORIG_PATH${PYTHONPATH:+:$PYTHONPATH}
     export LIBERO_CONFIG_PATH=${LIBERO_CONFIG_PATH:-$HOME/.libero_orig}
-    echo "[BENCH=libero] PYTHONPATH=$PYTHONPATH LIBERO_CONFIG_PATH=$LIBERO_CONFIG_PATH"
+    echo "[BENCH=libero] LIBERO_ORIG_PATH=$LIBERO_ORIG_PATH PYTHONPATH=$PYTHONPATH LIBERO_CONFIG_PATH=$LIBERO_CONFIG_PATH"
 fi
 
 export DIFFSYNTH_MODEL_BASE_PATH="${DIFFSYNTH_MODEL_BASE_PATH:-$ROOT/checkpoints}"
@@ -84,6 +126,7 @@ PILOT=${PILOT:-0}
 SAVE_VIDEO=${SAVE_VIDEO:-false}
 REDIRECT_COMMON_FILES=${REDIRECT_COMMON_FILES:-false}
 EXTRA_OVERRIDES=${EXTRA_OVERRIDES:-}
+DRY_RUN=${DRY_RUN:-0}
 
 if [ "$BENCH" = "libero_plus" ]; then
     INCLUDE_NOISE=${INCLUDE_NOISE:-1}
@@ -109,13 +152,14 @@ mkdir -p "$OUT/shards" "$OUT/worker_logs"
 echo "=========================================================="
 echo " FastWAM eval"
 echo "   ROOT=$ROOT"
-echo "   BENCH=$BENCH TRIALS=$TRIALS PILOT=$PILOT INCLUDE_NOISE=$INCLUDE_NOISE"
+echo "   EVAL=$EVAL BENCH=$BENCH TRIALS=$TRIALS PILOT=$PILOT INCLUDE_NOISE=$INCLUDE_NOISE"
 echo "   CKPT=$CKPT"
 echo "   STATS=$STATS"
 echo "   NUM_GPUS=$NUM_GPUS GPU_OFFSET=$GPU_OFFSET MAX_PER_GPU=$MAX_PER_GPU NWORKERS=$NWORKERS"
 echo "   SAVE_VIDEO=$SAVE_VIDEO REDIRECT_COMMON_FILES=$REDIRECT_COMMON_FILES"
 echo "   OUT=$OUT"
 [ -n "$EXTRA_OVERRIDES" ] && echo "   EXTRA_OVERRIDES=$EXTRA_OVERRIDES"
+echo "   DRY_RUN=$DRY_RUN"
 echo "=========================================================="
 
 python - "$OUT/shards" "$NWORKERS" "$PILOT" "$INCLUDE_NOISE" "$BENCH" <<'PY'
@@ -209,6 +253,13 @@ monitor_progress() {
 }
 
 read -r -a EXTRA_ARGS <<< "$EXTRA_OVERRIDES"
+
+if [ "$DRY_RUN" = "1" ]; then
+    echo "[DRY_RUN] Shards generated under $OUT/shards; workers were not launched."
+    echo "[DRY_RUN] First worker command would run experiments/libero/eval_libero_multi.py with:"
+    echo "  ckpt=$CKPT task=libero_uncond_2cam224_1e-4 EVALUATION.num_trials=$TRIALS EVALUATION.dataset_stats_path=$STATS EVALUATION.output_dir=$OUT model.redirect_common_files=$REDIRECT_COMMON_FILES"
+    exit 0
+fi
 
 PIDS=()
 for ((w=0; w<NWORKERS; w++)); do
