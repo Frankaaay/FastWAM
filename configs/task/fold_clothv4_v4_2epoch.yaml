@@ -18,7 +18,7 @@ num_epochs: 2
 max_steps: null
 log_every: 10
 save_every: 2500
-eval_every: 999999
+eval_every: 0
 
 gradient_accumulation_steps: 1
 mixed_precision: bf16
@@ -26,7 +26,9 @@ weight_decay: 1e-2
 resume: null
 
 wandb:
-  enabled: false
+  enabled: true
+  workspace: yichx14-uc-irvine
   project: fastwam-mem
   name: fold_clothv4_v4_2epoch
   group: fold-cloth-real
+  mode: offline

@@ -11,13 +11,12 @@ LOG_FILE="${LOG_FILE:-${LOG_DIR}/${RUN_ID}.log}"
 
 export RUN_ID
 export DIFFSYNTH_SKIP_DOWNLOAD="${DIFFSYNTH_SKIP_DOWNLOAD:-true}"
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
 export PYTHONUNBUFFERED=1
 
 mkdir -p "$LOG_DIR"
 
-if ! command -v conda >/dev/null 2>&1; then
-  source /opt/miniconda3/etc/profile.d/conda.sh
-fi
+source /opt/miniconda3/etc/profile.d/conda.sh
 conda activate fastwam
 
 echo "=========================================================="
