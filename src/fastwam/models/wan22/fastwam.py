@@ -254,13 +254,14 @@ class FastWAM(torch.nn.Module):
 
     @torch.no_grad()
     def _encode_video_latents(self, video_tensor, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)):
-        z = self.vae.encode(
-            video_tensor,
-            device=self.device,
-            tiled=tiled,
-            tile_size=tile_size,
-            tile_stride=tile_stride,
-        )
+        with torch.profiler.record_function("model/vae_encode"):
+            z = self.vae.encode(
+                video_tensor,
+                device=self.device,
+                tiled=tiled,
+                tile_size=tile_size,
+                tile_stride=tile_stride,
+            )
         return z
 
     @torch.no_grad()
@@ -404,12 +405,14 @@ class FastWAM(torch.nn.Module):
                         f"got {tuple(history_action_is_pad.shape)} vs expected {tuple(history_action.shape[:2])}"
                     )
         
-        input_video = video.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
-        input_latents = self._encode_video_latents(input_video, tiled=tiled)
+        with torch.profiler.record_function("model/build_inputs/current_video_to_latents"):
+            input_video = video.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
+            input_latents = self._encode_video_latents(input_video, tiled=tiled)
         history_video_latents = None
         if history_video is not None:
-            history_video_input = history_video.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
-            history_video_latents = self._encode_video_latents(history_video_input, tiled=tiled)
+            with torch.profiler.record_function("model/build_inputs/history_video_to_latents"):
+                history_video_input = history_video.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
+                history_video_latents = self._encode_video_latents(history_video_input, tiled=tiled)
 
         first_frame_latents = None
         fuse_flag = False
@@ -792,17 +795,18 @@ class FastWAM(torch.nn.Module):
         # 与原 FastWAM 一致：把 future action 作为 video 分支的条件（仅当 action_conditioned=True 时生效）。
         # combined 路径下，clean prefix（history/current）不 attend action，
         # 只有 future video latent 帧按组 attend future action；group 数 = f - clean_prefix。
-        video_pre = self.video_expert.pre_dit(
-            x=combined_video_latents,
-            timestep=timestep_video,
-            context=context,
-            context_mask=context_mask,
-            action=action,
-            fuse_vae_embedding_in_latents=inputs["fuse_vae_embedding_in_latents"],
-            source_ids=video_source_ids,
-            temporal_position_ids=video_position_ids,
-            clean_prefix_latent_frames=clean_prefix_latent_frames,
-        )
+        with torch.profiler.record_function("model/v4/video_pre_dit"):
+            video_pre = self.video_expert.pre_dit(
+                x=combined_video_latents,
+                timestep=timestep_video,
+                context=context,
+                context_mask=context_mask,
+                action=action,
+                fuse_vae_embedding_in_latents=inputs["fuse_vae_embedding_in_latents"],
+                source_ids=video_source_ids,
+                temporal_position_ids=video_position_ids,
+                clean_prefix_latent_frames=clean_prefix_latent_frames,
+            )
 
         video_attention_mask = self.video_expert.build_video_to_video_mask(
             video_seq_len=video_pre["tokens"].shape[1],
@@ -840,18 +844,20 @@ class FastWAM(torch.nn.Module):
             combined_video_read_latent_valid,
             tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
         )
-        video_cache, video_tokens = self.mot.prefill_video_cache(
-            video_tokens=video_pre["tokens"],
-            video_freqs=video_pre["freqs"],
-            video_t_mod=video_pre["t_mod"],
-            video_context_payload={
-                "context": video_pre["context"],
-                "mask": video_pre["context_mask"],
-            },
-            video_attention_mask=video_attention_mask,
-            video_key_valid_mask=combined_video_read_token_valid,
-        )
-        pred_combined_video = self.video_expert.post_dit(video_tokens, video_pre)
+        with torch.profiler.record_function("model/v4/video_prefill_cache"):
+            video_cache, video_tokens = self.mot.prefill_video_cache(
+                video_tokens=video_pre["tokens"],
+                video_freqs=video_pre["freqs"],
+                video_t_mod=video_pre["t_mod"],
+                video_context_payload={
+                    "context": video_pre["context"],
+                    "mask": video_pre["context_mask"],
+                },
+                video_attention_mask=video_attention_mask,
+                video_key_valid_mask=combined_video_read_token_valid,
+            )
+        with torch.profiler.record_function("model/v4/video_post_dit"):
+            pred_combined_video = self.video_expert.post_dit(video_tokens, video_pre)
         pred_video = pred_combined_video[:, :, clean_prefix_latent_frames:]
         if pred_video.shape[2] != target_video.shape[2]:
             raise ValueError(
@@ -881,14 +887,15 @@ class FastWAM(torch.nn.Module):
             device=history_action.device,
         )
         clean_action_timestep = torch.zeros((batch_size,), device=self.device, dtype=history_action.dtype)
-        history_action_pre = self.action_expert.pre_dit(
-            action_tokens=history_action,
-            timestep=clean_action_timestep,
-            context=context,
-            context_mask=context_mask,
-            source_ids=history_source_ids,
-            position_ids=history_position_ids,
-        )
+        with torch.profiler.record_function("model/v4/history_action_pre_dit"):
+            history_action_pre = self.action_expert.pre_dit(
+                action_tokens=history_action,
+                timestep=clean_action_timestep,
+                context=context,
+                context_mask=context_mask,
+                source_ids=history_source_ids,
+                position_ids=history_position_ids,
+            )
         if history_action_is_pad is None:
             history_action_valid = torch.ones(
                 (batch_size, history_action.shape[1]),
@@ -908,31 +915,33 @@ class FastWAM(torch.nn.Module):
             dtype=torch.bool,
             device=history_action.device,
         )
-        history_action_cache = self.mot.prefill_action_cache(
-            action_tokens=history_action_pre["tokens"],
-            action_freqs=history_action_pre["freqs"],
-            action_t_mod=history_action_pre["t_mod"],
-            action_context_payload={
-                "context": history_action_pre["context"],
-                "mask": history_action_pre["context_mask"],
-            },
-            action_attention_mask=history_action_attention_mask,
-            action_key_valid_mask=history_action_valid,
-        )
+        with torch.profiler.record_function("model/v4/history_action_prefill_cache"):
+            history_action_cache = self.mot.prefill_action_cache(
+                action_tokens=history_action_pre["tokens"],
+                action_freqs=history_action_pre["freqs"],
+                action_t_mod=history_action_pre["t_mod"],
+                action_context_payload={
+                    "context": history_action_pre["context"],
+                    "mask": history_action_pre["context_mask"],
+                },
+                action_attention_mask=history_action_attention_mask,
+                action_key_valid_mask=history_action_valid,
+            )
         condition_cache = self._concat_kv_caches(history_video_cache, history_action_cache)
         condition_key_valid = torch.cat(
             [history_video_read_token_valid, history_action_read_valid],
             dim=1,
         )
 
-        action_pre = self.action_expert.pre_dit(
-            action_tokens=noisy_action,
-            timestep=timestep_action,
-            context=context,
-            context_mask=context_mask,
-            source_ids=future_source_ids,
-            position_ids=future_position_ids,
-        )
+        with torch.profiler.record_function("model/v4/future_action_pre_dit"):
+            action_pre = self.action_expert.pre_dit(
+                action_tokens=noisy_action,
+                timestep=timestep_action,
+                context=context,
+                context_mask=context_mask,
+                source_ids=future_source_ids,
+                position_ids=future_position_ids,
+            )
         if action_is_pad is None:
             action_key_valid = torch.ones(
                 (batch_size, action.shape[1]),
@@ -941,25 +950,27 @@ class FastWAM(torch.nn.Module):
             )
         else:
             action_key_valid = ~action_is_pad
-        action_tokens = self.mot.forward_action_with_condition_cache(
-            action_tokens=action_pre["tokens"],
-            action_freqs=action_pre["freqs"],
-            action_t_mod=action_pre["t_mod"],
-            action_context_payload={
-                "context": action_pre["context"],
-                "mask": action_pre["context_mask"],
-            },
-            condition_kv_cache=condition_cache,
-            condition_key_valid_mask=condition_key_valid,
-            action_key_valid_mask=action_key_valid,
-        )
-        pred_action = self.action_expert.post_dit(action_tokens, action_pre)
-        loss_action = self._compute_action_loss(
-            pred_action=pred_action,
-            target_action=target_action,
-            action_is_pad=action_is_pad,
-            timestep_action=timestep_action,
-        )
+        with torch.profiler.record_function("model/v4/future_action_with_condition_cache"):
+            action_tokens = self.mot.forward_action_with_condition_cache(
+                action_tokens=action_pre["tokens"],
+                action_freqs=action_pre["freqs"],
+                action_t_mod=action_pre["t_mod"],
+                action_context_payload={
+                    "context": action_pre["context"],
+                    "mask": action_pre["context_mask"],
+                },
+                condition_kv_cache=condition_cache,
+                condition_key_valid_mask=condition_key_valid,
+                action_key_valid_mask=action_key_valid,
+            )
+        with torch.profiler.record_function("model/v4/action_post_and_loss"):
+            pred_action = self.action_expert.post_dit(action_tokens, action_pre)
+            loss_action = self._compute_action_loss(
+                pred_action=pred_action,
+                target_action=target_action,
+                action_is_pad=action_is_pad,
+                timestep_action=timestep_action,
+            )
 
         loss_total = self.loss_lambda_video * loss_video + self.loss_lambda_action * loss_action
         loss_dict = {
@@ -969,13 +980,15 @@ class FastWAM(torch.nn.Module):
         return loss_total, loss_dict
 
     def training_loss(self, sample, tiled: bool = False):
-        inputs = self.build_inputs(sample, tiled=tiled)
+        with torch.profiler.record_function("model/build_inputs"):
+            inputs = self.build_inputs(sample, tiled=tiled)
         # v4 要求 history_video 与 history_action 成对出现（_training_loss_v4 内部强校验），
         # 这里用 AND 保持触发条件与该不变量一致：缺任一字段则回退原 FastWAM 路径。
         if self.enable_mem_stage_v4 and (
             inputs["history_video_latents"] is not None and inputs["history_action"] is not None
         ):
-            return self._training_loss_v4(inputs)
+            with torch.profiler.record_function("model/training_loss_v4"):
+                return self._training_loss_v4(inputs)
         input_latents = inputs["input_latents"]
         batch_size = input_latents.shape[0]
         context = inputs["context"]
