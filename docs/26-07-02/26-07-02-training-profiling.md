@@ -190,6 +190,28 @@ bash scripts/train_fold_clothv4_v4_2epoch.sh \
 
 本次 run 因远端无法解析 `github.com`，先从本地 `git bundle` 同步 `profiling-mem-stage-v4` 到远端。H200 本机没有 W&B API key，W&B offline run 后续通过 `h200-qinghua-jump` 的 token/spool 机制手动同步。
 
+W&B 同步脚本补充：
+
+- 跳板机脚本：`h200-qinghua-jump:/home/maxliu/.local/bin/wandb-sync-fastwam-offline`
+- 备份：`/home/maxliu/.local/bin/wandb-sync-fastwam-offline.bak-20260702-235613`
+- 已把 `SCAN_ROOTS` 从只扫描 frank 路径扩展为同时扫描：
+
+```text
+/data-214-30-239-40/home/frank/projects/FastWAM
+/data-214-30-239-40/home/maxliu/projects/FastWAM
+```
+
+- `bash -n /home/maxliu/.local/bin/wandb-sync-fastwam-offline` 通过。
+- 手动验证命令使用 `WANDB_SYNC_MIN_STAMP=20260702_230000`，避免先扫到 frank 的旧 run；验证输出已出现 maxliu 路径并成功同步：
+
+```text
+[sync] source=/data-214-30-239-40/home/maxliu/projects/FastWAM/runs/fold_clothv4_v4_2epoch/profile_trace_fold_clothv4_v4_20260702_234956/wandb/offline-run-20260702_235338-w158oako
+Syncing: https://wandb.ai/maxliuyy_thu/fastwam-mem/runs/w158oako ... done.
+[ok] /data-214-30-239-40/home/maxliu/projects/FastWAM/runs/fold_clothv4_v4_2epoch/profile_trace_fold_clothv4_v4_20260702_234956/wandb/offline-run-20260702_235338-w158oako
+```
+
+说明：手动验证前发现 23:35 的旧 maxliu 同步进程卡住并持有 `flock`，已只终止该 `maxliu` 同步进程以释放锁；未触碰 frank 用户自己的同步进程。
+
 关键产物：
 
 ```text
