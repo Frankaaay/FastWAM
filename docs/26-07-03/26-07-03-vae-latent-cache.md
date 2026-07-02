@@ -58,8 +58,8 @@ cache 是提前生成的离线文件，不是在训练过程中边算边写。�
 - fold-cloth v4 当前 video 采样：current video 9 帧、history video 5 帧。
 - 按 Wan VAE latent 估算：current latent `[48,3,24,20]`，history latent `[48,2,24,20]`。
 - bf16 tensor payload：`(48*3*24*20 + 48*2*24*20) * 2 = 230400 bytes`，约 `225 KiB/样本`。
-- 以已有记录中的 `dataset_len=277713` 估算，全量 tensor payload 约 `59.6 GiB`。
-- 考虑每样本一个 `.pt` 文件的 metadata、zip/pickle 和文件系统块开销，正式跑前按 `60-70 GiB` 预留更稳。
+- H200 smoke 实测当前 fold-cloth v4 dataset size 为 `865308`，64 条 cache 占用 `15M`，约 `234 KiB/样本`。
+- 按实测外推，全量 cache 约 `198 GiB`；考虑文件系统和后续配置变体，正式跑前按 `200-220 GiB` 预留更稳。
 
 先做 64 条样本 smoke：
 
@@ -138,8 +138,72 @@ bash scripts/train_fold_clothv4_v4_2epoch.sh \
 
 - cache 文件绑定 dataset/preprocess fingerprint；修改 `video_size`、`action_video_freq_ratio`、`concat_multi_camera`、dataset split 等参数后需要重新预计算。
 - 当前第一阶段没有重写底层 LeRobot image decode。训练时 dataset 仍读取样本元信息和 image payload，但不会把 raw video tensor 返回给训练 batch。此前 profiling 中 dataloader 稳定窗口约 17ms，不是主瓶颈。
-- 全量 cache 估算约 `60-70 GiB`；正式跑前需要确认 `runs/vae_latent_cache` 所在磁盘空间，并以 smoke 后的 `du -sh` 外推。
+- 全量 cache 按 smoke 实测外推约 `198 GiB`；正式跑前需要确认 `runs/vae_latent_cache` 所在磁盘空间，并建议预留 `200-220 GiB`。
 - `precompute_vae_latents.py` 不写 WandB；后续训练 run 仍按训练配置写 WandB offline run，现有跳板机同步脚本会继续同步。
+
+## 远端 smoke（26-07-03，H200-1）
+
+运行位置：
+
+```text
+h200-qinghua-1:/data/home/maxliu/projects/FastWAM
+branch: profiling-mem-stage-v4
+commit: 44204a3
+```
+
+同步方式：
+
+- H200 无法解析 `github.com`，`git pull` 失败：
+
+```text
+fatal: unable to access 'https://github.com/Frankaaay/FastWAM.git/': Could not resolve host: github.com
+```
+
+- 本地生成 bundle：`/private/tmp/fastwam_profiling_latcache_44204a3.bundle`。
+- 远端从 `/tmp/fastwam_profiling_latcache_44204a3.bundle` fetch 并 fast-forward 到 `44204a3`。
+
+smoke 命令：
+
+```bash
+cd /data/home/maxliu/projects/FastWAM
+source /opt/miniconda3/etc/profile.d/conda.sh
+conda activate /data/home/maxliu/.conda/envs/fastwam
+
+export CUDA_VISIBLE_DEVICES=0
+export DIFFSYNTH_SKIP_DOWNLOAD=true
+export PYTHONDONTWRITEBYTECODE=1
+export CACHE_DIR=/data/home/maxliu/projects/FastWAM/runs/vae_latent_cache/fold_clothv4_v4_wan22
+export WORK_DIR=/data/home/maxliu/projects/FastWAM/runs/vae_latent_cache_precompute/fold_clothv4_v4_wan22_smoke
+
+torchrun --standalone --nproc_per_node=1 scripts/precompute_vae_latents.py \
+  task=fold_clothv4_v4_2epoch \
+  +vae_latent_cache.output_dir=${CACHE_DIR} \
+  +vae_latent_cache.work_dir=${WORK_DIR} \
+  +vae_latent_cache.batch_size=2 \
+  +vae_latent_cache.num_workers=4 \
+  +vae_latent_cache.max_samples=64 \
+  +vae_latent_cache.overwrite=false
+
+du -sh ${CACHE_DIR}
+```
+
+结果：
+
+```text
+Dataset size=865308
+fingerprint=5ff52f56f7112f87
+to_encode=64
+new=64 overwrite=0 skip=0
+VAE latents rank 0/1: 64/64, 8.65 sample/s
+cache size: 15M
+```
+
+结论：
+
+- 预计算脚本可在 H200 的 `maxliu` 环境中正常解析 Hydra、加载 dataset、加载 VAE、写入 cache。
+- 当前配置下每样本 cache 实测约 `15M / 64 = 0.234M`，与 bf16 tensor payload 估算一致。
+- 全量 cache 约 `198 GiB`，当前 `/data` 盘仍有约 `20T` 可用，可以承载全量 cache。
+- 非阻塞 warning：torchrun/单进程退出时出现 `destroy_process_group() was not called before program exit`，未影响 cache 写入；后续可在脚本收尾处按需显式 destroy。
 
 ## 本地验证
 
