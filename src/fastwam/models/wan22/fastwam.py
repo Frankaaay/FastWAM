@@ -264,6 +264,27 @@ class FastWAM(torch.nn.Module):
             )
         return z
 
+    def _prepare_cached_video_latents(
+        self,
+        latents: torch.Tensor,
+        *,
+        name: str,
+        batch_size: int | None = None,
+    ) -> torch.Tensor:
+        if not torch.is_tensor(latents):
+            raise TypeError(f"`sample['{name}']` must be a tensor, got {type(latents)}")
+        if latents.ndim != 5:
+            raise ValueError(
+                f"`sample['{name}']` must be 5D [B,C,T,H,W], got shape {tuple(latents.shape)}"
+            )
+        if batch_size is not None and int(latents.shape[0]) != int(batch_size):
+            raise ValueError(
+                f"`sample['{name}']` batch mismatch: got {latents.shape[0]}, expected {batch_size}"
+            )
+        if not latents.is_floating_point():
+            raise ValueError(f"`sample['{name}']` must be floating point, got {latents.dtype}")
+        return latents.to(device=self.device, dtype=self.torch_dtype, non_blocking=True).contiguous()
+
     @torch.no_grad()
     def _encode_input_image_latents_tensor(self, input_image: torch.Tensor, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)):
         if input_image.ndim == 3:
@@ -289,7 +310,13 @@ class FastWAM(torch.nn.Module):
         return frames
 
     def build_inputs(self, sample, tiled: bool = False):
-        video = sample["video"]
+        video = sample.get("video", None)
+        cached_input_latents = sample.get("input_latents", None)
+        if video is None and cached_input_latents is None:
+            raise ValueError(
+                "FastWAM training requires either `sample['video']` or cached "
+                "`sample['input_latents']`."
+            )
         if "context" not in sample or "context_mask" not in sample:
             raise ValueError(
                 "FastWAM training requires `sample['context']` and `sample['context_mask']`."
@@ -297,20 +324,6 @@ class FastWAM(torch.nn.Module):
         context = sample["context"]
         context_mask = sample["context_mask"]
         proprio = sample.get("proprio", None)
-        if video.ndim != 5:
-            raise ValueError(f"`sample['video']` must be 5D [B, 3, T, H, W], got shape {tuple(video.shape)}")
-        if video.shape[1] != 3:
-            raise ValueError(f"`sample['video']` channel dimension must be 3, got shape {tuple(video.shape)}")
-
-        batch_size, _, num_frames, height, width = video.shape
-        if height % 16 != 0 or width % 16 != 0:
-            raise ValueError(
-                f"Video spatial dims must be multiples of 16, got H={height}, W={width}"
-            )
-        if num_frames % 4 != 1:
-            raise ValueError(f"Video T must satisfy T % 4 == 1, got T={num_frames}")
-        if num_frames <= 1:
-            raise ValueError(f"Video T must be > 1 for action-conditioned training, got T={num_frames}")
 
         if "action" not in sample:
             raise ValueError("`sample['action']` is required for FastWAM training.")
@@ -318,6 +331,70 @@ class FastWAM(torch.nn.Module):
         action = sample["action"]
         if action.ndim != 3:
             raise ValueError(f"`sample['action']` must be 3D [B, T, a_dim], got shape {tuple(action.shape)}")
+
+        image_is_pad = sample.get("image_is_pad", None)
+        if video is not None:
+            if video.ndim != 5:
+                raise ValueError(
+                    f"`sample['video']` must be 5D [B, 3, T, H, W], got shape {tuple(video.shape)}"
+                )
+            if video.shape[1] != 3:
+                raise ValueError(
+                    f"`sample['video']` channel dimension must be 3, got shape {tuple(video.shape)}"
+                )
+
+            batch_size, _, num_frames, height, width = video.shape
+            if height % 16 != 0 or width % 16 != 0:
+                raise ValueError(
+                    f"Video spatial dims must be multiples of 16, got H={height}, W={width}"
+                )
+            if num_frames % 4 != 1:
+                raise ValueError(f"Video T must satisfy T % 4 == 1, got T={num_frames}")
+            if num_frames <= 1:
+                raise ValueError(
+                    f"Video T must be > 1 for action-conditioned training, got T={num_frames}"
+                )
+        else:
+            if not torch.is_tensor(cached_input_latents) or cached_input_latents.ndim != 5:
+                raise ValueError(
+                    "`sample['input_latents']` must be 5D [B,C,T,H,W] when raw video is absent, "
+                    f"got {None if cached_input_latents is None else tuple(cached_input_latents.shape)}"
+                )
+            batch_size = int(cached_input_latents.shape[0])
+            if image_is_pad is None:
+                raise ValueError(
+                    "`sample['image_is_pad']` is required with cached `input_latents` "
+                    "to recover the raw video timeline length."
+                )
+            if image_is_pad.ndim != 2:
+                raise ValueError(
+                    f"`sample['image_is_pad']` must be 2D [B, T], got shape {tuple(image_is_pad.shape)}"
+                )
+            if image_is_pad.shape[0] != batch_size:
+                raise ValueError(
+                    "`sample['image_is_pad']` batch mismatch: "
+                    f"got {image_is_pad.shape[0]} vs expected {batch_size}"
+                )
+            num_frames = int(image_is_pad.shape[1])
+            if num_frames % 4 != 1:
+                raise ValueError(f"Video T must satisfy T % 4 == 1, got T={num_frames}")
+            if num_frames <= 1:
+                raise ValueError(
+                    f"Video T must be > 1 for action-conditioned training, got T={num_frames}"
+                )
+
+        if cached_input_latents is not None:
+            if not torch.is_tensor(cached_input_latents) or cached_input_latents.ndim != 5:
+                raise ValueError(
+                    "`sample['input_latents']` must be 5D [B,C,T,H,W], "
+                    f"got {None if cached_input_latents is None else tuple(cached_input_latents.shape)}"
+                )
+            if cached_input_latents.shape[0] != batch_size:
+                raise ValueError(
+                    "`sample['input_latents']` batch mismatch: "
+                    f"got {cached_input_latents.shape[0]} vs expected {batch_size}"
+                )
+
         action_horizon = int(action.shape[1])
         if action_horizon % (num_frames - 1) != 0:
             raise ValueError(
@@ -336,7 +413,6 @@ class FastWAM(torch.nn.Module):
                     f"got {tuple(action_is_pad.shape)} vs expected ({batch_size}, {action_horizon})"
                 )
 
-        image_is_pad = sample.get("image_is_pad", None)
         if image_is_pad is not None:
             if image_is_pad.ndim != 2:
                 raise ValueError(
@@ -349,6 +425,9 @@ class FastWAM(torch.nn.Module):
                 )
 
         history_video = sample.get("history_video", None) if self.enable_mem_stage_v4 else None
+        cached_history_video_latents = (
+            sample.get("history_video_latents", None) if self.enable_mem_stage_v4 else None
+        )
         history_video_is_pad = sample.get("history_video_is_pad", None) if self.enable_mem_stage_v4 else None
         if history_video is not None:
             if history_video.ndim != 5:
@@ -360,26 +439,43 @@ class FastWAM(torch.nn.Module):
                     "`sample['history_video']` shape mismatch: "
                     f"got {tuple(history_video.shape)} vs expected batch={batch_size}, channels=3"
                 )
-            if history_video.shape[3] != height or history_video.shape[4] != width:
-                raise ValueError(
-                    "`sample['history_video']` spatial shape must match `sample['video']`, "
-                    f"got {tuple(history_video.shape[3:])} vs {(height, width)}"
-                )
+            if video is not None:
+                if history_video.shape[3] != height or history_video.shape[4] != width:
+                    raise ValueError(
+                        "`sample['history_video']` spatial shape must match `sample['video']`, "
+                        f"got {tuple(history_video.shape[3:])} vs {(height, width)}"
+                    )
             if history_video.shape[2] % 4 != 1:
                 raise ValueError(
                     f"`sample['history_video']` T must satisfy T % 4 == 1, got T={history_video.shape[2]}"
                 )
-            if history_video_is_pad is not None:
-                if history_video_is_pad.ndim != 2:
-                    raise ValueError(
-                        "`sample['history_video_is_pad']` must be 2D [B, T], "
-                        f"got shape {tuple(history_video_is_pad.shape)}"
-                    )
-                if history_video_is_pad.shape != (batch_size, history_video.shape[2]):
-                    raise ValueError(
-                        "`sample['history_video_is_pad']` shape mismatch: "
-                        f"got {tuple(history_video_is_pad.shape)} vs expected {(batch_size, history_video.shape[2])}"
-                    )
+        if cached_history_video_latents is not None:
+            if not torch.is_tensor(cached_history_video_latents) or cached_history_video_latents.ndim != 5:
+                raise ValueError(
+                    "`sample['history_video_latents']` must be 5D [B,C,T,H,W], "
+                    f"got {type(cached_history_video_latents)}"
+                )
+            if cached_history_video_latents.shape[0] != batch_size:
+                raise ValueError(
+                    "`sample['history_video_latents']` batch mismatch: "
+                    f"got {cached_history_video_latents.shape[0]} vs expected {batch_size}"
+                )
+        if history_video_is_pad is not None:
+            if history_video_is_pad.ndim != 2:
+                raise ValueError(
+                    "`sample['history_video_is_pad']` must be 2D [B, T], "
+                    f"got shape {tuple(history_video_is_pad.shape)}"
+                )
+            expected_history_frames = (
+                history_video.shape[2]
+                if history_video is not None
+                else int(history_video_is_pad.shape[1])
+            )
+            if history_video_is_pad.shape != (batch_size, expected_history_frames):
+                raise ValueError(
+                    "`sample['history_video_is_pad']` shape mismatch: "
+                    f"got {tuple(history_video_is_pad.shape)} vs expected {(batch_size, expected_history_frames)}"
+                )
 
         history_action = sample.get("history_action", None) if self.enable_mem_stage_v4 else None
         history_action_is_pad = sample.get("history_action_is_pad", None) if self.enable_mem_stage_v4 else None
@@ -405,14 +501,41 @@ class FastWAM(torch.nn.Module):
                         f"got {tuple(history_action_is_pad.shape)} vs expected {tuple(history_action.shape[:2])}"
                     )
         
-        with torch.profiler.record_function("model/build_inputs/current_video_to_latents"):
-            input_video = video.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
-            input_latents = self._encode_video_latents(input_video, tiled=tiled)
+        if cached_input_latents is not None:
+            with torch.profiler.record_function("model/build_inputs/current_cached_latents_to_device"):
+                input_latents = self._prepare_cached_video_latents(
+                    cached_input_latents,
+                    name="input_latents",
+                    batch_size=batch_size,
+                )
+        else:
+            with torch.profiler.record_function("model/build_inputs/current_video_to_latents"):
+                input_video = video.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
+                input_latents = self._encode_video_latents(input_video, tiled=tiled)
+
         history_video_latents = None
-        if history_video is not None:
+        if cached_history_video_latents is not None:
+            with torch.profiler.record_function("model/build_inputs/history_cached_latents_to_device"):
+                history_video_latents = self._prepare_cached_video_latents(
+                    cached_history_video_latents,
+                    name="history_video_latents",
+                    batch_size=batch_size,
+                )
+        elif history_video is not None:
             with torch.profiler.record_function("model/build_inputs/history_video_to_latents"):
                 history_video_input = history_video.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
                 history_video_latents = self._encode_video_latents(history_video_input, tiled=tiled)
+        if history_video_latents is not None:
+            if history_video_latents.shape[1] != input_latents.shape[1]:
+                raise ValueError(
+                    "`history_video_latents` channel dim must match `input_latents`, "
+                    f"got {history_video_latents.shape[1]} vs {input_latents.shape[1]}"
+                )
+            if history_video_latents.shape[3:] != input_latents.shape[3:]:
+                raise ValueError(
+                    "`history_video_latents` spatial dims must match `input_latents`, "
+                    f"got {tuple(history_video_latents.shape[3:])} vs {tuple(input_latents.shape[3:])}"
+                )
 
         first_frame_latents = None
         fuse_flag = False
