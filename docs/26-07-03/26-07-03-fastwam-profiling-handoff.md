@@ -1,6 +1,6 @@
 # FastWAM profiling 交接文档
 
-更新时间：2026-07-03 13:04 CST
+更新时间：2026-07-03 13:52 CST
 
 ## 交接范围
 
@@ -8,11 +8,14 @@
 
 1. 在 `mem-stage-v4` 上实现并验证 VAE latent cache，加速训练 forward。
 2. 同步到 `profiling-mem-stage-v4`，做远端 profiling 对比。
-3. 根据 profiling 证据继续测试 attention backend。
-4. 之后再看 `video_prefill/MoT` 结构优化。
+3. 根据 profiling 证据测试 attention backend。
+4. 根据 GPU kernel 归因定位 `video_prefill/MoT` 里的真实瓶颈。
 5. 最后补推理侧加速。
 
-当前已经完成第 1、2 步；第 3 步只做了初步 backend 探针，还没有提交代码或启动正式 attention 实验。
+当前已经完成第 1、2、3 步。第 3 步的结论是：no-mask 能让部分 SDPA 调用走 flash，
+但整体 forward 只提升约 2%，attention backend / mask split 不是当前最大收益点。
+随后做了 GPU kernel 归因和 GEMM 对齐 microbench，确认当前最大瓶颈是 bf16 GEMM 大量落到
+`cutlass_75_*_align1` 慢 kernel；下一步应优先定位参数或激活的 16B 对齐问题。
 
 ## 本地工作区
 
@@ -48,21 +51,27 @@ Profiling worktree：
 ```text
 /Users/maxliu/MyProjects/AIR/202606/FastWAM_worktrees/profiling-mem-stage-v4
 branch: profiling-mem-stage-v4
-HEAD: 8bba6e8 docs: 记录 VAE latent cache smoke 结果
+latest code commit before this handoff update: 0e533ea feat: 添加可复用 GEMM 对齐 microbench 脚本（对齐/错位 4 变体，供修复后回归对比）
 ```
 
-当前有未提交改动：
+当前本地状态：
 
 ```text
-M configs/model/fastwam.yaml
-M docs/26-07-03/26-07-03-fastwam-profiling-handoff.md
-M src/fastwam/models/wan22/fastwam.py
-M src/fastwam/models/wan22/mot.py
-M src/fastwam/models/wan22/wan_video_dit.py
-M src/fastwam/runtime.py
+## profiling-mem-stage-v4...origin/profiling-mem-stage-v4
 ```
 
-其中代码/config 改动是 attention backend 最小实验开关；交接文档记录当前状态和运行口径。
+本地 profiling worktree 已经 clean，最新提交也已在 `origin/profiling-mem-stage-v4`。
+
+最新相关提交：
+
+```text
+0e533ea feat: 添加可复用 GEMM 对齐 microbench 脚本（对齐/错位 4 变体，供修复后回归对比）
+aef2a39 feat: 添加参数与激活 16B 对齐探针定位 align1 GEMM 根因
+d27ff3f docs: 补充 GEMM 对齐 microbench 结果，确认 align1 慢 7-8 倍
+d6fee05 docs: GPU kernel 归因分析与优先级修正，更新 profiling 交接文档
+f4db2f7 feat: 添加 trace GPU kernel 归因分析脚本
+bed2a34 feat: attention_debug 实验开关与 MoT prefill profiling ranges
+```
 
 ## 已实现内容
 
@@ -134,7 +143,30 @@ python scripts/train.py task=fold_clothv4_v4_2epoch model.attention_debug.log_sd
 ModuleNotFoundError: No module named 'hydra'
 ```
 
-这不是代码路径验证失败；需要在 H200 的 FastWAM conda env 中补跑配置解析或直接跑短 profiling。
+这不是代码路径验证失败；后续已在 H200 的 FastWAM conda env 中补跑配置解析。
+
+H200 Hydra 配置解析已补跑通过：
+
+```bash
+cd /data/home/maxliu/projects/FastWAM
+source /opt/miniconda3/etc/profile.d/conda.sh
+conda activate /data/home/maxliu/.conda/envs/fastwam
+python scripts/train.py task=fold_clothv4_v4_2epoch \
+  model.attention_debug.log_sdpa_backend=true \
+  model.attention_debug.force_video_prefill_no_mask=true \
+  model.attention_debug.disable_history_condition_dropout=true \
+  --cfg job --resolve >/tmp/fastwam_attention_debug_resolved.yaml
+rg -n 'attention_debug|force_video_prefill|disable_history|log_sdpa' /tmp/fastwam_attention_debug_resolved.yaml
+```
+
+关键输出：
+
+```text
+168:  attention_debug:
+169:    log_sdpa_backend: true
+170:    force_video_prefill_no_mask: true
+171:    disable_history_condition_dropout: true
+```
 
 注意：`mem-stage-v4` 根目录全量 `git diff --check` 会因为既有未提交文档里的 trailing whitespace 失败：
 
@@ -151,7 +183,7 @@ docs/26-06-21/26-06-21-mem-vae-diagnostic-report.md:5: trailing whitespace.
 ```text
 h200-qinghua-1:/data/home/maxliu/projects/FastWAM
 branch: profiling-mem-stage-v4
-remote HEAD at check time: 8bba6e8, plus local hotfix changes to scripts/precompute_vae_latents.py
+remote HEAD at check time: 0e533ea
 ```
 
 H200 无法解析 GitHub：
@@ -165,12 +197,12 @@ fatal: unable to access 'https://github.com/Frankaaay/FastWAM.git/': Could not r
 远端当前 `git status`：
 
 ```text
-## profiling-mem-stage-v4...origin/profiling-mem-stage-v4 [ahead 4]
- M scripts/precompute_vae_latents.py
+## profiling-mem-stage-v4...origin/profiling-mem-stage-v4 [ahead 11]
 ?? data
 ```
 
-`scripts/precompute_vae_latents.py` 是手动 scp 过去的未提交热修版本；`data` 是远端已有未跟踪目录，不要删除。
+远端 `ahead 11` 是因为 H200 不能直接 fetch GitHub，`origin/*` 追踪引用滞后；本地已经显示
+`profiling-mem-stage-v4...origin/profiling-mem-stage-v4` clean。`data` 是远端已有未跟踪目录，不要删除。
 
 ## VAE cache 产物
 
@@ -271,7 +303,8 @@ Trace 聚合对比：
 - VAE latent cache 已达到目标：训练 forward 中的 VAE encode 消失。
 - forward 减少约 `1.33s/step`。
 - backward 基本不变，符合 VAE 原本 frozen/no-grad 的预期。
-- 下一阶段瓶颈是 `model/v4/video_prefill_cache` 和 attention backend。
+- 下一阶段瓶颈表面上是 `model/v4/video_prefill_cache`，进一步拆到 GPU kernel 后，
+  真正的大头是 GEMM 对齐问题，不是 SDPA/attention kernel 本身。
 
 ## Attention backend 初步结论
 
@@ -307,9 +340,9 @@ Flash Attention does not support non-null attn_mask.
 
 因此当前不能靠“强制 flash backend”解决；只要传 bool mask，PyTorch 会走 efficient attention。
 
-## Attention backend 实验开关已实现
+## Attention backend 实验开关已实现并已验证
 
-Profiling worktree 当前已实现默认关闭的实验开关：
+Profiling worktree 已实现默认关闭的实验开关：
 
 - `configs/model/fastwam.yaml`
   - 新增 `attention_debug.log_sdpa_backend=false`。
@@ -332,23 +365,70 @@ Profiling worktree 当前已实现默认关闭的实验开关：
 
 默认配置全为 `false`，因此不改变正常训练语义。
 
-建议第一轮远端实验只打开：
+已跑两组远端实验，二者都使用完整 VAE latent cache、同一 task、同一 profile window：
+
+### masked path
+
+Run：
 
 ```text
-model.attention_debug.log_sdpa_backend=true
+profile_trace_attnmask_fold_clothv4_v4_20260703_132422
+wandb: https://wandb.ai/maxliuyy_thu/fastwam-mem/runs/hc22c1y2
 ```
 
-用于确认当前 masked path 仍不可走 flash。第二轮再跑上限实验：
+路径：
 
 ```text
-model.attention_debug.log_sdpa_backend=true
-model.attention_debug.force_video_prefill_no_mask=true
-model.attention_debug.disable_history_condition_dropout=true
+runs/fold_clothv4_v4_2epoch/profile_trace_attnmask_fold_clothv4_v4_20260703_132422
+trace: profile/torch/lacy--214-30-239-40_3802770.1783056579070406557.pt.trace.json
+summary: profile/trace_summary.tsv
 ```
 
-这会改变训练语义，只能作为速度上限，不可直接当最终训练方案。
+关键 summary：
 
-## Mask 结构与下一步判断
+| metric | calls | mean |
+| --- | ---: | ---: |
+| `train/forward_loss` | 15 | 1422.73ms |
+| `train/backward` | 30 | 1568.87ms |
+| `model/v4/video_prefill_cache` | 30 | 339.91ms |
+| `aten::_scaled_dot_product_efficient_attention` | 2700 | 0.06ms |
+| `aten::_scaled_dot_product_flash_attention` | 0 | 0 |
+
+### no-mask / flash 上限实验
+
+Run：
+
+```text
+profile_trace_attn_nomask_fold_clothv4_v4_20260703_134334
+wandb: https://wandb.ai/maxliuyy_thu/fastwam-mem/runs/s0zvjt86
+```
+
+路径：
+
+```text
+runs/fold_clothv4_v4_2epoch/profile_trace_attn_nomask_fold_clothv4_v4_20260703_134334
+trace: profile/torch/lacy--214-30-239-40_3811298.1783057704065733434.pt.trace.json
+summary: profile/trace_summary.tsv
+```
+
+关键 summary：
+
+| metric | calls | mean |
+| --- | ---: | ---: |
+| `train/forward_loss` | 15 | 1394.80ms |
+| `train/backward` | 30 | 1575.28ms |
+| `model/v4/video_prefill_cache` | 15 | 662.14ms |
+| `aten::_scaled_dot_product_efficient_attention` | 2250 | 0.05ms |
+| `aten::_scaled_dot_product_flash_attention` | 450 | 0.06ms |
+
+注意：`video_prefill_cache` 两组 calls 不同，不能直接比较 mean；应看 `train/forward_loss` 和
+`video_prefill_cache` total。no-mask 上限实验确实让 450 个 SDPA forward call 走 flash，
+但 `train/forward_loss` 只从 `1422.73ms` 降到 `1394.80ms`，约 `-27.93ms` / `-2.0%`；
+`train/backward` 基本不变。跳板机 W&B sync 日志已确认 `hc22c1y2` 和 `s0zvjt86` 均同步成功。
+
+结论：attention backend 方向收益上限很小，复杂的 `first_frame_causal` mask split 暂停。
+
+## GPU kernel 归因与下一步判断
 
 当前 v4 主要瓶颈：
 
@@ -375,55 +455,61 @@ FastWAM._training_loss_v4()
 
 因为 `_apply_key_valid_mask()` 会把 mask 规范化为 `[B,1,Q,K]`，所以 flash backend 必然不可用。
 
-可行方向：
+但是 `scripts/analyze_trace_gpu_breakdown.py` 对 cached trace 的 GPU kernel 归因显示，
+`video_prefill_cache` 内 attention forward 只有约 `27ms/step`，GEMM 约 `1080ms/step`。
+全 step 里 GEMM 约 `2091.5ms/step`，占 `75.5%`。
 
-1. 做一个 no-mask / flash-only 对照实验
-   - 目的：测理论上限，不作为最终训练语义。
-   - 方法：临时将 `video_attention_mask_mode=bidirectional`，并且避免 key-valid mask 进入 `prefill_video_cache`。
-   - 风险：改变训练语义，只能看速度上限。
+Top kernel 是：
 
-2. 拆分 `first_frame_causal` video attention
-   - prefix query 部分只 attend prefix keys。
-   - future query 部分 attend full keys。
-   - 两次 `scaled_dot_product_attention(..., attn_mask=None)`，理论上可走 flash。
-   - 需要把输出按 query 拼回去。
-   - 还要处理 padding/history dropout；如果 per-sample key-valid 继续存在，仍会需要 mask 或分组。
+```text
+cutlass_75_tensorop_bf16_s1688gemm_bf16_128x128_tn_align1
+cutlass_75_tensorop_bf16_s1688gemm_bf16_256x128_nn_align1
+cutlass_75_tensorop_bf16_s1688gemm_bf16_256x128_tn_align1
+```
 
-3. 优先禁用 history condition dropout 做速度实验
-   - 当前 `FastWAM.HISTORY_CONDITION_DROPOUT = 0.2`，训练时会产生 batch-level key-valid mask。
-   - 如果设为 0，且数据 padding 对当前 batch 不影响，video prefill 更容易走无 mask 拆分。
-   - 这是实验口径，不一定是最终训练策略。
+这些 `align1` GEMM 合计约 `1897ms/step`。H200 上 bf16 GEMM 正常应更多走 Hopper 原生
+`nvjet_*` kernel；落到 SM75 时代 `s1688gemm` 且 `align1`，强烈指向某个操作数指针或
+leading dimension 没有满足 16B 对齐。
 
-4. 接入外部 varlen/block-sparse attention
-   - 可能更贴合 first-frame mask 和 padding。
-   - 风险和改动量更大，应在 1/2 的证据出来后再做。
+H200 microbench 已复现机制：
+
+| case | proj3072 | ffn14336 | kernel |
+| --- | ---: | ---: | --- |
+| 对齐，`ptr%16=0` | 1.715ms | 9.097ms | `nvjet_tst_*` |
+| 错位 7 元素，`ptr%16=14` | ~14.2ms | ~64.0ms | `cutlass_75_tensorop_bf16_s1688gemm_*` |
+| slowdown | 8.3x | 7.0x | |
+
+当前最可能根因：
+
+1. DeepSpeed ZeRO-1 参数 flatten 后某些 trainable 参数从 flat buffer 的非 16B 对齐偏移开始。
+2. MoT/DiT 中间激活经过 slice/rearrange 后 data pointer 错位或 layout 不适合 `F.linear`。
+3. cuBLAS/PyTorch 2.7.1+cu128 对这些 shape 的 heuristic 问题；可能性低于前两者。
 
 ## 建议接手顺序
 
-1. 先提交 profiling worktree 的 attention debug 实验开关
-   - VAE cache 的核心代码和 smoke 文档已经在两个本地分支 HEAD 中。
-   - 当前 profiling worktree 本轮相关文件：
+1. 先跑参数/激活对齐探针
+   - 目标：确认 align1 GEMM 是权重参数错位、激活错位，还是二者都有。
+   - 已有开关：`FASTWAM_LOG_PARAM_ALIGNMENT=1` 和 `FASTWAM_LOG_ACT_ALIGNMENT=1`。
+   - 日志前缀统一为 `[align-probe]`，可直接 `grep`。
 
-```bash
-git add \
-  configs/model/fastwam.yaml \
-  src/fastwam/runtime.py \
-  src/fastwam/models/wan22/wan_video_dit.py \
-  src/fastwam/models/wan22/mot.py \
-  src/fastwam/models/wan22/fastwam.py \
-  docs/26-07-03/26-07-03-fastwam-profiling-handoff.md
-```
+2. 如果参数大量错位，优先排查 DeepSpeed ZeRO-1 flatten
+   - 重点看 `accelerator.prepare()` 之后的 `model.named_parameters()`。
+   - 若未对齐参数集中出现在 DiT Linear weight，先尝试调整 flatten/padding/param group。
+   - 修复后用 `scripts/microbench_gemm_alignment.py` 和完整 short profile 回归。
 
-2. 同步 H200 前先处理远端热修状态
-   - H200 不能直接 fetch GitHub，继续用 bundle 或 scp。
-   - 注意远端现在有 `scripts/precompute_vae_latents.py` 热修未提交，正式同步时不要误回退。
+3. 如果参数对齐而激活错位，继续定位进入 `nn.Linear` 前的 tensor view
+   - 先看前 8 个 `nn.Linear` hook 输出。
+   - 必要时扩大 `max_layers` 或只 hook MoT/DiT 目标模块。
+   - 修复方向通常是局部 `.contiguous()` 或调整 `rearrange/slice` 的顺序；要用 profile 验证收益。
 
-3. Attention backend 最小实验
-   - 先不要重构 MoT。
-   - 第一轮只开 `model.attention_debug.log_sdpa_backend=true`，确认 masked path 的 SDPA backend 判断。
-   - 第二轮开 `force_video_prefill_no_mask=true` 和 `disable_history_condition_dropout=true`，跑 no-mask 上限 profiling。
+4. 暂停复杂 attention mask split
+   - no-mask flash 上限只有约 2% forward 收益。
+   - `attention_debug.*` 保留用于后续顺带观测，不作为当前主线。
 
-4. 如果 no-mask flash 对 `video_prefill_cache` 有明显收益，再做 mask 拆分版本。
+5. GEMM 对齐修复后再做下一轮 profile
+   - 复用 `scripts/analyze_trace_gpu_breakdown.py`。
+   - 对比 `cutlass_75_*_align1` 是否下降，`nvjet_*` 是否上升。
+   - 再看 `other` 类 elementwise/norm/copy/reduce 是否成为新瓶颈。
 
 ## 常用远端命令
 
@@ -449,27 +535,64 @@ du -sh runs/vae_latent_cache/fold_clothv4_v4_wan22
 ssh h200-qinghua-jump 'tail -120 /home/maxliu/.local/state/wandb-sync/sync.log'
 ```
 
-Attention backend 诊断 run 建议 overrides：
+查看 attention 实验 summary：
 
 ```bash
 cd /data/home/maxliu/projects/FastWAM
 
-# masked path，只观察 SDPA backend
-python scripts/train.py \
-  profile.torch_enabled=true \
-  profile.timing_enabled=true \
-  model.attention_debug.log_sdpa_backend=true
+sed -n '1,80p' \
+  runs/fold_clothv4_v4_2epoch/profile_trace_attnmask_fold_clothv4_v4_20260703_132422/profile/trace_summary.tsv
 
-# no-mask 上限实验；会改变训练语义，只看速度上限
-python scripts/train.py \
-  profile.torch_enabled=true \
-  profile.timing_enabled=true \
-  model.attention_debug.log_sdpa_backend=true \
-  model.attention_debug.force_video_prefill_no_mask=true \
-  model.attention_debug.disable_history_condition_dropout=true
+sed -n '1,80p' \
+  runs/fold_clothv4_v4_2epoch/profile_trace_attn_nomask_fold_clothv4_v4_20260703_134334/profile/trace_summary.tsv
 ```
 
-实际运行时沿用之前 cached profiling run 的完整训练命令、latent cache 配置、batch size、profile window 和 output naming，只追加上面的 `model.attention_debug.*` overrides。
+运行参数/激活对齐探针时，沿用当前 cached profiling 命令，只追加环境变量：
+
+```bash
+cd /data/home/maxliu/projects/FastWAM
+source /opt/miniconda3/etc/profile.d/conda.sh
+conda activate /data/home/maxliu/.conda/envs/fastwam
+
+# 按实际训练启动方式替换下面的 python scripts/train.py；重点是两个环境变量。
+FASTWAM_LOG_PARAM_ALIGNMENT=1 \
+FASTWAM_LOG_ACT_ALIGNMENT=1 \
+python scripts/train.py task=fold_clothv4_v4_2epoch \
+  profile.torch_enabled=false \
+  profile.timing_enabled=false \
+  max_steps=2
+```
+
+查看探针日志：
+
+```bash
+cd /data/home/maxliu/projects/FastWAM
+grep -R "\\[align-probe\\]" runs/logs/*.log | tail -80
+```
+
+运行 GEMM 对齐 microbench：
+
+```bash
+cd /data/home/maxliu/projects/FastWAM
+source /opt/miniconda3/etc/profile.d/conda.sh
+conda activate /data/home/maxliu/.conda/envs/fastwam
+
+CUDA_VISIBLE_DEVICES=7 python scripts/microbench_gemm_alignment.py \
+  --linear \
+  --shape 72000,3072,3072 \
+  --shape 72000,3072,14336 \
+  --no-dgrad \
+  --warmup 10 \
+  --iters 50
+```
+
+对完整 trace 做 GPU kernel 归因：
+
+```bash
+cd /data/home/maxliu/projects/FastWAM
+python scripts/analyze_trace_gpu_breakdown.py \
+  runs/fold_clothv4_v4_2epoch/profile_trace_latcache_fold_clothv4_v4_20260703_045618/profile/torch/lacy--214-30-239-40_3735196.1783026074570934851.pt.trace.json
+```
 
 ## 当前不要做的事
 
@@ -477,52 +600,38 @@ python scripts/train.py \
 - 不要把 v4 worktree 里的旧 dirty docs 混入 VAE cache 提交。
 - 不要把 `profile_timing_lines.txt` 为空误判为 profiling 失败；trace summary 是有效的。
 - 不要强制 PyTorch flash backend 直接跑当前 mask，已验证会失败。
+- 不要继续优先做复杂 attention mask split；当前证据显示收益远小于 GEMM 对齐。
 
-## Attention backend 最小实验 checklist
+## 后续实验 checklist
 
-接手人如果继续第 3 步，建议按这个顺序做，避免一上来重构 MoT：
+接手人继续时建议按这个顺序做，避免被表层 `video_prefill_cache` 名字带偏：
 
 1. 保留当前 cached baseline
    - 固定对照 run：`profile_trace_latcache_fold_clothv4_v4_20260703_045618`。
-   - 固定核心指标：`train/forward_loss`、`train/backward`、`model/v4/video_prefill_cache`、SDPA kernel rows。
+   - 固定核心指标：`train/forward_loss`、`train/backward`、`model/v4/video_prefill_cache`、top GEMM kernel rows。
    - 不要换 batch size、profile window、latent cache 或 dataset stats。
 
-2. 增加 SDPA backend 观测开关
-   - 目标：训练日志里明确打印当前 PyTorch 是否能用 flash/efficient。
-   - 位置建议：`src/fastwam/models/wan22/wan_video_dit.py::flash_attention()`。
-   - 只在 rank0 / 前几个 step 打印，避免污染日志。
-   - 用 `torch.nn.attention.SDPAParams`、`can_use_flash_attention`、`can_use_efficient_attention` 做判断。
+2. 先看 `[align-probe] param_alignment`
+   - 如果 `unaligned_params` 很大，直接做 DeepSpeed/参数 flatten 修复。
+   - 如果参数基本对齐，再看 activation hook。
 
-3. 做 no-mask 上限实验
-   - 目标：测 `video_prefill_cache` 如果能走 flash 的理论收益。
-   - 方法 A：临时把 `model.video_dit_config.video_attention_mask_mode=bidirectional`。
-   - 方法 B：额外临时跳过 `video_key_valid_mask`，否则 `_apply_key_valid_mask()` 仍会创建 `[B,1,Q,K]` mask。
-   - 判断：trace 中应出现 flash attention kernel；`aten::_scaled_dot_product_efficient_attention` 应减少或消失。
-   - 注意：这会改变训练语义，只作为速度上限，不可直接作为最终训练方案。
+3. 再看 `[align-probe] act_alignment`
+   - 关注 `input_ptr_mod16`、`input_contiguous`、`weight_ptr_mod16`。
+   - 第一批只 hook 前 8 个 Linear；不够再扩大。
 
-4. 如果 no-mask 明显更快，再拆 `first_frame_causal`
-   - prefix queries: `q[:prefix]` attend `k[:prefix]`，无 mask。
-   - future queries: `q[prefix:]` attend `k[:]`，无 mask。
-   - 两次 SDPA 输出拼回 `[B,S,H*Dh]`。
-   - 这个拆法只覆盖结构 mask；padding/history dropout 仍需单独处理。
-
-5. 处理 padding / history dropout
-   - 当前训练有 `FastWAM.HISTORY_CONDITION_DROPOUT = 0.2`，会引入 per-sample key-valid mask。
-   - 第一版实验可以把 dropout 设为 0，看拆 mask 是否能跑通并加速。
-   - 若必须保留 dropout，需要按样本分组、varlen attention 或 block-sparse attention，而不是直接传 bool mask。
-
-6. 每次实验都产出同格式 summary
+4. 每次修复都产出同格式 summary
    - `profile/trace_summary.tsv`
    - W&B offline run URL
    - 一张 baseline vs experiment 表：
      - `train/forward_loss`
      - `train/backward`
      - `model/v4/video_prefill_cache`
-     - `aten::_scaled_dot_product_flash_attention*`
-     - `aten::_scaled_dot_product_efficient_attention*`
+     - `cutlass_75_*_align1`
+     - `nvjet_*`
+     - `gemm/other/attn` GPU kernel breakdown
 
 建议判断标准：
 
-- 如果 no-mask flash 只带来很小收益，先不要做复杂 mask 拆分。
-- 如果 `video_prefill_cache` 明显下降，再实现语义等价的 `first_frame_causal` 拆分。
-- 如果 forward 降了但 backward 不降，下一步要看 activation checkpoint 和 attention backward，而不是继续只优化 forward。
+- 如果 align1 kernel 大幅减少，同时 `train/forward_loss` 和 `train/backward` 都下降，继续完善对齐修复。
+- 如果 forward 降了但 backward 不降，下一步看 backward GEMM 和 activation checkpoint。
+- 如果 align1 已消失但 step time 仍高，再转向 `other` 类 elementwise/norm/copy/reduce fusion。
