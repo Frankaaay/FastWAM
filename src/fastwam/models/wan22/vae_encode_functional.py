@@ -117,15 +117,16 @@ def encode_functional(
         if i == 0:
             out_i, feat_cache = first_call(x[:, :, :1, :, :], feat_cache)
         else:
-            feat_cache = _clone_cache_tensors(feat_cache)
             out_i, feat_cache = next_call(
                 x[:, :, 1 + 4 * (i - 1):1 + 4 * i, :, :],
                 feat_cache,
             )
-            out = torch.cat([out, out_i], 2)
+        # CUDA graph 输出（out_i 与 cache tensor）必须在下一次 compiled 调用前克隆，
+        # 否则会被 graph 内存池的后续 capture/replay 覆写。eager 路径不克隆输出，保持逐位相等。
+        if compile_mode is not None:
+            out_i = out_i.clone()
         feat_cache = _clone_cache_tensors(feat_cache)
-        if i == 0:
-            out = out_i
+        out = out_i if i == 0 else torch.cat([out, out_i], 2)
 
     mu, _log_var = vae_model.conv1(out).chunk(2, dim=1)
     mu = _apply_scale(vae_model, mu, scale)
