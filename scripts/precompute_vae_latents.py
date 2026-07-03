@@ -140,6 +140,30 @@ def main(cfg: DictConfig):
     num_workers = int(cache_cfg.get("num_workers", cfg.get("num_workers", 0)))
     max_samples = cache_cfg.get("max_samples")
     max_samples = None if max_samples in (None, "null") else int(max_samples)
+    manual_num_shards = cache_cfg.get("num_shards", None)
+    manual_shard_index = cache_cfg.get("shard_index", None)
+    manual_sharding_enabled = manual_num_shards is not None or manual_shard_index is not None
+    if manual_sharding_enabled and is_distributed:
+        raise ValueError(
+            "vae_latent_cache.num_shards/shard_index are for non-distributed launches. "
+            "Do not combine them with torchrun."
+        )
+    if manual_sharding_enabled:
+        if manual_num_shards is None or manual_shard_index is None:
+            raise ValueError(
+                "Set both vae_latent_cache.num_shards and vae_latent_cache.shard_index."
+            )
+        shard_world_size = int(manual_num_shards)
+        shard_rank = int(manual_shard_index)
+        if shard_world_size < 1:
+            raise ValueError("vae_latent_cache.num_shards must be >= 1.")
+        if shard_rank < 0 or shard_rank >= shard_world_size:
+            raise ValueError(
+                "vae_latent_cache.shard_index must satisfy 0 <= shard_index < num_shards."
+            )
+    else:
+        shard_world_size = world_size
+        shard_rank = rank
     tiled = _to_bool(cache_cfg.get("tiled", False))
     tile_size = tuple(cache_cfg.get("tile_size", (30, 52)))
     tile_stride = tuple(cache_cfg.get("tile_stride", (15, 26)))
@@ -154,7 +178,7 @@ def main(cfg: DictConfig):
     if rank == 0:
         logger.info(
             "Precomputing VAE latents: cache_dir=%s overwrite=%s batch_size=%d num_workers=%d "
-            "max_samples=%s device=%s dtype=%s tiled=%s",
+            "max_samples=%s device=%s dtype=%s tiled=%s shard=%d/%d distributed=%s",
             cache_dir,
             overwrite,
             batch_size,
@@ -163,6 +187,9 @@ def main(cfg: DictConfig):
             device,
             torch_dtype,
             tiled,
+            shard_rank,
+            shard_world_size,
+            is_distributed,
         )
         if torch.cuda.is_available() and torch.cuda.device_count() > 1 and not is_distributed:
             logger.info(
@@ -181,15 +208,16 @@ def main(cfg: DictConfig):
         cache_dir=cache_dir,
         overwrite=overwrite,
     )
-    local_indices = all_indices[rank::world_size]
+    local_indices = all_indices[shard_rank::shard_world_size]
     if rank == 0:
         logger.info(
-            "Dataset size=%d fingerprint=%s to_encode=%d skipped_existing=%d world_size=%d",
+            "Dataset size=%d fingerprint=%s to_encode=%d skipped_existing=%d shard=%d/%d",
             len(dataset),
             dataset.vae_latent_cache_fingerprint,
             len(all_indices),
             skipped_existing,
-            world_size,
+            shard_rank,
+            shard_world_size,
         )
 
     vae, model_id, vae_path = _load_vae(cfg, device=device, torch_dtype=torch_dtype)
@@ -204,7 +232,7 @@ def main(cfg: DictConfig):
     stats = {"new": 0, "overwrite": 0, "skip": skipped_existing if rank == 0 else 0}
     with tqdm(
         total=len(local_indices),
-        desc=f"VAE latents rank {rank}/{world_size}",
+        desc=f"VAE latents shard {shard_rank}/{shard_world_size}",
         unit="sample",
         dynamic_ncols=True,
         disable=is_distributed and rank != 0,
