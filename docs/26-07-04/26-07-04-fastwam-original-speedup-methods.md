@@ -28,7 +28,7 @@
 
 **注意**：首个 step 编译预热约 2-4 分钟（60 编译单元），此后稳定。
 
-## 方法二：VAE encode 在线 compile（训练用，✅采纳）
+## 方法二：VAE encode 在线 compile（训练用，✅推荐）
 
 **开关**：`model.vae_torch_compile=true`（默认 false）。commits `35fd6e6` + `d33793d`。
 
@@ -38,7 +38,9 @@
 
 **实测**：训练 forward 1100→850ms，step 1800→1540ms（1.17×）。
 
-## 方法三：VAE encode 功能化重构 + CUDA graphs（训练用，✅采纳，略优于方法二）
+## 方法三：VAE encode 功能化重构 + CUDA graphs（训练用，⚠️与方法二互斥，仅作备选）
+
+> **与方法二二选一**：本方法和方法二都是加速 VAE encode，运行时互斥（同时开启则功能化优先、忽略 vae_torch_compile）。实测收益几乎相同——方法二单独 1.17×、组合 1.33×；本方法单独 1.21×、组合 1.35×，**差距仅 1-2%**。但方法二只是一个 `torch.compile(encoder.forward)` 开关（几行代码），本方法需要新写一整个功能化 encode 模块（~140 行）+ 图外 clone 处理 + 三级等价性脚本。**按"效果相当则取简单"原则，训练默认推荐方法二；本方法保留在分支作为备选**（若未来需要在 VAE 上叠更激进的 CUDA graphs 手段，功能化是前置基础）。
 
 **开关**：`model.vae_encode_functional=true`（默认 false），mode 默认 "reduce-overhead"。commits `c32819b`+`aab5a02`+`6a9048e`。新文件 `src/fastwam/models/wan22/vae_encode_functional.py`。
 
@@ -51,7 +53,7 @@
 | B：compile default | 0.039（rel 1.8%） | 0.0017（rel 0.08%） | 偏差随精度缩小 22×→纯舍入 |
 | C：reduce-overhead | 与 B 逐位相同 | 与 B 逐位相同 | CUDA graphs 零额外误差 |
 
-**实测**：单独 1490ms（1.21×）；与方法一组合 **1330ms（1.35×，bs24 同 batch 最优）**。
+**实测**：单独 1490ms（1.21×）；与方法一组合 1330ms（1.35×）——与方法二组合（1.33×）实质相当。
 
 ## 方法四：denoise 循环整步 CUDA graph 持久化（推理用，✅核心成果）
 
@@ -86,7 +88,7 @@ fold_cloth 任务默认 `model.mot_checkpoint_mixed_attn=false`（README 全局�
 | 全优化 bs24 | 1330 ms | 55.4 | 1.55× |
 | **全优化 bs40（吞吐推荐）** | 2083 ms | **52.1** | **1.64×** |
 
-全优化 = `model.mot_torch_compile=true model.vae_encode_functional=true`（ckpt off 为任务默认）。VAE 优化省下的显存支撑更大 batch；bs40 下 4 卡显存仍有富余。所有 run loss 逐 step 同分布（step40 loss 0.88-0.99 区间，shuffle 噪声级）。
+全优化 = `model.mot_torch_compile=true` + VAE 优化（方法二 `vae_torch_compile=true` 推荐 / 方法三 `vae_encode_functional=true` 备选，二选一，实测吞吐相当）（ckpt off 为任务默认）。上表 bs40 数字用方法三跑得；换方法二组合吞吐实质相同（bs24 下 1.33× vs 1.35×）。VAE 优化省下的显存支撑更大 batch；bs40 下 4 卡显存仍有富余。所有 run loss 逐 step 同分布（step40 loss 0.88-0.99 区间，shuffle 噪声级）。
 
 ## 证伪结论（同样重要，避免后人踩坑）
 
@@ -123,12 +125,12 @@ GPU busy / sample = 792/16 = 49.5 ms   ← 任何 launch 级优化（compile/CUD
 # 远端（H200 无法直连 GitHub，用 git bundle 同步；分支已在 origin）
 cd /data/home/maxliu/projects/FastWAM_orig   # worktree @ experiment/gemm-align-original
 
-# ── 训练（推荐配置）──
+# ── 训练（推荐配置：方法一 + 方法二，最简组合）──
 export PYTHONPATH=$PWD/src
 bash scripts/train_fold_cloth_orig_2epoch.sh \
   batch_size=40 \
   model.mot_torch_compile=true \
-  model.vae_encode_functional=true \
+  model.vae_torch_compile=true \
   data.train.pretrained_norm_stats=<dataset_stats.json>
 
 # ── 推理（推荐配置：4.93×）──
