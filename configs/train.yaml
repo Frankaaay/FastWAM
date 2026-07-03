@@ -31,6 +31,23 @@ max_grad_norm: 1.0
 weight_decay: 0.0
 resume: null
 
+# profiling
+profile:
+  timing_enabled: false
+  timing_log_every: null
+  timing_sync_cuda: true
+  torch_enabled: false
+  trace_dir: null
+  wait_steps: 2
+  warmup_steps: 2
+  active_steps: 5
+  repeat: 1
+  rank0_only: true
+  record_shapes: false
+  profile_memory: false
+  with_stack: false
+  with_flops: false
+
 # wandb
 wandb:
   enabled: false

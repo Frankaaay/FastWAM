@@ -241,13 +241,14 @@ class FastWAM(torch.nn.Module):
 
     @torch.no_grad()
     def _encode_video_latents(self, video_tensor, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)):
-        z = self.vae.encode(
-            video_tensor,
-            device=self.device,
-            tiled=tiled,
-            tile_size=tile_size,
-            tile_stride=tile_stride,
-        )
+        with torch.profiler.record_function("model/vae_encode"):
+            z = self.vae.encode(
+                video_tensor,
+                device=self.device,
+                tiled=tiled,
+                tile_size=tile_size,
+                tile_stride=tile_stride,
+            )
         return z
 
     @torch.no_grad()
@@ -334,8 +335,9 @@ class FastWAM(torch.nn.Module):
                     f"got {tuple(image_is_pad.shape)} vs expected ({batch_size}, {num_frames})"
                 )
         
-        input_video = video.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
-        input_latents = self._encode_video_latents(input_video, tiled=tiled)
+        with torch.profiler.record_function("model/build_inputs/current_video_to_latents"):
+            input_video = video.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
+            input_latents = self._encode_video_latents(input_video, tiled=tiled)
 
         first_frame_latents = None
         fuse_flag = False
@@ -446,7 +448,8 @@ class FastWAM(torch.nn.Module):
         return (video_loss_token * valid).sum(dim=1) / valid_sum
 
     def training_loss(self, sample, tiled: bool = False):
-        inputs = self.build_inputs(sample, tiled=tiled)
+        with torch.profiler.record_function("model/build_inputs"):
+            inputs = self.build_inputs(sample, tiled=tiled)
         input_latents = inputs["input_latents"]
         batch_size = input_latents.shape[0]
         context = inputs["context"]

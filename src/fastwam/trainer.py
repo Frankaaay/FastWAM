@@ -3,6 +3,7 @@ import json
 import inspect
 import os
 import re
+from contextlib import nullcontext
 from math import ceil
 from pathlib import Path
 import time
@@ -55,6 +56,24 @@ class Wan22Trainer:
                 "Expected one of: ['no', 'fp16', 'bf16']."
             )
         self.wandb_enabled = bool(cfg.wandb.enabled)
+        profile_cfg = cfg.get("profile", {})
+        self.profile_timing_enabled = bool(profile_cfg.get("timing_enabled", False))
+        timing_log_every = profile_cfg.get("timing_log_every", None)
+        self.profile_timing_log_every = int(timing_log_every) if timing_log_every is not None else self.log_every
+        self.profile_timing_sync_cuda = bool(profile_cfg.get("timing_sync_cuda", True))
+        self.profile_torch_enabled = bool(profile_cfg.get("torch_enabled", False))
+        self.profile_rank0_only = bool(profile_cfg.get("rank0_only", True))
+        self.profile_trace_dir = profile_cfg.get("trace_dir", None)
+        self.profile_wait_steps = int(profile_cfg.get("wait_steps", 2))
+        self.profile_warmup_steps = int(profile_cfg.get("warmup_steps", 2))
+        self.profile_active_steps = int(profile_cfg.get("active_steps", 5))
+        self.profile_repeat = int(profile_cfg.get("repeat", 1))
+        self.profile_record_shapes = bool(profile_cfg.get("record_shapes", False))
+        self.profile_memory = bool(profile_cfg.get("profile_memory", False))
+        self.profile_with_stack = bool(profile_cfg.get("with_stack", False))
+        self.profile_with_flops = bool(profile_cfg.get("with_flops", False))
+        self._profile_stage_totals = {}
+        self._profile_stage_counts = {}
 
         self.accelerator = Accelerator(
             gradient_accumulation_steps=self.gradient_accumulation_steps,
@@ -127,6 +146,22 @@ class Wan22Trainer:
 
         val_size = len(self.val_dataset) if self.val_dataset is not None else len(self.train_dataset)
         logger.info("Train/val dataset size: %d/%d", len(self.train_dataset), val_size)
+        if self.profile_timing_enabled and self.accelerator.is_main_process:
+            logger.info(
+                "Training stage timing enabled: log_every=%d sync_cuda=%s",
+                self.profile_timing_log_every,
+                self.profile_timing_sync_cuda,
+            )
+        if self.profile_torch_enabled and self.accelerator.is_main_process:
+            logger.info(
+                "Torch profiler enabled: trace_dir=%s wait=%d warmup=%d active=%d repeat=%d rank0_only=%s",
+                self._resolve_profile_trace_dir(),
+                self.profile_wait_steps,
+                self.profile_warmup_steps,
+                self.profile_active_steps,
+                self.profile_repeat,
+                self.profile_rank0_only,
+            )
 
     def _init_wandb(self):
         if not self.wandb_enabled or not self.accelerator.is_main_process:
@@ -163,6 +198,71 @@ class Wan22Trainer:
             return
         self.wandb_run.finish()
         self.wandb_run = None
+
+    def _should_profile_current_rank(self):
+        return (not self.profile_rank0_only) or self.accelerator.is_main_process
+
+    def _resolve_profile_trace_dir(self):
+        trace_dir = self.profile_trace_dir
+        if trace_dir in (None, "null", ""):
+            trace_dir = os.path.join(self.output_dir, "profile", "torch")
+        if not self.profile_rank0_only:
+            trace_dir = os.path.join(str(trace_dir), f"rank_{self.accelerator.process_index:03d}")
+        return str(trace_dir)
+
+    def _build_torch_profiler(self):
+        if not self.profile_torch_enabled or not self._should_profile_current_rank():
+            return None
+        activities = [torch.profiler.ProfilerActivity.CPU]
+        if torch.cuda.is_available():
+            activities.append(torch.profiler.ProfilerActivity.CUDA)
+        trace_dir = self._resolve_profile_trace_dir()
+        ensure_dir(trace_dir)
+        return torch.profiler.profile(
+            activities=activities,
+            schedule=torch.profiler.schedule(
+                wait=max(self.profile_wait_steps, 0),
+                warmup=max(self.profile_warmup_steps, 0),
+                active=max(self.profile_active_steps, 1),
+                repeat=max(self.profile_repeat, 1),
+            ),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(trace_dir),
+            record_shapes=self.profile_record_shapes,
+            profile_memory=self.profile_memory,
+            with_stack=self.profile_with_stack,
+            with_flops=self.profile_with_flops,
+        )
+
+    def _profile_range(self, name: str):
+        if not (self.profile_torch_enabled or self.profile_timing_enabled):
+            return nullcontext()
+        return torch.profiler.record_function(name)
+
+    def _profile_time(self):
+        if (
+            self.profile_timing_enabled
+            and self.profile_timing_sync_cuda
+            and torch.cuda.is_available()
+        ):
+            torch.cuda.synchronize(self.accelerator.device)
+        return time.perf_counter()
+
+    def _record_profile_stage(self, stage: str, elapsed: float):
+        if not self.profile_timing_enabled:
+            return
+        self._profile_stage_totals[stage] = self._profile_stage_totals.get(stage, 0.0) + float(elapsed)
+        self._profile_stage_counts[stage] = self._profile_stage_counts.get(stage, 0) + 1
+
+    def _pop_profile_timing_payload(self):
+        if not self.profile_timing_enabled or not self._profile_stage_totals:
+            return {}
+        payload = {}
+        for stage in sorted(self._profile_stage_totals):
+            count = max(self._profile_stage_counts.get(stage, 0), 1)
+            payload[stage] = 1000.0 * self._profile_stage_totals[stage] / count
+        self._profile_stage_totals.clear()
+        self._profile_stage_counts.clear()
+        return payload
 
     def _build_loader(self, dataset, worker_init_fn=None):
         self.train_sampler = ResumableEpochSampler(
@@ -656,131 +756,202 @@ class Wan22Trainer:
         self.run_start_step = self.global_step
         self.run_start_time = time.perf_counter()
 
-        while self.global_step < self.max_steps:
-            try:
-                sample = next(data_iter)
-                self.batch_in_epoch += 1
-            except StopIteration:
-                self.epoch += 1
-                self.batch_in_epoch = 0
-                self.train_sampler.clear_resume_batch_offset()
-                data_iter = iter(self.train_loader)
-                continue
+        torch_profiler = self._build_torch_profiler()
+        profiler_context = torch_profiler if torch_profiler is not None else nullcontext()
+        with profiler_context as active_profiler:
+            while self.global_step < self.max_steps:
+                step_start_time = self._profile_time()
+                try:
+                    with self._profile_range("train/dataloader_next"):
+                        sample = next(data_iter)
+                    self.batch_in_epoch += 1
+                    data_end_time = self._profile_time()
+                    self._record_profile_stage("data", data_end_time - step_start_time)
+                except StopIteration:
+                    self.epoch += 1
+                    self.batch_in_epoch = 0
+                    self.train_sampler.clear_resume_batch_offset()
+                    data_iter = iter(self.train_loader)
+                    continue
 
-            with self.accelerator.accumulate(self.model):
-                train_model = self.model if hasattr(self.model, "training_loss") else self.accelerator.unwrap_model(self.model)
+                with self.accelerator.accumulate(self.model):
+                    train_model = self.model if hasattr(self.model, "training_loss") else self.accelerator.unwrap_model(self.model)
 
-                with self.accelerator.autocast():
-                    loss, loss_dict = train_model.training_loss(sample)
-                self.accelerator.backward(loss)
+                    forward_start_time = self._profile_time()
+                    with self._profile_range("train/forward_loss"):
+                        with self.accelerator.autocast():
+                            loss, loss_dict = train_model.training_loss(sample)
+                    forward_end_time = self._profile_time()
+                    self._record_profile_stage("forward", forward_end_time - forward_start_time)
 
-                if self.accelerator.sync_gradients:
-                    grad_norm = self.accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-                    self.optimizer.step()
-                    if not self.accelerator.optimizer_step_was_skipped:
-                        self.scheduler.step()
-                    self.optimizer.zero_grad(set_to_none=True)
-                    self.global_step += 1
-                    global_loss = float(
-                        self.accelerator.gather(loss.detach().float().reshape(1)).mean().item()
-                    )
-                    global_loss_metrics = {}
-                    for key, value in loss_dict.items():
-                        metric_tensor = torch.tensor(float(value), device=loss.device, dtype=torch.float32).reshape(1)
-                        global_loss_metrics[key] = float(
-                            self.accelerator.gather(metric_tensor).mean().item()
-                        )
-                    grad_norm_tensor = torch.tensor(grad_norm, device=loss.device, dtype=torch.float32)
-                    global_grad_norm = float(self.accelerator.gather(grad_norm_tensor).mean().item())
+                    backward_start_time = self._profile_time()
+                    with self._profile_range("train/backward"):
+                        self.accelerator.backward(loss)
+                    backward_end_time = self._profile_time()
+                    self._record_profile_stage("backward", backward_end_time - backward_start_time)
 
-                    current_lr = float(self.optimizer.param_groups[0]["lr"])
+                    if self.accelerator.sync_gradients:
+                        optimizer_start_time = self._profile_time()
+                        with self._profile_range("train/optimizer_step"):
+                            grad_norm = self.accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                            self.optimizer.step()
+                            if not self.accelerator.optimizer_step_was_skipped:
+                                self.scheduler.step()
+                            self.optimizer.zero_grad(set_to_none=True)
+                        optimizer_end_time = self._profile_time()
+                        self._record_profile_stage("optimizer", optimizer_end_time - optimizer_start_time)
 
-                    if self.log_every > 0 and self.global_step % self.log_every == 0 and self.accelerator.is_main_process:
-                        eta_str, steps_per_sec = self._estimate_eta()
-                        description = "[train] epoch=%d step=%d/%d loss=%.4f " % (
-                            self.epoch,
-                            self.global_step,
-                            self.max_steps,
-                            global_loss,
-                        )
-                        if global_loss_metrics:
-                            detail_str = " ".join([f"{k}={v:.4f}" for k, v in sorted(global_loss_metrics.items())])
-                            description += detail_str + " "
-                        description += "lr=%.2e speed=%.2f step/s, %.2f samples/s eta=%s" % (
-                            current_lr,
-                            steps_per_sec,
-                            steps_per_sec * self.batch_size * self.accelerator.num_processes,
-                            eta_str,
-                        )
-                        logger.info(description)
-
-                        wandb_payload = {
-                            "train/loss": global_loss,
-                            "train/grad_norm": global_grad_norm,
-                            "train/lr": current_lr,
-                            "performance/steps_per_sec": steps_per_sec,
-                            "performance/samples_per_sec": steps_per_sec * self.batch_size * self.accelerator.num_processes,
-                        }
-                        for key, value in global_loss_metrics.items():
-                            wandb_payload[f"train/{key}"] = value
-                        self._wandb_log(wandb_payload)
-
-                    if (
-                        self.eval_every > 0
-                        and self.val_dataset is not None
-                        and self.global_step % self.eval_every == 0
-                    ):
-                        metrics = self.evaluate()
-                        self.accelerator.wait_for_everyone()
-                        if metrics is not None and self.accelerator.is_main_process:
-                            description = "[eval] step=%d val_loss=%.4f infer_psnr=%.4f infer_ssim=%.4f" % (
-                                self.global_step,
-                                metrics["val_loss"],
-                                metrics["psnr_rd"],
-                                metrics["ssim_rd"],
+                        self.global_step += 1
+                        metrics_start_time = self._profile_time()
+                        with self._profile_range("train/metrics_gather"):
+                            global_loss = float(
+                                self.accelerator.gather(loss.detach().float().reshape(1)).mean().item()
                             )
-                            if "action_l2" in metrics:
-                                description += " action_l2=%.4f" % metrics["action_l2"]
-                            if "action_l1" in metrics:
-                                description += " action_l1=%.4f" % metrics["action_l1"]
+                            global_loss_metrics = {}
+                            for key, value in loss_dict.items():
+                                metric_tensor = torch.tensor(float(value), device=loss.device, dtype=torch.float32).reshape(1)
+                                global_loss_metrics[key] = float(
+                                    self.accelerator.gather(metric_tensor).mean().item()
+                                )
+                            grad_norm_tensor = torch.tensor(grad_norm, device=loss.device, dtype=torch.float32)
+                            global_grad_norm = float(self.accelerator.gather(grad_norm_tensor).mean().item())
+                        metrics_end_time = self._profile_time()
+                        self._record_profile_stage("metrics", metrics_end_time - metrics_start_time)
+                        self._record_profile_stage("step_total", metrics_end_time - step_start_time)
+
+                        current_lr = float(self.optimizer.param_groups[0]["lr"])
+
+                        should_log = (
+                            self.log_every > 0
+                            and self.global_step % self.log_every == 0
+                            and self.accelerator.is_main_process
+                        )
+                        should_log_timing = (
+                            self.profile_timing_enabled
+                            and self.profile_timing_log_every > 0
+                            and self.global_step % self.profile_timing_log_every == 0
+                            and self.accelerator.is_main_process
+                        )
+                        wandb_payload = {}
+                        if should_log:
+                            eta_str, steps_per_sec = self._estimate_eta()
+                            description = "[train] epoch=%d step=%d/%d loss=%.4f " % (
+                                self.epoch,
+                                self.global_step,
+                                self.max_steps,
+                                global_loss,
+                            )
+                            if global_loss_metrics:
+                                detail_str = " ".join([f"{k}={v:.4f}" for k, v in sorted(global_loss_metrics.items())])
+                                description += detail_str + " "
+                            description += "lr=%.2e speed=%.2f step/s, %.2f samples/s eta=%s" % (
+                                current_lr,
+                                steps_per_sec,
+                                steps_per_sec * self.batch_size * self.accelerator.num_processes,
+                                eta_str,
+                            )
                             logger.info(description)
-                            eval_payload = {
-                                "eval/val_loss": float(metrics["val_loss"]),
-                                "eval/psnr_rg": float(metrics["psnr_rg"]),
-                                "eval/ssim_rg": float(metrics["ssim_rg"]),
-                                "eval/psnr_rd": float(metrics["psnr_rd"]),
-                                "eval/ssim_rd": float(metrics["ssim_rd"]),
-                                "eval/psnr_dg": float(metrics["psnr_dg"]),
-                                "eval/ssim_dg": float(metrics["ssim_dg"]),
-                            }
-                            if "action_l2" in metrics:
-                                eval_payload["eval/action_l2"] = float(metrics["action_l2"])
-                            if "action_l1" in metrics:
-                                eval_payload["eval/action_l1"] = float(metrics["action_l1"])
-                            self._wandb_log(eval_payload)
 
-                    if self.save_every > 0 and self.global_step % self.save_every == 0:
-                        ckpt_info = self.save_checkpoint()
-                        if self.accelerator.is_main_process:
-                            logger.info(
-                                "[ckpt] step=%d weights=%s state=%s",
-                                self.global_step,
-                                ckpt_info["weights_path"],
-                                ckpt_info["state_path"],
+                            wandb_payload.update(
+                                {
+                                    "performance/steps_per_sec": steps_per_sec,
+                                    "performance/samples_per_sec": steps_per_sec * self.batch_size * self.accelerator.num_processes,
+                                }
                             )
-
-                    if self.global_step >= self.max_steps:
-                        ckpt_info = self.save_checkpoint()
-                        if self.accelerator.is_main_process:
-                            logger.info(
-                                "[done] max_steps reached step=%d weights=%s state=%s",
-                                self.global_step,
-                                ckpt_info["weights_path"],
-                                ckpt_info["state_path"],
+                            wandb_payload.update(
+                                {
+                                    "train/loss": global_loss,
+                                    "train/grad_norm": global_grad_norm,
+                                    "train/lr": current_lr,
+                                }
                             )
-                        return
+                            for key, value in global_loss_metrics.items():
+                                wandb_payload[f"train/{key}"] = value
 
-        ckpt_info = self.save_checkpoint()
+                        if (
+                            self.eval_every > 0
+                            and self.val_dataset is not None
+                            and self.global_step % self.eval_every == 0
+                        ):
+                            eval_start_time = self._profile_time()
+                            with self._profile_range("train/evaluate"):
+                                metrics = self.evaluate()
+                                self.accelerator.wait_for_everyone()
+                            eval_end_time = self._profile_time()
+                            self._record_profile_stage("eval", eval_end_time - eval_start_time)
+                            if metrics is not None and self.accelerator.is_main_process:
+                                description = "[eval] step=%d val_loss=%.4f infer_psnr=%.4f infer_ssim=%.4f" % (
+                                    self.global_step,
+                                    metrics["val_loss"],
+                                    metrics["psnr_rd"],
+                                    metrics["ssim_rd"],
+                                )
+                                if "action_l2" in metrics:
+                                    description += " action_l2=%.4f" % metrics["action_l2"]
+                                if "action_l1" in metrics:
+                                    description += " action_l1=%.4f" % metrics["action_l1"]
+                                logger.info(description)
+                                eval_payload = {
+                                    "eval/val_loss": float(metrics["val_loss"]),
+                                    "eval/psnr_rg": float(metrics["psnr_rg"]),
+                                    "eval/ssim_rg": float(metrics["ssim_rg"]),
+                                    "eval/psnr_rd": float(metrics["psnr_rd"]),
+                                    "eval/ssim_rd": float(metrics["ssim_rd"]),
+                                    "eval/psnr_dg": float(metrics["psnr_dg"]),
+                                    "eval/ssim_dg": float(metrics["ssim_dg"]),
+                                }
+                                if "action_l2" in metrics:
+                                    eval_payload["eval/action_l2"] = float(metrics["action_l2"])
+                                if "action_l1" in metrics:
+                                    eval_payload["eval/action_l1"] = float(metrics["action_l1"])
+                                self._wandb_log(eval_payload)
+
+                        if self.save_every > 0 and self.global_step % self.save_every == 0:
+                            ckpt_start_time = self._profile_time()
+                            with self._profile_range("train/save_checkpoint"):
+                                ckpt_info = self.save_checkpoint()
+                            ckpt_end_time = self._profile_time()
+                            self._record_profile_stage("checkpoint", ckpt_end_time - ckpt_start_time)
+                            if self.accelerator.is_main_process:
+                                logger.info(
+                                    "[ckpt] step=%d weights=%s state=%s",
+                                    self.global_step,
+                                    ckpt_info["weights_path"],
+                                    ckpt_info["state_path"],
+                                )
+
+                        if should_log_timing:
+                            timing_payload = self._pop_profile_timing_payload()
+                            if timing_payload:
+                                timing_desc = " ".join(
+                                    [f"{stage}={value:.2f}ms" for stage, value in sorted(timing_payload.items())]
+                                )
+                                logger.info("[profile-timing] step=%d %s", self.global_step, timing_desc)
+                                for stage, value in timing_payload.items():
+                                    wandb_payload[f"profile_timing_ms/{stage}"] = value
+                        if wandb_payload:
+                            self._wandb_log(wandb_payload)
+
+                        if active_profiler is not None:
+                            active_profiler.step()
+
+                        if self.global_step >= self.max_steps:
+                            ckpt_start_time = self._profile_time()
+                            with self._profile_range("train/save_checkpoint"):
+                                ckpt_info = self.save_checkpoint()
+                            ckpt_end_time = self._profile_time()
+                            self._record_profile_stage("checkpoint", ckpt_end_time - ckpt_start_time)
+                            if self.accelerator.is_main_process:
+                                logger.info(
+                                    "[done] max_steps reached step=%d weights=%s state=%s",
+                                    self.global_step,
+                                    ckpt_info["weights_path"],
+                                    ckpt_info["state_path"],
+                                )
+                            return
+
+        with self._profile_range("train/save_checkpoint"):
+            ckpt_info = self.save_checkpoint()
         if self.accelerator.is_main_process:
             logger.info(
                 "[done] training finished step=%d weights=%s state=%s",
