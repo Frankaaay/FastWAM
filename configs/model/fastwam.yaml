@@ -12,6 +12,7 @@ vae_torch_compile: false
 vae_torch_compile_mode: "default"
 vae_encode_functional: false
 vae_encode_functional_mode: "reduce-overhead"
+infer_denoise_cuda_graph: false
 action_dit_pretrained_path: checkpoints/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt
 skip_dit_load_from_pretrain: false
 

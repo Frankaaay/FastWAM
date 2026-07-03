@@ -9,6 +9,7 @@ from fastwam.utils.logging_config import get_logger
 from fastwam.utils.pytorch_utils import is_rank0
 
 from .action_dit import ActionDiT
+from .denoise_cuda_graph import DenoiseStepGraph
 from .helpers.loader import load_wan22_ti2v_5b_components
 from .mot import MoT
 from .schedulers.scheduler_continuous import WanContinuousFlowMatchScheduler
@@ -44,6 +45,7 @@ class FastWAM(torch.nn.Module):
         vae_torch_compile_mode: str = "default",
         vae_encode_functional: bool = False,
         vae_encode_functional_mode: str = "reduce-overhead",
+        infer_denoise_cuda_graph: bool = False,
     ):
         super().__init__()
         self.video_expert = video_expert
@@ -96,6 +98,8 @@ class FastWAM(torch.nn.Module):
         self.vae_encode_functional = bool(vae_encode_functional)
         self.vae_encode_functional_mode = str(vae_encode_functional_mode)
         self._vae_encode_functional_compiled_cache: dict[Any, Any] = {}
+        self.infer_denoise_cuda_graph = bool(infer_denoise_cuda_graph)
+        self._last_infer_denoise_cuda_graph_status = "disabled"
 
         self.to(self.device)
         if self.vae_encode_functional and self.vae_torch_compile:
@@ -128,6 +132,7 @@ class FastWAM(torch.nn.Module):
         vae_torch_compile_mode: str = "default",
         vae_encode_functional: bool = False,
         vae_encode_functional_mode: str = "reduce-overhead",
+        infer_denoise_cuda_graph: bool = False,
         video_train_shift: float = 5.0,
         video_infer_shift: float = 5.0,
         video_num_train_timesteps: int = 1000,
@@ -199,6 +204,7 @@ class FastWAM(torch.nn.Module):
             vae_torch_compile_mode=vae_torch_compile_mode,
             vae_encode_functional=vae_encode_functional,
             vae_encode_functional_mode=vae_encode_functional_mode,
+            infer_denoise_cuda_graph=infer_denoise_cuda_graph,
         )
         model.model_paths = {
             "video_dit": components.dit_path,
@@ -1224,22 +1230,101 @@ class FastWAM(torch.nn.Module):
             dtype=latents_action.dtype,
             shift_override=sigma_shift,
         )
-        for step_t_action, step_delta_action in zip(infer_timesteps_action, infer_deltas_action):
-            with torch.profiler.record_function("model/infer/denoise_step"):
-                timestep_action = step_t_action.unsqueeze(0).to(dtype=latents_action.dtype, device=self.device)
+        denoise_step_graph: DenoiseStepGraph | None = None
+        self._last_infer_denoise_cuda_graph_status = "disabled"
+        if self.infer_denoise_cuda_graph and int(infer_timesteps_action.numel()) > 0:
+            timestep_action_sample = infer_timesteps_action[0].unsqueeze(0).to(
+                dtype=latents_action.dtype,
+                device=self.device,
+            )
 
-                pred_action_posi = self._predict_action_noise_with_cache(
-                    latents_action=latents_action,
-                    timestep_action=timestep_action,
+            def _denoise_step_fn(
+                latents_action_in: torch.Tensor,
+                timestep_action_in: torch.Tensor,
+            ) -> torch.Tensor:
+                return self._predict_action_noise_with_cache(
+                    latents_action=latents_action_in,
+                    timestep_action=timestep_action_in,
                     context=context,
                     context_mask=context_mask,
                     video_kv_cache=video_kv_cache,
                     attention_mask=attention_mask,
                     video_seq_len=video_seq_len,
                 )
-                pred_action = pred_action_posi
 
-                latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
+            try:
+                denoise_step_graph = DenoiseStepGraph().capture(
+                    step_fn=_denoise_step_fn,
+                    latents_sample=latents_action,
+                    timestep_sample=timestep_action_sample,
+                )
+                self._last_infer_denoise_cuda_graph_status = "captured"
+            except Exception as exc:
+                denoise_step_graph = None
+                self._last_infer_denoise_cuda_graph_status = f"capture_failed:{type(exc).__name__}"
+                self._rank0_warning(
+                    "infer denoise CUDA graph capture failed; falling back to eager denoise. reason=%r",
+                    exc,
+                )
+
+        if denoise_step_graph is None:
+            for step_t_action, step_delta_action in zip(infer_timesteps_action, infer_deltas_action):
+                with torch.profiler.record_function("model/infer/denoise_step"):
+                    timestep_action = step_t_action.unsqueeze(0).to(dtype=latents_action.dtype, device=self.device)
+
+                    pred_action_posi = self._predict_action_noise_with_cache(
+                        latents_action=latents_action,
+                        timestep_action=timestep_action,
+                        context=context,
+                        context_mask=context_mask,
+                        video_kv_cache=video_kv_cache,
+                        attention_mask=attention_mask,
+                        video_seq_len=video_seq_len,
+                    )
+                    pred_action = pred_action_posi
+
+                    latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
+        else:
+            graph_failed = False
+            for step_t_action, step_delta_action in zip(infer_timesteps_action, infer_deltas_action):
+                with torch.profiler.record_function("model/infer/denoise_step"):
+                    timestep_action = step_t_action.unsqueeze(0).to(dtype=latents_action.dtype, device=self.device)
+
+                    if graph_failed:
+                        pred_action_posi = self._predict_action_noise_with_cache(
+                            latents_action=latents_action,
+                            timestep_action=timestep_action,
+                            context=context,
+                            context_mask=context_mask,
+                            video_kv_cache=video_kv_cache,
+                            attention_mask=attention_mask,
+                            video_seq_len=video_seq_len,
+                        )
+                    else:
+                        try:
+                            pred_action_posi = denoise_step_graph.replay(
+                                latents=latents_action,
+                                timestep=timestep_action,
+                            )
+                        except Exception as exc:
+                            graph_failed = True
+                            self._last_infer_denoise_cuda_graph_status = f"replay_failed:{type(exc).__name__}"
+                            self._rank0_warning(
+                                "infer denoise CUDA graph replay failed; falling back to eager denoise. reason=%r",
+                                exc,
+                            )
+                            pred_action_posi = self._predict_action_noise_with_cache(
+                                latents_action=latents_action,
+                                timestep_action=timestep_action,
+                                context=context,
+                                context_mask=context_mask,
+                                video_kv_cache=video_kv_cache,
+                                attention_mask=attention_mask,
+                                video_seq_len=video_seq_len,
+                            )
+                    pred_action = pred_action_posi
+
+                    latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
 
         return {
             "action": latents_action[0].detach().to(device="cpu", dtype=torch.float32),

@@ -171,6 +171,7 @@ def instantiate_random_model(cfg: Any, device: str):
         vae_torch_compile_mode=str(model_cfg.get("vae_torch_compile_mode", "default")),
         vae_encode_functional=bool(model_cfg.get("vae_encode_functional", False)),
         vae_encode_functional_mode=str(model_cfg.get("vae_encode_functional_mode", "reduce-overhead")),
+        infer_denoise_cuda_graph=bool(model_cfg.get("infer_denoise_cuda_graph", False)),
     )
     model.eval()
     # 随机构造路径下 VAE 默认 fp32，与真实加载（bf16 权重）不同；统一整模型 dtype，
@@ -338,6 +339,7 @@ def main() -> None:
             "vae_torch_compile_enabled": bool(model.vae_torch_compile_enabled),
             "vae_encode_functional": bool(model.vae_encode_functional),
             "vae_encode_functional_mode": str(model.vae_encode_functional_mode),
+            "infer_denoise_cuda_graph": bool(model.infer_denoise_cuda_graph),
         },
         "artifacts": {
             "result_json": str(result_path),
