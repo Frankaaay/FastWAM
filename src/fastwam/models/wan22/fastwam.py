@@ -1153,7 +1153,8 @@ class FastWAM(torch.nn.Module):
         ).to(device=self.device, dtype=self.torch_dtype)
 
         input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
-        first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
+        with torch.profiler.record_function("model/infer/encode_input_image"):
+            first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
         fuse_flag = bool(getattr(self.video_expert, "fuse_vae_embedding_in_latents", False))
 
         use_prompt = prompt is not None
@@ -1205,16 +1206,17 @@ class FastWAM(torch.nn.Module):
             video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
             device=video_pre["tokens"].device,
         )
-        video_kv_cache = self.mot.prefill_video_cache(
-            video_tokens=video_pre["tokens"],
-            video_freqs=video_pre["freqs"],
-            video_t_mod=video_pre["t_mod"],
-            video_context_payload={
-                "context": video_pre["context"],
-                "mask": video_pre["context_mask"],
-            },
-            video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
-        )
+        with torch.profiler.record_function("model/infer/current_video_prefill"):
+            video_kv_cache = self.mot.prefill_video_cache(
+                video_tokens=video_pre["tokens"],
+                video_freqs=video_pre["freqs"],
+                video_t_mod=video_pre["t_mod"],
+                video_context_payload={
+                    "context": video_pre["context"],
+                    "mask": video_pre["context_mask"],
+                },
+                video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
+            )
 
         infer_timesteps_action, infer_deltas_action = self.infer_action_scheduler.build_inference_schedule(
             num_inference_steps=num_inference_steps,
@@ -1223,20 +1225,21 @@ class FastWAM(torch.nn.Module):
             shift_override=sigma_shift,
         )
         for step_t_action, step_delta_action in zip(infer_timesteps_action, infer_deltas_action):
-            timestep_action = step_t_action.unsqueeze(0).to(dtype=latents_action.dtype, device=self.device)
+            with torch.profiler.record_function("model/infer/denoise_step"):
+                timestep_action = step_t_action.unsqueeze(0).to(dtype=latents_action.dtype, device=self.device)
 
-            pred_action_posi = self._predict_action_noise_with_cache(
-                latents_action=latents_action,
-                timestep_action=timestep_action,
-                context=context,
-                context_mask=context_mask,
-                video_kv_cache=video_kv_cache,
-                attention_mask=attention_mask,
-                video_seq_len=video_seq_len,
-            )
-            pred_action = pred_action_posi
+                pred_action_posi = self._predict_action_noise_with_cache(
+                    latents_action=latents_action,
+                    timestep_action=timestep_action,
+                    context=context,
+                    context_mask=context_mask,
+                    video_kv_cache=video_kv_cache,
+                    attention_mask=attention_mask,
+                    video_seq_len=video_seq_len,
+                )
+                pred_action = pred_action_posi
 
-            latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
+                latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
 
         return {
             "action": latents_action[0].detach().to(device="cpu", dtype=torch.float32),
