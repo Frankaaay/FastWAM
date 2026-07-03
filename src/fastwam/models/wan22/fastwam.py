@@ -12,6 +12,7 @@ from .action_dit import ActionDiT
 from .helpers.loader import load_wan22_ti2v_5b_components
 from .mot import MoT
 from .schedulers.scheduler_continuous import WanContinuousFlowMatchScheduler
+from .vae_encode_functional import encode_functional
 
 logger = get_logger(__name__)
 
@@ -41,6 +42,8 @@ class FastWAM(torch.nn.Module):
         loss_lambda_action: float = 1.0,
         vae_torch_compile: bool = False,
         vae_torch_compile_mode: str = "default",
+        vae_encode_functional: bool = False,
+        vae_encode_functional_mode: str = "reduce-overhead",
     ):
         super().__init__()
         self.video_expert = video_expert
@@ -90,9 +93,18 @@ class FastWAM(torch.nn.Module):
         self.vae_torch_compile = bool(vae_torch_compile)
         self.vae_torch_compile_mode = str(vae_torch_compile_mode)
         self.vae_torch_compile_enabled = False
+        self.vae_encode_functional = bool(vae_encode_functional)
+        self.vae_encode_functional_mode = str(vae_encode_functional_mode)
+        self._vae_encode_functional_compiled_cache: dict[Any, Any] = {}
 
         self.to(self.device)
-        self._configure_vae_torch_compile()
+        if self.vae_encode_functional and self.vae_torch_compile:
+            self._rank0_warning(
+                "vae_encode_functional enabled; ignoring vae_torch_compile=%s",
+                self.vae_torch_compile_mode,
+            )
+        else:
+            self._configure_vae_torch_compile()
 
     @classmethod
     def from_wan22_pretrained(
@@ -114,6 +126,8 @@ class FastWAM(torch.nn.Module):
         mot_torch_compile_mode: str = "default",
         vae_torch_compile: bool = False,
         vae_torch_compile_mode: str = "default",
+        vae_encode_functional: bool = False,
+        vae_encode_functional_mode: str = "reduce-overhead",
         video_train_shift: float = 5.0,
         video_infer_shift: float = 5.0,
         video_num_train_timesteps: int = 1000,
@@ -183,6 +197,8 @@ class FastWAM(torch.nn.Module):
             loss_lambda_action=loss_lambda_action,
             vae_torch_compile=vae_torch_compile,
             vae_torch_compile_mode=vae_torch_compile_mode,
+            vae_encode_functional=vae_encode_functional,
+            vae_encode_functional_mode=vae_encode_functional_mode,
         )
         model.model_paths = {
             "video_dit": components.dit_path,
@@ -307,13 +323,40 @@ class FastWAM(torch.nn.Module):
     @torch.no_grad()
     def _encode_video_latents(self, video_tensor, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)):
         with torch.profiler.record_function("model/vae_encode"):
-            z = self.vae.encode(
-                video_tensor,
-                device=self.device,
-                tiled=tiled,
-                tile_size=tile_size,
-                tile_stride=tile_stride,
-            )
+            if self.vae_encode_functional and not tiled:
+                try:
+                    hidden_states = []
+                    for video in video_tensor:
+                        video = video.unsqueeze(0).to(self.device)
+                        hidden_state = encode_functional(
+                            self.vae.model,
+                            video,
+                            self.vae.scale,
+                            compile_mode=self.vae_encode_functional_mode,
+                            compiled_cache=self._vae_encode_functional_compiled_cache,
+                        )
+                        hidden_states.append(hidden_state.squeeze(0))
+                    z = torch.stack(hidden_states)
+                except Exception as exc:
+                    self._rank0_warning(
+                        "functional VAE encode failed; falling back to original encode. reason=%r",
+                        exc,
+                    )
+                    z = self.vae.encode(
+                        video_tensor,
+                        device=self.device,
+                        tiled=tiled,
+                        tile_size=tile_size,
+                        tile_stride=tile_stride,
+                    )
+            else:
+                z = self.vae.encode(
+                    video_tensor,
+                    device=self.device,
+                    tiled=tiled,
+                    tile_size=tile_size,
+                    tile_stride=tile_stride,
+                )
         return z
 
     def _prepare_cached_video_latents(
