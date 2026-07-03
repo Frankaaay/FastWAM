@@ -214,3 +214,73 @@ python -c "from pathlib import Path; files=['src/fastwam/datasets/lerobot/robot_
 ```
 
 结果：通过。
+
+## 远端全量结果与 profiling 对比（26-07-03）
+
+全量预计算第一次使用 `torchrun --nproc_per_node=8` 跑到约 `812883 / 865308`
+后退出。日志根因是 rank6 在最终统计汇总附近触发 NCCL watchdog：
+
+```text
+WorkNCCL(SeqNum=4, OpType=ALLREDUCE, NumelIn=3, NumelOut=3, Timeout(ms)=600000)
+scripts/precompute_vae_latents.py FAILED
+```
+
+为了保留已生成的 cache，没有删除重跑；改为给 `scripts/precompute_vae_latents.py`
+增加非分布式手动分片参数：
+
+```text
++vae_latent_cache.num_shards=8
++vae_latent_cache.shard_index=<0..7>
+```
+
+然后用 8 个互不通信的单进程 shard，分别设置 `CUDA_VISIBLE_DEVICES=<gpu>`，
+继续以 `overwrite=false` 补齐缺失样本。该模式不使用 `torchrun`，因此没有 NCCL
+all-reduce/barrier 风险。
+
+最终 cache：
+
+```text
+cache_dir: runs/vae_latent_cache/fold_clothv4_v4_wan22
+fingerprint: 5ff52f56f7112f87
+files: 865308 / 865308
+size: 192G
+validated samples: 0, 432654, 865307
+payload dtype: torch.bfloat16
+```
+
+cached profiling run：
+
+```text
+run id: profile_trace_latcache_fold_clothv4_v4_20260703_045618
+trace: runs/fold_clothv4_v4_2epoch/profile_trace_latcache_fold_clothv4_v4_20260703_045618/profile/torch/lacy--214-30-239-40_3735196.1783026074570934851.pt.trace.json
+trace size: 1.1G
+summary: runs/fold_clothv4_v4_2epoch/profile_trace_latcache_fold_clothv4_v4_20260703_045618/profile/trace_summary.tsv
+wandb offline: runs/fold_clothv4_v4_2epoch/profile_trace_latcache_fold_clothv4_v4_20260703_045618/wandb/offline-run-20260703_045846-d40rx5m9
+wandb url: https://wandb.ai/maxliuyy_thu/fastwam-mem/runs/d40rx5m9
+```
+
+W&B 同步已在跳板机日志中确认：
+
+```text
+Syncing: https://wandb.ai/maxliuyy_thu/fastwam-mem/runs/d40rx5m9 ... done.
+[ok] .../offline-run-20260703_045846-d40rx5m9
+```
+
+trace 对比：
+
+| metric | baseline | latent cache | change |
+| --- | ---: | ---: | ---: |
+| `train/forward_loss` | 2735.19ms | 1402.11ms | -48.7% |
+| `train/backward` | 1598.65ms | 1571.49ms | -1.7% |
+| `model/build_inputs` | 1326.40ms | 0.42ms | removed |
+| `model/vae_encode` | 30 calls, 662.85ms mean | 0 calls | removed |
+| `model/build_inputs/current_video_to_latents` | 821.21ms | 0 | removed |
+| `model/build_inputs/history_video_to_latents` | 504.72ms | 0 | removed |
+| `model/v4/video_prefill_cache` | 957.59ms | 957.61ms | unchanged |
+
+结论：
+
+- VAE latent cache 达到预期：训练 forward 中的 VAE encode 已消失。
+- 主要收益在 forward，`train/forward_loss` 从约 `2.74s` 降到约 `1.40s`。
+- backward 基本不变，符合 VAE 原本 frozen/no-grad 的预期。
+- 下一阶段瓶颈转移到 `model/v4/video_prefill_cache` 与 attention backend。

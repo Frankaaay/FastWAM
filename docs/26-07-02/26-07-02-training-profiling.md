@@ -252,7 +252,86 @@ checkpoints: 0
 - optimizer / metrics 很小：均远低于 2ms。
 - PyTorch profiler active window 覆盖 step 26-40，trace 已生成，可用于继续看 VAE encode、v4 video prefill、history action prefill、future action condition cache 等内部阶段。
 
+trace 聚合补充（2026-07-02）：
+
+```text
+active window: ProfilerStep#25-39，共 15 step
+train/forward_loss: mean 2735.19ms
+train/backward: mean 1598.65ms
+model/build_inputs: mean 1326.40ms
+model/vae_encode: 30 次，mean 662.85ms，约等于每 step 两次 VAE encode
+model/build_inputs/current_video_to_latents: mean 821.21ms
+model/build_inputs/history_video_to_latents: mean 504.72ms
+model/training_loss_v4: mean 1399.52ms
+model/v4/video_prefill_cache: CPU wall mean 679.58ms，GPU annotation mean 1235.59ms
+model/v4/future_action_with_condition_cache: mean 64.95ms
+model/v4/history_action_prefill_cache: mean 64.56ms
+```
+
+attention kernel 检查：
+
+```text
+aten::scaled_dot_product_attention: 4500
+aten::_scaled_dot_product_efficient_attention: 4500
+aten::_scaled_dot_product_efficient_attention_backward: 2670
+```
+
+当前没有看到 `flash_attention` kernel，说明 PyTorch SDPA 大概率因为当前 mask/shape 选择了 efficient attention backend。后续若要冲 forward/backward，应先验证能否让 video/action mixed attention 走 FlashAttention 或更贴合 mask 结构的 block-sparse / grouped kernel。
+
+当前加速优先级：
+
+1. 训练 VAE latent cache：`_encode_video_latents()` 是 `no_grad` 且 VAE frozen，fold-cloth 数据预处理是固定 resize/crop/normalize，没有随机增强迹象。离线缓存 current video latents 与 history video latents 有机会直接拿掉约 1.3s/step 的 forward wall time，但不会直接降低 backward。
+2. attention/backend 验证：当前 `video_prefill_cache` 是 DiT/MoT 内最大可训练计算块。先用强制 SDPA backend/警告信息确认为什么未走 flash，再决定是调整 mask 表达、接入 FlashAttention-2/3，还是实现更贴近 first-frame-causal / group mask 的分块 attention。
+3. 编译与 CUDA graph：只适合在 shape 固定、graph break 可控的子模块上试，例如 action denoising 或 MoT block；先做短 run 对比正确性和吞吐。
+4. FP8 / Transformer Engine：H200/Hopper 支持 FP8，但需要替换 Linear/RMSNorm/attention 等 building blocks 或做更大范围集成，属于中高风险优化；适合在 latent cache 与 attention backend 验证后再排期。
+5. 推理侧优先减少 action denoising steps，并把 `infer_action()` 外层改成 stateful policy 以复用 context 和 history/video condition cache；这主要改善部署延迟，不会直接加速训练 backward。
+
 ## 下一步
 
 - 用 TensorBoard 或 Chrome trace 打开 `profile/torch/*.pt.trace.json`，重点查看 `model/vae_encode`、`model/v4/video_prefill_cache`、`model/v4/future_action_with_condition_cache` 和 backward 对应 kernel。
 - 如需后续对照，建议固定 `batch_size=24`，复用已有 `dataset_stats.json`，避免每次 profiling 前重复计算 norm stats。
+
+## VAE latent cache 对比结果（26-07-03）
+
+cached trace run：
+
+```text
+run id: profile_trace_latcache_fold_clothv4_v4_20260703_045618
+trace: runs/fold_clothv4_v4_2epoch/profile_trace_latcache_fold_clothv4_v4_20260703_045618/profile/torch/lacy--214-30-239-40_3735196.1783026074570934851.pt.trace.json
+summary: runs/fold_clothv4_v4_2epoch/profile_trace_latcache_fold_clothv4_v4_20260703_045618/profile/trace_summary.tsv
+wandb: https://wandb.ai/maxliuyy_thu/fastwam-mem/runs/d40rx5m9
+```
+
+cache 完整性：
+
+```text
+cache files: 865308 / 865308
+cache size: 192G
+fingerprint: 5ff52f56f7112f87
+validated samples: 0, 432654, 865307
+```
+
+trace 聚合对比：
+
+| metric | baseline | latent cache | change |
+| --- | ---: | ---: | ---: |
+| `train/forward_loss` | 2735.19ms | 1402.11ms | -48.7% |
+| `train/backward` | 1598.65ms | 1571.49ms | -1.7% |
+| `model/build_inputs` | 1326.40ms | 0.42ms | removed |
+| `model/vae_encode` | 30 calls, 662.85ms mean | 0 calls | removed |
+| `model/build_inputs/current_video_to_latents` | 821.21ms | 0 | removed |
+| `model/build_inputs/history_video_to_latents` | 504.72ms | 0 | removed |
+| `model/v4/video_prefill_cache` | 957.59ms | 957.61ms | unchanged |
+
+结论：
+
+- VAE latent cache 已达到目标：`model/vae_encode` 和 raw video-to-latent ranges 在 cached trace 中消失。
+- forward 减少约 `1.33s/step`，降幅约 `48.7%`。
+- backward 基本不变，说明第一阶段优化只移除了 frozen VAE forward cost。
+- 当前下一瓶颈是 `model/v4/video_prefill_cache` / attention backend；下一阶段应优先验证 SDPA 为什么走 efficient attention 而不是 flash attention。
+
+补充说明：
+
+- 全量预计算第一次在 `torchrun` 最后阶段遇到 NCCL all-reduce timeout，cache 停在 `812883 / 865308`。
+- 已给 `scripts/precompute_vae_latents.py` 增加非分布式手动分片参数 `vae_latent_cache.num_shards` / `vae_latent_cache.shard_index`，用 8 个单进程 shard 在 `overwrite=false` 下补齐缺失样本，避免 NCCL 通信。
+- cached trace run 的 `profile_timing_lines.txt` 为空，因为等待器在 trace 文件稳定后立即中断训练；trace summary 本身覆盖 active window，可用于热点对比。
