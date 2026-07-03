@@ -149,6 +149,8 @@ def instantiate_model(cfg: Any, device: str):
     model_dtype = _mixed_precision_to_model_dtype(mixed_precision)
     model = instantiate(cfg.model, model_dtype=model_dtype, device=device)
     model.eval()
+    # 随机权重路径下 VAE 默认 fp32；统一整模型 dtype，避免 fp32 bias 与 bf16 输入不匹配。
+    model.to(dtype=model_dtype)
     torch.set_grad_enabled(False)
     return model, model_dtype, mixed_precision
 

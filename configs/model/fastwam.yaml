@@ -10,6 +10,8 @@ mot_torch_compile: false
 mot_torch_compile_mode: "default"
 vae_torch_compile: false
 vae_torch_compile_mode: "default"
+vae_encode_functional: false
+vae_encode_functional_mode: "reduce-overhead"
 attention_debug:
   log_sdpa_backend: false
   force_video_prefill_no_mask: false
