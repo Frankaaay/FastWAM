@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action-horizon", type=int, default=None, help="Default: data.train.num_frames - 1.")
     parser.add_argument("--num-inference-steps", type=int, default=20, help="Denoising steps.")
     parser.add_argument("--seed", type=int, default=0, help="Synthetic input and denoise seed.")
-    parser.add_argument("--abs-tol", type=float, default=1e-3, help="Non-zero exit when max_abs exceeds this.")
+    parser.add_argument("--abs-tol", type=float, default=0.0, help="Non-zero exit when max_abs exceeds this.")
     parser.add_argument("--allow-fallback", action="store_true", help="Do not fail when graph path falls back.")
     parser.add_argument("--strict", action="store_true", help="Raise AssertionError instead of returning non-zero.")
     return parser.parse_args()
@@ -96,15 +96,16 @@ def metrics(ref: torch.Tensor, got: torch.Tensor) -> dict[str, float]:
     return {"max_abs": max_abs, "mean_abs": mean_abs, "rel": rel, "cosine": cosine}
 
 
-def print_table(metric_row: dict[str, float], baseline_status: str, graph_status: str, status: str) -> None:
-    print("| path | graph_status | max_abs | mean_abs | rel | cosine | status |")
+def print_table(rows: list[dict[str, Any]]) -> None:
+    print("| call | graph_status | max_abs | mean_abs | rel | cosine | status |")
     print("| --- | --- | ---: | ---: | ---: | ---: | --- |")
-    print(f"| eager | {baseline_status} | 0 | 0 | 0 | 1.00000000 | reference |")
-    print(
-        f"| cuda_graph | {graph_status} | {metric_row['max_abs']:.6g} | "
-        f"{metric_row['mean_abs']:.6g} | {metric_row['rel']:.6g} | "
-        f"{metric_row['cosine']:.8f} | {status} |"
-    )
+    for row in rows:
+        metric_row = row["metrics"]
+        print(
+            f"| {row['call']} | {row['graph_status']} | {metric_row['max_abs']:.6g} | "
+            f"{metric_row['mean_abs']:.6g} | {metric_row['rel']:.6g} | "
+            f"{metric_row['cosine']:.8f} | {row['status']} |"
+        )
 
 
 @torch.no_grad()
@@ -129,31 +130,64 @@ def main() -> int:
     model, _, _ = instantiate_random_model(cfg, device)
     checkpoint = load_checkpoint_if_requested(model, args.ckpt)
     action_horizon = int(args.action_horizon or (select_int(cfg, "data.train.num_frames", 33) - 1))
-    kwargs = make_inputs(torch, model, args, action_horizon)
+    kwargs_first = make_inputs(torch, model, args, action_horizon)
+    torch.manual_seed(int(args.seed) + 1)
+    torch.cuda.manual_seed_all(int(args.seed) + 1)
+    kwargs_second = make_inputs(torch, model, args, action_horizon)
+    kwargs_second["seed"] = int(args.seed)
     state_before = state_signature(model)
 
-    baseline, baseline_status = run_once(torch, model, kwargs, enabled=False)
-    assert_state_compatible("eager infer_action", state_before, model)
+    baseline_first, _baseline_first_status = run_once(torch, model, kwargs_first, enabled=False)
+    assert_state_compatible("first eager infer_action", state_before, model)
 
-    graph_out, graph_status = run_once(torch, model, kwargs, enabled=True)
-    assert_state_compatible("graph infer_action", state_before, model)
+    baseline_second, _baseline_second_status = run_once(torch, model, kwargs_second, enabled=False)
+    assert_state_compatible("second eager infer_action", state_before, model)
 
-    row = metrics(baseline, graph_out)
-    graph_ok = graph_status == "captured" or bool(args.allow_fallback)
-    within_tol = row["max_abs"] <= float(args.abs_tol)
-    status = "PASS" if graph_ok and within_tol else "FAIL"
-    print_table(row, baseline_status, graph_status, status)
+    graph_first, graph_first_status = run_once(torch, model, kwargs_first, enabled=True)
+    assert_state_compatible("first graph infer_action", state_before, model)
+
+    graph_second, graph_second_status = run_once(torch, model, kwargs_second, enabled=True)
+    assert_state_compatible("second graph infer_action", state_before, model)
+
+    first_row = metrics(baseline_first, graph_first)
+    second_row = metrics(baseline_second, graph_second)
+    expected_statuses = (graph_first_status == "captured" and graph_second_status == "reused")
+    graph_ok = expected_statuses or bool(args.allow_fallback)
+    first_within_tol = first_row["max_abs"] <= float(args.abs_tol)
+    second_within_tol = second_row["max_abs"] <= float(args.abs_tol)
+    rows = [
+        {
+            "call": "first",
+            "graph_status": graph_first_status,
+            "metrics": first_row,
+            "status": "PASS" if graph_ok and first_within_tol else "FAIL",
+        },
+        {
+            "call": "second",
+            "graph_status": graph_second_status,
+            "metrics": second_row,
+            "status": "PASS" if graph_ok and second_within_tol else "FAIL",
+        },
+    ]
+    print_table(rows)
     print(f"checkpoint: {checkpoint}")
-    print(f"shape: {tuple(baseline.shape)}")
+    print(f"shape_first: {tuple(baseline_first.shape)}")
+    print(f"shape_second: {tuple(baseline_second.shape)}")
 
     if not graph_ok:
-        message = f"CUDA graph path did not capture successfully: status={graph_status}"
+        message = (
+            "CUDA graph path did not use persistent replay successfully: "
+            f"first={graph_first_status}, second={graph_second_status}, expected first=captured second=reused"
+        )
         if args.strict:
             raise AssertionError(message)
         print(message)
         return 2
-    if not within_tol:
-        message = f"max_abs {row['max_abs']:.6g} exceeds tolerance {float(args.abs_tol):.6g}"
+    if not first_within_tol or not second_within_tol:
+        message = (
+            f"max_abs first={first_row['max_abs']:.6g} second={second_row['max_abs']:.6g} "
+            f"exceeds tolerance {float(args.abs_tol):.6g}"
+        )
         if args.strict:
             raise AssertionError(message)
         print(message)

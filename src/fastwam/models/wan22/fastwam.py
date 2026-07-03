@@ -100,6 +100,7 @@ class FastWAM(torch.nn.Module):
         self._vae_encode_functional_compiled_cache: dict[Any, Any] = {}
         self.infer_denoise_cuda_graph = bool(infer_denoise_cuda_graph)
         self._last_infer_denoise_cuda_graph_status = "disabled"
+        self._denoise_graph_cache: dict[Any, DenoiseStepGraph] = {}
 
         self.to(self.device)
         if self.vae_encode_functional and self.vae_torch_compile:
@@ -223,6 +224,8 @@ class FastWAM(torch.nn.Module):
         if self.text_encoder is not None:
             self.text_encoder.to(*args, **kwargs)
         self.vae.to(*args, **kwargs)
+        if hasattr(self, "_denoise_graph_cache"):
+            self._denoise_graph_cache.clear()
         return self
 
     def _rank0_info(self, message: str, *args) -> None:
@@ -1247,24 +1250,70 @@ class FastWAM(torch.nn.Module):
             def _denoise_step_fn(
                 latents_action_in: torch.Tensor,
                 timestep_action_in: torch.Tensor,
+                context_in: torch.Tensor,
+                context_mask_in: torch.Tensor,
+                video_kv_cache_in: list[dict[str, torch.Tensor]],
+                attention_mask_in: torch.Tensor,
+                video_seq_len_in: int,
             ) -> torch.Tensor:
                 return self._predict_action_noise_with_cache(
                     latents_action=latents_action_in,
                     timestep_action=timestep_action_in,
-                    context=context,
-                    context_mask=context_mask,
-                    video_kv_cache=video_kv_cache,
-                    attention_mask=attention_mask,
-                    video_seq_len=video_seq_len,
+                    context=context_in,
+                    context_mask=context_mask_in,
+                    video_kv_cache=video_kv_cache_in,
+                    attention_mask=attention_mask_in,
+                    video_seq_len=video_seq_len_in,
                 )
 
             try:
-                denoise_step_graph = DenoiseStepGraph().capture(
-                    step_fn=_denoise_step_fn,
+                denoise_graph_signature = DenoiseStepGraph.make_signature(
                     latents_sample=latents_action,
                     timestep_sample=timestep_action_sample,
+                    video_kv_cache=video_kv_cache,
+                    context=context,
+                    context_mask=context_mask,
+                    attention_mask=attention_mask,
+                    video_seq_len=video_seq_len,
                 )
-                self._last_infer_denoise_cuda_graph_status = "captured"
+                denoise_step_graph = self._denoise_graph_cache.get(denoise_graph_signature)
+                if denoise_step_graph is not None:
+                    try:
+                        denoise_step_graph.update_conditions(
+                            video_kv_cache=video_kv_cache,
+                            context=context,
+                            context_mask=context_mask,
+                            attention_mask=attention_mask,
+                            video_seq_len=video_seq_len,
+                        )
+                        self._last_infer_denoise_cuda_graph_status = "reused"
+                    except Exception as exc:
+                        self._denoise_graph_cache.pop(denoise_graph_signature, None)
+                        denoise_step_graph = None
+                        self._last_infer_denoise_cuda_graph_status = f"update_failed:{type(exc).__name__}"
+                        self._rank0_warning(
+                            "infer denoise CUDA graph condition update failed; recapturing. reason=%r",
+                            exc,
+                        )
+
+                if denoise_step_graph is None and self._denoise_graph_cache:
+                    self._rank0_warning(
+                        "infer denoise CUDA graph signature changed; capturing a new graph for the new fixed shape."
+                    )
+
+                if denoise_step_graph is None:
+                    denoise_step_graph = DenoiseStepGraph().capture(
+                        step_fn=_denoise_step_fn,
+                        latents_sample=latents_action,
+                        timestep_sample=timestep_action_sample,
+                        video_kv_cache=video_kv_cache,
+                        context=context,
+                        context_mask=context_mask,
+                        attention_mask=attention_mask,
+                        video_seq_len=video_seq_len,
+                    )
+                    self._denoise_graph_cache[denoise_graph_signature] = denoise_step_graph
+                    self._last_infer_denoise_cuda_graph_status = "captured"
             except Exception as exc:
                 denoise_step_graph = None
                 self._last_infer_denoise_cuda_graph_status = f"capture_failed:{type(exc).__name__}"
@@ -1314,6 +1363,7 @@ class FastWAM(torch.nn.Module):
                             )
                         except Exception as exc:
                             graph_failed = True
+                            self._denoise_graph_cache.pop(denoise_graph_signature, None)
                             self._last_infer_denoise_cuda_graph_status = f"replay_failed:{type(exc).__name__}"
                             self._rank0_warning(
                                 "infer denoise CUDA graph replay failed; falling back to eager denoise. reason=%r",
