@@ -173,6 +173,9 @@ def instantiate_random_model(cfg: Any, device: str):
         vae_encode_functional_mode=str(model_cfg.get("vae_encode_functional_mode", "reduce-overhead")),
     )
     model.eval()
+    # 随机构造路径下 VAE 默认 fp32，与真实加载（bf16 权重）不同；统一整模型 dtype，
+    # 否则 VAE conv bias(float) 与 bf16 输入不匹配直接报错。
+    model.to(dtype=model_dtype)
     torch.set_grad_enabled(False)
     return model, model_dtype, mixed_precision
 
