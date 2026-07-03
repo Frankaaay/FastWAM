@@ -4,6 +4,7 @@
 Default mode benchmarks torch matmul with logical A[M,K] and B[K,N].
 Pass --linear to benchmark F.linear with input A[M,K] and weight B[N,K],
 which is closer to the training Linear path.
+Pass --fp8 to compare the bf16 baseline with torch._scaled_mm FP8 E4M3.
 """
 
 import argparse
@@ -19,6 +20,7 @@ VARIANTS = (
     ("B_misaligned", False, True),
     ("A_B_misaligned", True, True),
 )
+FP8_VARIANT = "fp8_e4m3"
 
 
 def _parse_int_list(value):
@@ -62,6 +64,34 @@ def _make_bf16_tensor(shape, *, misaligned, device):
         if tensor.data_ptr() % 16 != 0:
             raise RuntimeError("baseline tensor unexpectedly has non-16B-aligned data_ptr")
     return tensor
+
+
+def _make_fp8_tensor(shape, *, column_major, device):
+    tensor = torch.empty(shape, device=device, dtype=torch.float8_e4m3fn)
+    if not column_major:
+        return tensor
+
+    tensor = tensor.t().contiguous().t()
+    if tensor.shape != shape or tensor.stride(0) != 1 or tensor.stride(1) != shape[0]:
+        raise RuntimeError(
+            f"FP8 B tensor is not column-major: shape={tuple(tensor.shape)}, stride={tuple(tensor.stride())}"
+        )
+    return tensor
+
+
+def _fp8_skip_reason(m, k, n, device):
+    if not hasattr(torch, "_scaled_mm"):
+        return "torch._scaled_mm is unavailable"
+    if not hasattr(torch, "float8_e4m3fn"):
+        return "torch.float8_e4m3fn is unavailable"
+    major, minor = torch.cuda.get_device_capability(device)
+    if (major, minor) < (9, 0):
+        return f"FP8 _scaled_mm benchmark expects SM90+, got sm_{major}{minor}"
+    if k % 16 != 0:
+        return f"K must be divisible by 16 for FP8 _scaled_mm, got K={k}"
+    if n % 16 != 0:
+        return f"N must be divisible by 16 for FP8 _scaled_mm, got N={n}"
+    return None
 
 
 def _cuda_self_time_us(event):
@@ -125,27 +155,77 @@ def _tflops(m, k, n, ms):
     return (2.0 * m * k * n) / (ms / 1000.0) / 1.0e12
 
 
-def _run_one_shape(m, k, n, args, device):
-    shape_label = f"M={m},K={k},N={n}"
-    for variant, misalign_a, misalign_b in VARIANTS:
-        a = _make_bf16_tensor((m, k), misaligned=misalign_a, device=device)
-        if args.linear:
-            b = _make_bf16_tensor((n, k), misaligned=misalign_b, device=device)
+def _format_skip_reason(reason):
+    text = " ".join(str(reason).split())
+    if len(text) > 240:
+        text = f"{text[:237]}..."
+    return text
 
-            def run_op():
-                return F.linear(a, b)
 
-        else:
-            b = _make_bf16_tensor((k, n), misaligned=misalign_b, device=device)
+def _print_result(shape_label, variant, m, k, n, ms, top_kernel):
+    print(f"{shape_label}\t{variant}\t{ms:.4f}\t{_tflops(m, k, n, ms):.3f}\t{top_kernel}", flush=True)
 
-            def run_op():
-                return a @ b
+
+def _print_skip(shape_label, variant, reason):
+    print(f"{shape_label}\t{variant}\tskip\tskip\tskip: {_format_skip_reason(reason)}", flush=True)
+
+
+def _run_bf16_variant(m, k, n, args, device, shape_label, variant, misalign_a, misalign_b):
+    a = _make_bf16_tensor((m, k), misaligned=misalign_a, device=device)
+    if args.linear:
+        b = _make_bf16_tensor((n, k), misaligned=misalign_b, device=device)
+
+        def run_op():
+            return F.linear(a, b)
+
+    else:
+        b = _make_bf16_tensor((k, n), misaligned=misalign_b, device=device)
+
+        def run_op():
+            return a @ b
+
+    ms = _time_ms(run_op, warmup=args.warmup, iters=args.iters, device=device)
+    top_kernel = _top_cuda_kernel(run_op, device)
+    _print_result(shape_label, variant, m, k, n, ms, top_kernel)
+    del a, b
+    torch.cuda.empty_cache()
+
+
+def _run_fp8_variant(m, k, n, args, device, shape_label):
+    reason = _fp8_skip_reason(m, k, n, device)
+    if reason:
+        _print_skip(shape_label, FP8_VARIANT, reason)
+        return
+
+    a = b = scale_a = scale_b = None
+    try:
+        a = _make_fp8_tensor((m, k), column_major=False, device=device)
+        b = _make_fp8_tensor((k, n), column_major=True, device=device)
+        scale_a = torch.tensor(1.0, device=device, dtype=torch.float32)
+        scale_b = torch.tensor(1.0, device=device, dtype=torch.float32)
+
+        def run_op():
+            return torch._scaled_mm(a, b, scale_a=scale_a, scale_b=scale_b, out_dtype=torch.bfloat16)
 
         ms = _time_ms(run_op, warmup=args.warmup, iters=args.iters, device=device)
         top_kernel = _top_cuda_kernel(run_op, device)
-        print(f"{shape_label}\t{variant}\t{ms:.4f}\t{_tflops(m, k, n, ms):.3f}\t{top_kernel}", flush=True)
-        del a, b
+        _print_result(shape_label, FP8_VARIANT, m, k, n, ms, top_kernel)
+    except Exception as exc:
+        _print_skip(shape_label, FP8_VARIANT, exc)
+    finally:
+        del a, b, scale_a, scale_b
         torch.cuda.empty_cache()
+
+
+def _run_one_shape(m, k, n, args, device):
+    shape_label = f"M={m},K={k},N={n}"
+    if args.fp8:
+        _run_bf16_variant(m, k, n, args, device, shape_label, "bf16_baseline", False, False)
+        _run_fp8_variant(m, k, n, args, device, shape_label)
+        return
+
+    for variant, misalign_a, misalign_b in VARIANTS:
+        _run_bf16_variant(m, k, n, args, device, shape_label, variant, misalign_a, misalign_b)
 
 
 def main():
@@ -171,6 +251,11 @@ def main():
     parser.add_argument("--iters", type=int, default=50, help="Timed iterations per variant.")
     parser.add_argument("--device", default="cuda", help="CUDA device, e.g. cuda or cuda:0.")
     parser.add_argument("--linear", action="store_true", help="Benchmark F.linear instead of torch matmul.")
+    parser.add_argument(
+        "--fp8",
+        action="store_true",
+        help="For each shape, output bf16_baseline and fp8_e4m3 rows instead of alignment variants.",
+    )
     args = parser.parse_args()
 
     global torch, F
