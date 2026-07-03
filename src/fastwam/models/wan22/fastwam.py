@@ -7,6 +7,7 @@ from PIL import Image
 
 from fastwam.utils.logging_config import get_logger
 
+from . import wan_video_dit
 from .action_dit import ActionDiT
 from .helpers.loader import load_wan22_ti2v_5b_components
 from .mot import MoT
@@ -47,6 +48,7 @@ class FastWAM(torch.nn.Module):
         action_num_train_timesteps: int = 1000,
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
+        attention_debug: Optional[dict] = None,
     ):
         super().__init__()
         self.video_expert = video_expert
@@ -97,6 +99,38 @@ class FastWAM(torch.nn.Module):
         self.current_timeline_index = self.CURRENT_TIMELINE_INDEX
         self.history_condition_dropout = self.HISTORY_CONDITION_DROPOUT
         self.enable_mem_stage_v4 = self.__class__ is FastWAM
+        if attention_debug is None:
+            attention_debug = {}
+        if not isinstance(attention_debug, dict):
+            raise ValueError(f"`attention_debug` must be a dict, got {type(attention_debug)}")
+        self.attention_debug_log_sdpa_backend = bool(attention_debug.get("log_sdpa_backend", False))
+        self.attention_debug_force_video_prefill_no_mask = bool(
+            attention_debug.get("force_video_prefill_no_mask", False)
+        )
+        self.attention_debug_disable_history_condition_dropout = bool(
+            attention_debug.get("disable_history_condition_dropout", False)
+        )
+        if self.attention_debug_disable_history_condition_dropout:
+            self.history_condition_dropout = 0.0
+        enabled_attention_debug = [
+            name
+            for name, enabled in (
+                ("log_sdpa_backend", self.attention_debug_log_sdpa_backend),
+                ("force_video_prefill_no_mask", self.attention_debug_force_video_prefill_no_mask),
+                (
+                    "disable_history_condition_dropout",
+                    self.attention_debug_disable_history_condition_dropout,
+                ),
+            )
+            if enabled
+        ]
+        if enabled_attention_debug:
+            logger.warning(
+                "ATTENTION DEBUG EXPERIMENT ENABLED: profiling-only configuration; "
+                "treat enabled switches as training-semantics-changing experiment. enabled=%s",
+                ",".join(enabled_attention_debug),
+            )
+        wan_video_dit.set_sdpa_backend_logging(self.attention_debug_log_sdpa_backend)
 
         self.to(self.device)
 
@@ -116,6 +150,7 @@ class FastWAM(torch.nn.Module):
         action_dit_pretrained_path: str | None = None,
         skip_dit_load_from_pretrain: bool = False,
         mot_checkpoint_mixed_attn: bool = True,
+        attention_debug: Optional[dict] = None,
         video_train_shift: float = 5.0,
         video_infer_shift: float = 5.0,
         video_num_train_timesteps: int = 1000,
@@ -181,6 +216,7 @@ class FastWAM(torch.nn.Module):
             action_num_train_timesteps=action_num_train_timesteps,
             loss_lambda_video=loss_lambda_video,
             loss_lambda_action=loss_lambda_action,
+            attention_debug=attention_debug,
         )
         model.model_paths = {
             "video_dit": components.dit_path,
@@ -931,42 +967,57 @@ class FastWAM(torch.nn.Module):
                 clean_prefix_latent_frames=clean_prefix_latent_frames,
             )
 
-        video_attention_mask = self.video_expert.build_video_to_video_mask(
-            video_seq_len=video_pre["tokens"].shape[1],
-            video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
-            device=video_pre["tokens"].device,
-            clean_prefix_latent_frames=clean_prefix_latent_frames,
+        drop_history_video, drop_history_action = self._condition_dropout_masks(
+            batch_size=batch_size,
+            device=action.device,
         )
-
+        video_tokens_per_frame = int(video_pre["meta"]["tokens_per_frame"])
+        history_video_token_len = clean_prefix_latent_frames * video_tokens_per_frame
         history_video_latent_valid = self._latent_valid_from_raw_pad(
             raw_is_pad=history_video_is_pad,
             num_latent_frames=clean_prefix_latent_frames,
             batch_size=batch_size,
             device=history_video_latents.device,
         )
-        input_video_latent_valid = self._latent_valid_from_raw_pad(
-            raw_is_pad=image_is_pad,
-            num_latent_frames=input_latents.shape[2],
-            batch_size=batch_size,
-            device=input_latents.device,
+        clean_prefix_history_latent = video_source_ids[:clean_prefix_latent_frames].eq(
+            self.SOURCE_HISTORY_VIDEO
+        ).view(1, -1)
+        history_video_read_latent_valid = history_video_latent_valid & (
+            ~clean_prefix_history_latent | ~drop_history_video.view(-1, 1)
         )
-        future_video_latent_valid = input_video_latent_valid[:, 1:]
-        combined_video_latent_valid = torch.cat(
-            [history_video_latent_valid, future_video_latent_valid],
-            dim=1,
+        history_video_read_token_valid = self._latent_valid_to_token_valid(
+            history_video_read_latent_valid,
+            tokens_per_frame=video_tokens_per_frame,
         )
-        drop_history_video, drop_history_action = self._condition_dropout_masks(
-            batch_size=batch_size,
-            device=action.device,
-        )
-        video_history_latent = video_source_ids.eq(self.SOURCE_HISTORY_VIDEO).view(1, -1)
-        combined_video_read_latent_valid = combined_video_latent_valid & (
-            ~video_history_latent | ~drop_history_video.view(-1, 1)
-        )
-        combined_video_read_token_valid = self._latent_valid_to_token_valid(
-            combined_video_read_latent_valid,
-            tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
-        )
+        if self.attention_debug_force_video_prefill_no_mask:
+            video_attention_mask = None
+            video_key_valid_mask = None
+        else:
+            video_attention_mask = self.video_expert.build_video_to_video_mask(
+                video_seq_len=video_pre["tokens"].shape[1],
+                video_tokens_per_frame=video_tokens_per_frame,
+                device=video_pre["tokens"].device,
+                clean_prefix_latent_frames=clean_prefix_latent_frames,
+            )
+            input_video_latent_valid = self._latent_valid_from_raw_pad(
+                raw_is_pad=image_is_pad,
+                num_latent_frames=input_latents.shape[2],
+                batch_size=batch_size,
+                device=input_latents.device,
+            )
+            future_video_latent_valid = input_video_latent_valid[:, 1:]
+            combined_video_latent_valid = torch.cat(
+                [history_video_latent_valid, future_video_latent_valid],
+                dim=1,
+            )
+            video_history_latent = video_source_ids.eq(self.SOURCE_HISTORY_VIDEO).view(1, -1)
+            combined_video_read_latent_valid = combined_video_latent_valid & (
+                ~video_history_latent | ~drop_history_video.view(-1, 1)
+            )
+            video_key_valid_mask = self._latent_valid_to_token_valid(
+                combined_video_read_latent_valid,
+                tokens_per_frame=video_tokens_per_frame,
+            )
         with torch.profiler.record_function("model/v4/video_prefill_cache"):
             video_cache, video_tokens = self.mot.prefill_video_cache(
                 video_tokens=video_pre["tokens"],
@@ -977,7 +1028,7 @@ class FastWAM(torch.nn.Module):
                     "mask": video_pre["context_mask"],
                 },
                 video_attention_mask=video_attention_mask,
-                video_key_valid_mask=combined_video_read_token_valid,
+                video_key_valid_mask=video_key_valid_mask,
             )
         with torch.profiler.record_function("model/v4/video_post_dit"):
             pred_combined_video = self.video_expert.post_dit(video_tokens, video_pre)
@@ -1030,9 +1081,7 @@ class FastWAM(torch.nn.Module):
 
         history_action_read_valid = history_action_valid & ~drop_history_action.view(-1, 1)
 
-        history_video_token_len = clean_prefix_latent_frames * int(video_pre["meta"]["tokens_per_frame"])
         history_video_cache = self._slice_kv_cache(video_cache, history_video_token_len)
-        history_video_read_token_valid = combined_video_read_token_valid[:, :history_video_token_len]
         history_action_attention_mask = torch.ones(
             (history_action.shape[1], history_action.shape[1]),
             dtype=torch.bool,

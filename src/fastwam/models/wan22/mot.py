@@ -79,9 +79,9 @@ class MoT(nn.Module):
         q_cat: torch.Tensor,
         k_cat: torch.Tensor,
         v_cat: torch.Tensor,
-        attention_mask: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        attn_mask = attention_mask.to(device=q_cat.device)
+        attn_mask = None if attention_mask is None else attention_mask.to(device=q_cat.device)
 
         def _forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
             return flash_attention(q=q, k=k, v=v, num_heads=self.num_heads, ctx_mask=attn_mask)
@@ -328,7 +328,7 @@ class MoT(nn.Module):
         video_freqs: torch.Tensor,
         video_t_mod: torch.Tensor,
         video_context_payload: Optional[dict],
-        video_attention_mask: torch.Tensor,
+        video_attention_mask: Optional[torch.Tensor],
         video_key_valid_mask: Optional[torch.Tensor] = None,
     ) -> tuple[list[dict[str, torch.Tensor]], torch.Tensor]:
         """Run the video branch once and return both layer K/V and final tokens.
@@ -340,7 +340,7 @@ class MoT(nn.Module):
             video_context_payload: Optional dict for video cross-attention.
                 - `context`: encoder states [B, L, D]
                 - `mask`: attention mask [B, Sv, L] or [B, 1, Sv, L]
-            video_attention_mask: Video self-attention mask, shape [Sv, Sv].
+            video_attention_mask: Optional video self-attention mask, shape [Sv, Sv].
             video_key_valid_mask: Optional batch key visibility mask [B, Sv].
 
         Returns:
@@ -352,14 +352,18 @@ class MoT(nn.Module):
         if "video" not in self.mixtures:
             raise ValueError("MoT requires `video` expert for `prefill_video_cache`.")
         video_seq_len = int(video_tokens.shape[1])
-        video_attention_mask = self._apply_key_valid_mask(
-            attention_mask=video_attention_mask,
-            key_valid_mask=video_key_valid_mask,
-            query_len=video_seq_len,
-            key_len=video_seq_len,
-            name="video_attention_mask",
-            ensure_non_empty=True,
-        )
+        if video_attention_mask is None:
+            if video_key_valid_mask is not None:
+                raise ValueError("`video_key_valid_mask` is not supported when `video_attention_mask` is None.")
+        else:
+            video_attention_mask = self._apply_key_valid_mask(
+                attention_mask=video_attention_mask,
+                key_valid_mask=video_key_valid_mask,
+                query_len=video_seq_len,
+                key_len=video_seq_len,
+                name="video_attention_mask",
+                ensure_non_empty=True,
+            )
 
         expert = self.mixtures["video"]
         x = video_tokens
@@ -367,42 +371,45 @@ class MoT(nn.Module):
         for layer_idx in range(self.num_layers):
             block = expert.blocks[layer_idx]
             # Build video Q/K/V from current layer input tokens.
-            (
-                q,
-                k,
-                v,
-                residual_x,
-                gate_msa,
-                shift_mlp,
-                scale_mlp,
-                gate_mlp,
-                use_gradient_checkpointing,
-            ) = self._build_expert_attention_io(
-                expert=expert,
-                block=block,
-                x=x,
-                freqs=video_freqs,
-                t_mod=video_t_mod,
-            )
+            with torch.profiler.record_function("mot/prefill/qkv"):
+                (
+                    q,
+                    k,
+                    v,
+                    residual_x,
+                    gate_msa,
+                    shift_mlp,
+                    scale_mlp,
+                    gate_mlp,
+                    use_gradient_checkpointing,
+                ) = self._build_expert_attention_io(
+                    expert=expert,
+                    block=block,
+                    x=x,
+                    freqs=video_freqs,
+                    t_mod=video_t_mod,
+                )
             # Video prefill uses only video self-attention mask.
-            mixed = self._mixed_attention(
-                q_cat=q,
-                k_cat=k,
-                v_cat=v,
-                attention_mask=video_attention_mask,
-            )
+            with torch.profiler.record_function("mot/prefill/attn"):
+                mixed = self._mixed_attention(
+                    q_cat=q,
+                    k_cat=k,
+                    v_cat=v,
+                    attention_mask=video_attention_mask,
+                )
             # Update video tokens for the next layer and persist current layer K/V.
-            x = self._apply_post_with_optional_checkpoint(
-                block=block,
-                residual_x=residual_x,
-                gate_msa=gate_msa,
-                shift_mlp=shift_mlp,
-                scale_mlp=scale_mlp,
-                gate_mlp=gate_mlp,
-                use_gradient_checkpointing=use_gradient_checkpointing,
-                mixed_slice=mixed,
-                context_payload=video_context_payload,
-            )
+            with torch.profiler.record_function("mot/prefill/post_block"):
+                x = self._apply_post_with_optional_checkpoint(
+                    block=block,
+                    residual_x=residual_x,
+                    gate_msa=gate_msa,
+                    shift_mlp=shift_mlp,
+                    scale_mlp=scale_mlp,
+                    gate_mlp=gate_mlp,
+                    use_gradient_checkpointing=use_gradient_checkpointing,
+                    mixed_slice=mixed,
+                    context_payload=video_context_payload,
+                )
             kv_cache.append({"k": k, "v": v})
         return kv_cache, x
 

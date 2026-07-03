@@ -85,6 +85,7 @@ def create_fastwam(
     action_scheduler=None,
     loss=None,
     mot_checkpoint_mixed_attn: bool = True,
+    attention_debug=None,
     redirect_common_files: bool = True,
     model_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
@@ -131,6 +132,11 @@ def create_fastwam(
     if not isinstance(loss, dict):
         raise ValueError(f"`loss` must be dict-like, got {type(loss)}")
 
+    if isinstance(attention_debug, DictConfig):
+        attention_debug = OmegaConf.to_container(attention_debug, resolve=True)
+    if attention_debug is not None and not isinstance(attention_debug, dict):
+        raise ValueError(f"`attention_debug` must be dict-like, got {type(attention_debug)}")
+
     return FastWAM.from_wan22_pretrained(
         device=device,
         torch_dtype=model_dtype,
@@ -145,6 +151,7 @@ def create_fastwam(
         action_dit_pretrained_path=action_dit_pretrained_path,
         skip_dit_load_from_pretrain=bool(skip_dit_load_from_pretrain),
         mot_checkpoint_mixed_attn=bool(mot_checkpoint_mixed_attn),
+        attention_debug=attention_debug,
         video_train_shift=float(video_scheduler.get("train_shift", 5.0)),
         video_infer_shift=float(video_scheduler.get("infer_shift", 5.0)),
         video_num_train_timesteps=int(video_scheduler.get("num_train_timesteps", 1000)),

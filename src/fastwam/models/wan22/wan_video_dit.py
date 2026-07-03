@@ -10,12 +10,98 @@ from fastwam.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-    
+
+_sdpa_backend_logging = False
+_sdpa_backend_logged_signatures: set[tuple[Any, ...]] = set()
+_SDPA_BACKEND_LOG_LIMIT = 8
+
+
+def set_sdpa_backend_logging(enabled: bool) -> None:
+    global _sdpa_backend_logging
+    _sdpa_backend_logging = bool(enabled)
+    _sdpa_backend_logged_signatures.clear()
+
+
+def _sdpa_backend_support(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    ctx_mask: Optional[torch.Tensor],
+) -> Optional[Dict[str, Any]]:
+    for source in ("torch.nn.attention", "torch.backends.cuda"):
+        try:
+            if source == "torch.nn.attention":
+                from torch.nn.attention import (
+                    SDPAParams,
+                    can_use_efficient_attention,
+                    can_use_flash_attention,
+                )
+            else:
+                SDPAParams = torch.backends.cuda.SDPAParams
+                can_use_efficient_attention = torch.backends.cuda.can_use_efficient_attention
+                can_use_flash_attention = torch.backends.cuda.can_use_flash_attention
+            try:
+                params = SDPAParams(q, k, v, ctx_mask, 0.0, False, False)
+            except TypeError:
+                params = SDPAParams(q, k, v, ctx_mask, 0.0, False)
+            return {
+                "available": True,
+                "source": source,
+                "flash": bool(can_use_flash_attention(params)),
+                "efficient": bool(can_use_efficient_attention(params)),
+            }
+        except Exception:
+            continue
+    return None
+
+
+def _maybe_log_sdpa_backend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, ctx_mask: Optional[torch.Tensor]) -> None:
+    if not _sdpa_backend_logging:
+        return
+    signature = (
+        tuple(q.shape),
+        tuple(k.shape),
+        None if ctx_mask is None else tuple(ctx_mask.shape),
+        ctx_mask is None,
+    )
+    if signature in _sdpa_backend_logged_signatures:
+        return
+    if len(_sdpa_backend_logged_signatures) >= _SDPA_BACKEND_LOG_LIMIT:
+        return
+    _sdpa_backend_logged_signatures.add(signature)
+    support = _sdpa_backend_support(q=q, k=k, v=v, ctx_mask=ctx_mask)
+    if support is None:
+        logger.info(
+            "[sdpa-backend] q=%s k=%s v=%s ctx_mask_none=%s ctx_mask_shape=%s ctx_mask_dtype=%s",
+            tuple(q.shape),
+            tuple(k.shape),
+            tuple(v.shape),
+            ctx_mask is None,
+            None if ctx_mask is None else tuple(ctx_mask.shape),
+            None if ctx_mask is None else ctx_mask.dtype,
+        )
+    else:
+        logger.info(
+            "[sdpa-backend] q=%s k=%s v=%s ctx_mask_none=%s ctx_mask_shape=%s ctx_mask_dtype=%s "
+            "source=%s flash_available=%s efficient_available=%s",
+            tuple(q.shape),
+            tuple(k.shape),
+            tuple(v.shape),
+            ctx_mask is None,
+            None if ctx_mask is None else tuple(ctx_mask.shape),
+            None if ctx_mask is None else ctx_mask.dtype,
+            support["source"],
+            support["flash"],
+            support["efficient"],
+        )
+
+
 def flash_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, num_heads: int, ctx_mask: Optional[torch.Tensor] = None, compatibility_mode=True):
     if compatibility_mode:
         q = rearrange(q, "b s (n d) -> b n s d", n=num_heads)
         k = rearrange(k, "b s (n d) -> b n s d", n=num_heads)
         v = rearrange(v, "b s (n d) -> b n s d", n=num_heads)
+        _maybe_log_sdpa_backend(q=q, k=k, v=v, ctx_mask=ctx_mask)
         x = F.scaled_dot_product_attention(q, k, v, attn_mask=ctx_mask)
         x = rearrange(x, "b n s d -> b s (n d)", n=num_heads)
         return x
