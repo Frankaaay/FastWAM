@@ -17,6 +17,7 @@ from torch.optim.lr_scheduler import ConstantLR, CosineAnnealingLR, LinearLR, Se
 from torch.utils.data import DataLoader
 
 from .utils.fs import ensure_dir
+from .utils.align_probe import log_parameter_alignment, register_linear_activation_alignment_hooks
 from .utils.logging_config import get_logger, setup_logging
 from .utils.pytorch_utils import set_global_seed
 from .utils.samplers import ResumableEpochSampler
@@ -139,6 +140,10 @@ class Wan22Trainer:
         self.model, self.optimizer, self.train_loader, self.scheduler = self.accelerator.prepare(
             self.model, self.optimizer, self.train_loader, self.scheduler
         )
+        if os.environ.get("FASTWAM_LOG_PARAM_ALIGNMENT", "0") == "1":
+            log_parameter_alignment(self.model, is_main_process=self.accelerator.is_main_process)
+        if os.environ.get("FASTWAM_LOG_ACT_ALIGNMENT", "0") == "1":
+            register_linear_activation_alignment_hooks(self.model, is_main_process=self.accelerator.is_main_process)
         self.optimizer.zero_grad(set_to_none=True)
         self.wandb_run = None
         self._init_wandb()
