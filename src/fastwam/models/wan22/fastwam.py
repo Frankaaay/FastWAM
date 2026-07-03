@@ -1233,6 +1233,12 @@ class FastWAM(torch.nn.Module):
         denoise_step_graph: DenoiseStepGraph | None = None
         self._last_infer_denoise_cuda_graph_status = "disabled"
         if self.infer_denoise_cuda_graph and int(infer_timesteps_action.numel()) > 0:
+            # RoPE freqs 是普通属性（非 buffer），默认常驻 CPU；pre_dit 每步会做
+            # pageable H2D 拷贝，这在 CUDA graph 捕获期是禁止操作（capture 失败的根因）。
+            # 捕获前一次性迁到 device（常量迁移，数值逐位不变，之后 pre_dit 的 .to 变 no-op）。
+            action_freqs = getattr(self.action_expert, "freqs", None)
+            if torch.is_tensor(action_freqs) and action_freqs.device.type != "cuda":
+                self.action_expert.freqs = action_freqs.to(self.device)
             timestep_action_sample = infer_timesteps_action[0].unsqueeze(0).to(
                 dtype=latents_action.dtype,
                 device=self.device,
