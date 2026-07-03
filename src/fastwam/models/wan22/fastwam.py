@@ -12,6 +12,7 @@ from .action_dit import ActionDiT
 from .helpers.loader import load_wan22_ti2v_5b_components
 from .mot import MoT
 from .schedulers.scheduler_continuous import WanContinuousFlowMatchScheduler
+from .vae_encode_functional import encode_functional
 
 logger = get_logger(__name__)
 
@@ -51,6 +52,8 @@ class FastWAM(torch.nn.Module):
         enable_mem_stage_v4: bool = True,
         vae_torch_compile: bool = False,
         vae_torch_compile_mode: str = "default",
+        vae_encode_functional: bool = False,
+        vae_encode_functional_mode: str = "reduce-overhead",
         attention_debug: Optional[dict] = None,
     ):
         super().__init__()
@@ -101,15 +104,22 @@ class FastWAM(torch.nn.Module):
         self.vae_torch_compile = bool(vae_torch_compile)
         self.vae_torch_compile_mode = str(vae_torch_compile_mode)
         self.vae_torch_compile_enabled = False
-        self._vae_eager_encode = None
-        self._vae_compiled_encode = None
+        self.vae_encode_functional = bool(vae_encode_functional)
+        self.vae_encode_functional_mode = str(vae_encode_functional_mode)
+        self._vae_encode_functional_compiled_cache: dict[Any, Any] = {}
         self.history_action_len = self.HISTORY_ACTION_LEN
         self.current_timeline_index = self.CURRENT_TIMELINE_INDEX
         self.history_condition_dropout = self.HISTORY_CONDITION_DROPOUT
         self.enable_mem_stage_v4 = bool(enable_mem_stage_v4) and self.__class__ is FastWAM
 
         self.to(self.device)
-        self._configure_vae_torch_compile()
+        if self.vae_encode_functional and self.vae_torch_compile:
+            self._rank0_warning(
+                "vae_encode_functional enabled; ignoring vae_torch_compile=%s",
+                self.vae_torch_compile_mode,
+            )
+        else:
+            self._configure_vae_torch_compile()
 
     @classmethod
     def from_wan22_pretrained(
@@ -131,6 +141,8 @@ class FastWAM(torch.nn.Module):
         mot_torch_compile_mode: str = "default",
         vae_torch_compile: bool = False,
         vae_torch_compile_mode: str = "default",
+        vae_encode_functional: bool = False,
+        vae_encode_functional_mode: str = "reduce-overhead",
         attention_debug: Optional[dict] = None,
         video_train_shift: float = 5.0,
         video_infer_shift: float = 5.0,
@@ -201,6 +213,8 @@ class FastWAM(torch.nn.Module):
             enable_mem_stage_v4=enable_mem_stage_v4,
             vae_torch_compile=vae_torch_compile,
             vae_torch_compile_mode=vae_torch_compile_mode,
+            vae_encode_functional=vae_encode_functional,
+            vae_encode_functional_mode=vae_encode_functional_mode,
             attention_debug=attention_debug,
         )
         model.model_paths = {
@@ -232,9 +246,6 @@ class FastWAM(torch.nn.Module):
 
     def _disable_vae_torch_compile(self, reason: str) -> None:
         self.vae_torch_compile_enabled = False
-        self._vae_compiled_encode = None
-        if self._vae_eager_encode is not None:
-            self.vae.model.encode = self._vae_eager_encode
         self._rank0_warning("vae-compile disabled; falling back to eager. reason=%s", reason)
 
     def _configure_vae_torch_compile(self) -> None:
@@ -245,41 +256,38 @@ class FastWAM(torch.nn.Module):
             )
             return
 
+        vae_model = getattr(self.vae, "model", None)
+        encoder = getattr(vae_model, "encoder", None)
+        if vae_model is None or encoder is None:
+            self._rank0_warning("vae-compile requested but skipped; target=self.vae.model.encoder not found")
+            return
+        if not isinstance(encoder, nn.Module):
+            self._rank0_warning(
+                "vae-compile requested but skipped; target=self.vae.model.encoder is not an nn.Module: %s",
+                type(encoder).__name__,
+            )
+            return
+
+        original_forward = encoder.forward
         try:
             if not hasattr(torch, "compile"):
                 raise RuntimeError("torch.compile is not available in this PyTorch build")
-            if not hasattr(self.vae, "model") or not hasattr(self.vae.model, "encode"):
-                raise RuntimeError("VAE model encode entry is not available")
-            dynamo_config = torch._dynamo.config
-            current_limit = int(getattr(dynamo_config, "cache_size_limit", 0))
-            dynamo_config.cache_size_limit = max(current_limit, 64)
-
-            self._vae_eager_encode = self.vae.model.encode
-            self._vae_compiled_encode = torch.compile(
-                self._vae_eager_encode,
+            compiled_forward = torch.compile(
+                original_forward,
                 mode=self.vae_torch_compile_mode,
                 dynamic=False,
+                fullgraph=False,
             )
-
-            def _compiled_encode_with_fallback(x, scale):
-                if not self.vae_torch_compile_enabled or self._vae_compiled_encode is None:
-                    return self._vae_eager_encode(x, scale)
-                try:
-                    return self._vae_compiled_encode(x, scale)
-                except Exception as exc:
-                    self._disable_vae_torch_compile(repr(exc))
-                    return self._vae_eager_encode(x, scale)
-
-            self.vae.model.encode = _compiled_encode_with_fallback
+            encoder.forward = compiled_forward
         except Exception as exc:
+            encoder.forward = original_forward
             self._disable_vae_torch_compile(repr(exc))
             return
 
         self.vae_torch_compile_enabled = True
         self._rank0_info(
-            "vae-compile enabled=True mode=%s dynamic=False cache_size_limit=%d",
+            "vae-compile enabled=True mode=%s target=encoder.forward",
             self.vae_torch_compile_mode,
-            int(torch._dynamo.config.cache_size_limit),
         )
 
     @staticmethod
@@ -335,13 +343,41 @@ class FastWAM(torch.nn.Module):
 
     @torch.no_grad()
     def _encode_video_latents(self, video_tensor, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)):
-        z = self.vae.encode(
-            video_tensor,
-            device=self.device,
-            tiled=tiled,
-            tile_size=tile_size,
-            tile_stride=tile_stride,
-        )
+        with torch.profiler.record_function("model/vae_encode"):
+            if self.vae_encode_functional and not tiled:
+                try:
+                    hidden_states = []
+                    for video in video_tensor:
+                        video = video.unsqueeze(0).to(self.device)
+                        hidden_state = encode_functional(
+                            self.vae.model,
+                            video,
+                            self.vae.scale,
+                            compile_mode=self.vae_encode_functional_mode,
+                            compiled_cache=self._vae_encode_functional_compiled_cache,
+                        )
+                        hidden_states.append(hidden_state.squeeze(0))
+                    z = torch.stack(hidden_states)
+                except Exception as exc:
+                    self._rank0_warning(
+                        "functional VAE encode failed; falling back to original encode. reason=%r",
+                        exc,
+                    )
+                    z = self.vae.encode(
+                        video_tensor,
+                        device=self.device,
+                        tiled=tiled,
+                        tile_size=tile_size,
+                        tile_stride=tile_stride,
+                    )
+            else:
+                    z = self.vae.encode(
+                        video_tensor,
+                        device=self.device,
+                        tiled=tiled,
+                        tile_size=tile_size,
+                        tile_stride=tile_stride,
+                    )
         return z
 
     def _prepare_cached_video_latents(
