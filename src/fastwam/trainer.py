@@ -43,6 +43,9 @@ class Wan22Trainer:
         self.eval_every = int(cfg.eval_every)
         self.eval_num_inference_steps = int(cfg.eval_num_inference_steps)
         self.gradient_accumulation_steps = int(cfg.gradient_accumulation_steps)
+        self.overlap_vae_encode_requested = bool(cfg.get("overlap_vae_encode", False))
+        self.overlap_vae_encode_enabled = False
+        self._overlap_vae_stream = None
         self.max_grad_norm = float(cfg.max_grad_norm)
         self.seed = int(cfg.seed)
         
@@ -160,6 +163,7 @@ class Wan22Trainer:
         self.wandb_run = None
         self._init_wandb()
         self._resume_or_load_checkpoint()
+        self._configure_overlap_vae_encode()
 
         val_size = len(self.val_dataset) if self.val_dataset is not None else len(self.train_dataset)
         logger.info("Train/val dataset size: %d/%d", len(self.train_dataset), val_size)
@@ -215,6 +219,161 @@ class Wan22Trainer:
             return
         self.wandb_run.finish()
         self.wandb_run = None
+
+    def _rank0_info(self, message: str, *args):
+        if self.accelerator.is_main_process:
+            logger.info(message, *args)
+
+    def _rank0_warning(self, message: str, *args):
+        if self.accelerator.is_main_process:
+            logger.warning(message, *args)
+
+    @staticmethod
+    def _dataset_uses_vae_latent_cache(dataset) -> bool:
+        visited = set()
+        stack = [dataset]
+        while stack:
+            current = stack.pop()
+            if current is None:
+                continue
+            current_id = id(current)
+            if current_id in visited:
+                continue
+            visited.add(current_id)
+
+            cache_dir = getattr(current, "vae_latent_cache_dir", None)
+            cache_dir_key = None if cache_dir is None else str(cache_dir).strip().lower()
+            if cache_dir_key not in (None, "", "none", "null"):
+                return True
+
+            for attr_name in ("dataset", "datasets"):
+                child = getattr(current, attr_name, None)
+                if child is None:
+                    continue
+                if isinstance(child, (list, tuple)):
+                    stack.extend(child)
+                else:
+                    stack.append(child)
+        return False
+
+    def _configure_overlap_vae_encode(self):
+        self.overlap_vae_encode_enabled = False
+        self._overlap_vae_stream = None
+
+        if not self.overlap_vae_encode_requested:
+            self._rank0_info("overlap-vae enabled=False requested=False")
+            return
+
+        disabled_reasons = []
+        if self._dataset_uses_vae_latent_cache(self.train_dataset):
+            disabled_reasons.append("vae_latent_cache")
+            self._rank0_warning(
+                "overlap-vae disabled because train dataset already uses vae_latent_cache; cache path wins."
+            )
+        if self.gradient_accumulation_steps != 1:
+            disabled_reasons.append("gradient_accumulation_steps")
+            self._rank0_warning(
+                "overlap-vae disabled because gradient_accumulation_steps=%d; only 1 is supported.",
+                self.gradient_accumulation_steps,
+            )
+        if not torch.cuda.is_available() or self.accelerator.device.type != "cuda":
+            disabled_reasons.append("non_cuda_device")
+            self._rank0_warning(
+                "overlap-vae disabled because accelerator device is not CUDA: %s",
+                self.accelerator.device,
+            )
+
+        model = self.accelerator.unwrap_model(self.model)
+        if not hasattr(model, "_encode_video_latents"):
+            disabled_reasons.append("missing_encode_helper")
+            self._rank0_warning(
+                "overlap-vae disabled because model has no _encode_video_latents helper."
+            )
+
+        if disabled_reasons:
+            self._rank0_info(
+                "overlap-vae enabled=False requested=True reasons=%s",
+                ",".join(disabled_reasons),
+            )
+            return
+
+        self._overlap_vae_stream = torch.cuda.Stream(device=self.accelerator.device)
+        self.overlap_vae_encode_enabled = True
+        self._rank0_info(
+            "overlap-vae enabled=True device=%s stream=%s",
+            self.accelerator.device,
+            self._overlap_vae_stream,
+        )
+
+    def _start_overlap_vae_prefetch(self, sample):
+        if not self.overlap_vae_encode_enabled:
+            return None
+        if not isinstance(sample, dict):
+            return None
+        if sample.get("input_latents", None) is not None:
+            return None
+        if "video" not in sample:
+            return None
+
+        stream = self._overlap_vae_stream
+        if stream is None:
+            return None
+
+        model = self.accelerator.unwrap_model(self.model)
+        device = torch.device(model.device)
+        latents = {}
+        event = torch.cuda.Event()
+        current_stream = torch.cuda.current_stream(device)
+        stream.wait_stream(current_stream)
+
+        with torch.cuda.stream(stream):
+            with torch.no_grad():
+                with self.accelerator.autocast():
+                    input_video = sample["video"].to(
+                        device=device,
+                        dtype=model.torch_dtype,
+                        non_blocking=True,
+                    )
+                    input_video.record_stream(stream)
+                    input_latents = model._encode_video_latents(input_video, tiled=False)
+                    input_latents.record_stream(stream)
+                    latents["input_latents"] = input_latents
+
+                    history_video = sample.get("history_video", None)
+                    if history_video is not None and sample.get("history_video_latents", None) is None:
+                        history_video_input = history_video.to(
+                            device=device,
+                            dtype=model.torch_dtype,
+                            non_blocking=True,
+                        )
+                        history_video_input.record_stream(stream)
+                        history_video_latents = model._encode_video_latents(
+                            history_video_input,
+                            tiled=False,
+                        )
+                        history_video_latents.record_stream(stream)
+                        latents["history_video_latents"] = history_video_latents
+            event.record(stream)
+
+        return {"event": event, "latents": latents}
+
+    def _wait_and_inject_overlap_vae_prefetch(self, sample, prefetch):
+        if prefetch is None:
+            return
+        wait_start_time = self._profile_time()
+        with self._profile_range("train/overlap_vae_wait"):
+            current_stream = torch.cuda.current_stream(self.accelerator.device)
+            current_stream.wait_event(prefetch["event"])
+            for name, tensor in prefetch["latents"].items():
+                tensor.record_stream(current_stream)
+                sample[name] = tensor
+        wait_end_time = self._profile_time()
+        self._record_profile_stage("overlap_vae_wait", wait_end_time - wait_start_time)
+
+    def _finish_overlap_vae_prefetch(self, prefetch):
+        if prefetch is None:
+            return
+        prefetch["event"].synchronize()
 
     def _should_profile_current_rank(self):
         return (not self.profile_rank0_only) or self.accelerator.is_main_process
@@ -788,6 +947,9 @@ class Wan22Trainer:
 
         logger.info("Starting training with max_steps=%d.", self.max_steps)
         data_iter = iter(self.train_loader)
+        prefetched_sample = None
+        prefetched_latents = None
+        advance_epoch_before_fetch = False
         self.run_start_step = self.global_step
         self.run_start_time = time.perf_counter()
 
@@ -796,10 +958,35 @@ class Wan22Trainer:
         with profiler_context as active_profiler:
             while self.global_step < self.max_steps:
                 step_start_time = self._profile_time()
+                current_prefetch = None
+                next_sample = None
+                next_prefetch = None
                 try:
                     with self._profile_range("train/dataloader_next"):
-                        sample = next(data_iter)
-                    self.batch_in_epoch += 1
+                        if self.overlap_vae_encode_enabled:
+                            if advance_epoch_before_fetch:
+                                self.epoch += 1
+                                self.batch_in_epoch = 0
+                                self.train_sampler.clear_resume_batch_offset()
+                                data_iter = iter(self.train_loader)
+                                advance_epoch_before_fetch = False
+
+                            if prefetched_sample is None:
+                                sample = next(data_iter)
+                            else:
+                                sample = prefetched_sample
+                                current_prefetch = prefetched_latents
+                                prefetched_sample = None
+                                prefetched_latents = None
+                            self.batch_in_epoch += 1
+
+                            try:
+                                next_sample = next(data_iter)
+                            except StopIteration:
+                                advance_epoch_before_fetch = True
+                        else:
+                            sample = next(data_iter)
+                            self.batch_in_epoch += 1
                     data_end_time = self._profile_time()
                     self._record_profile_stage("data", data_end_time - step_start_time)
                 except StopIteration:
@@ -809,10 +996,16 @@ class Wan22Trainer:
                     data_iter = iter(self.train_loader)
                     continue
 
+                if self.overlap_vae_encode_enabled:
+                    self._wait_and_inject_overlap_vae_prefetch(sample, current_prefetch)
+
                 with self.accelerator.accumulate(self.model):
                     train_model = self.model if hasattr(self.model, "training_loss") else self.accelerator.unwrap_model(self.model)
 
                     forward_start_time = self._profile_time()
+                    if self.overlap_vae_encode_enabled and next_sample is not None:
+                        with self._profile_range("train/overlap_vae_prefetch"):
+                            next_prefetch = self._start_overlap_vae_prefetch(next_sample)
                     with self._profile_range("train/forward_loss"):
                         with self.accelerator.autocast():
                             loss, loss_dict = train_model.training_loss(sample)
@@ -963,6 +1156,7 @@ class Wan22Trainer:
                             active_profiler.step()
 
                         if self.global_step >= self.max_steps:
+                            self._finish_overlap_vae_prefetch(next_prefetch)
                             ckpt_start_time = self._profile_time()
                             with self._profile_range("train/save_checkpoint"):
                                 ckpt_info = self.save_checkpoint()
@@ -976,6 +1170,10 @@ class Wan22Trainer:
                                     ckpt_info["state_path"],
                                 )
                             return
+
+                if self.overlap_vae_encode_enabled:
+                    prefetched_sample = next_sample
+                    prefetched_latents = next_prefetch
 
         with self._profile_range("train/save_checkpoint"):
             ckpt_info = self.save_checkpoint()
