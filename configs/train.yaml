@@ -16,7 +16,11 @@ num_workers: 4
 # scheduler
 lr_scheduler_type: "cosine"
 learning_rate: 1.0e-4
-align_optimizer_param_order: false
+# 将 numel 非 16B 对齐倍数的参数移到 DeepSpeed flatten 尾部，避免 bf16 GEMM 退化到慢 7-8 倍的
+# cutlass_75 align1 kernel（详见 docs/26-07-03/26-07-03-gemm-alignment-fix.md）。
+# 只改变 optimizer 参数在 flat buffer 中的顺序，不改变训练数学；但会改变 optimizer state 布局，
+# 因此不能用它 resume 旧顺序（false）训练产生的 checkpoint。全新训练默认开启。
+align_optimizer_param_order: true
 num_epochs: 1
 max_steps: null
 log_every: 10
