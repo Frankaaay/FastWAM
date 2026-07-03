@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from PIL import Image
 
 from fastwam.utils.logging_config import get_logger
+from fastwam.utils.pytorch_utils import is_rank0
 
 from .action_dit import ActionDiT
 from .helpers.loader import load_wan22_ti2v_5b_components
@@ -38,6 +39,8 @@ class FastWAM(torch.nn.Module):
         action_num_train_timesteps: int = 1000,
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
+        vae_torch_compile: bool = False,
+        vae_torch_compile_mode: str = "default",
     ):
         super().__init__()
         self.video_expert = video_expert
@@ -84,8 +87,12 @@ class FastWAM(torch.nn.Module):
         self.torch_dtype = torch_dtype
         self.loss_lambda_video = float(loss_lambda_video)
         self.loss_lambda_action = float(loss_lambda_action)
+        self.vae_torch_compile = bool(vae_torch_compile)
+        self.vae_torch_compile_mode = str(vae_torch_compile_mode)
+        self.vae_torch_compile_enabled = False
 
         self.to(self.device)
+        self._configure_vae_torch_compile()
 
     @classmethod
     def from_wan22_pretrained(
@@ -105,6 +112,8 @@ class FastWAM(torch.nn.Module):
         mot_checkpoint_mixed_attn: bool = True,
         mot_torch_compile: bool = False,
         mot_torch_compile_mode: str = "default",
+        vae_torch_compile: bool = False,
+        vae_torch_compile_mode: str = "default",
         video_train_shift: float = 5.0,
         video_infer_shift: float = 5.0,
         video_num_train_timesteps: int = 1000,
@@ -172,6 +181,8 @@ class FastWAM(torch.nn.Module):
             action_num_train_timesteps=action_num_train_timesteps,
             loss_lambda_video=loss_lambda_video,
             loss_lambda_action=loss_lambda_action,
+            vae_torch_compile=vae_torch_compile,
+            vae_torch_compile_mode=vae_torch_compile_mode,
         )
         model.model_paths = {
             "video_dit": components.dit_path,
@@ -191,6 +202,55 @@ class FastWAM(torch.nn.Module):
             self.text_encoder.to(*args, **kwargs)
         self.vae.to(*args, **kwargs)
         return self
+
+    def _rank0_info(self, message: str, *args) -> None:
+        if is_rank0():
+            logger.info(message, *args)
+
+    def _rank0_warning(self, message: str, *args) -> None:
+        if is_rank0():
+            logger.warning(message, *args)
+
+    def _disable_vae_torch_compile(self, reason: str) -> None:
+        self.vae_torch_compile_enabled = False
+        self._rank0_warning("vae-compile disabled; falling back to eager. reason=%s", reason)
+
+    def _configure_vae_torch_compile(self) -> None:
+        if not self.vae_torch_compile:
+            return
+
+        vae_model = getattr(self.vae, "model", None)
+        encoder = getattr(vae_model, "encoder", None)
+        if vae_model is None or encoder is None:
+            self._rank0_warning("vae-compile requested but skipped; target=self.vae.model.encoder not found")
+            return
+        if not isinstance(encoder, nn.Module):
+            self._rank0_warning(
+                "vae-compile requested but skipped; target=self.vae.model.encoder is not an nn.Module: %s",
+                type(encoder).__name__,
+            )
+            return
+
+        try:
+            if not hasattr(torch, "compile"):
+                raise RuntimeError("torch.compile is not available in this PyTorch build")
+            compiled_encoder = torch.compile(
+                encoder,
+                mode=self.vae_torch_compile_mode,
+                dynamic=False,
+                fullgraph=False,
+            )
+            vae_model.encoder = compiled_encoder
+        except Exception as exc:
+            vae_model.encoder = encoder
+            self._disable_vae_torch_compile(repr(exc))
+            return
+
+        self.vae_torch_compile_enabled = True
+        self._rank0_info(
+            "vae-compile enabled=True mode=%s target=encoder",
+            self.vae_torch_compile_mode,
+        )
 
     @staticmethod
     def _check_resize_height_width(height, width, num_frames):
