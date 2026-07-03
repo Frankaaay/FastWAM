@@ -1,6 +1,6 @@
 # FastWAM profiling 交接文档
 
-更新时间：2026-07-03 11:56 CST
+更新时间：2026-07-03 12:38 CST
 
 ## 交接范围
 
@@ -30,8 +30,7 @@ HEAD: ed32004 docs: 记录 VAE latent cache smoke 结果
 M docs/26-06-21/26-06-21-mem-vae-diagnostic-report.md
 M docs/26-06-21/26-06-21-mem-vae-stage-case-comparison.md
 M docs/26-06-28/26-06-28-mem-stage-v4-implementation.md
-M docs/26-07-03/26-07-03-vae-latent-cache.md
-M scripts/precompute_vae_latents.py
+M docs/26-07-03/26-07-03-fastwam-profiling-handoff.md
 ?? docs/26-07-01/
 ?? docs/26-07-03/26-07-03-fastwam-throughput-gap-calculation.md
 ```
@@ -39,12 +38,10 @@ M scripts/precompute_vae_latents.py
 其中本轮相关的是：
 
 ```text
-docs/26-07-03/26-07-03-vae-latent-cache.md
-scripts/precompute_vae_latents.py
 docs/26-07-03/26-07-03-fastwam-profiling-handoff.md
 ```
 
-其他 `26-06-*` 文档和 `26-07-01/`、`26-07-03-fastwam-throughput-gap-calculation.md` 是既有未提交改动，不要混入本轮提交。
+其他 `26-06-*` 文档和 `26-07-01/`、`26-07-03-fastwam-throughput-gap-calculation.md` 是既有未提交改动，不要混入本交接文档提交。
 
 Profiling worktree：
 
@@ -57,12 +54,10 @@ HEAD: 8bba6e8 docs: 记录 VAE latent cache smoke 结果
 当前有未提交改动：
 
 ```text
-M docs/26-07-02/26-07-02-training-profiling.md
-M docs/26-07-03/26-07-03-vae-latent-cache.md
-M scripts/precompute_vae_latents.py
+M docs/26-07-03/26-07-03-fastwam-profiling-handoff.md
 ```
 
-本交接文档也应保留在 profiling worktree 的同一路径。
+本交接文档已保留在 profiling worktree 的同一路径；profiling worktree 当前只有这份文档是 dirty。
 
 ## 已实现内容
 
@@ -336,21 +331,22 @@ FastWAM._training_loss_v4()
 
 ## 建议接手顺序
 
-1. 先提交当前 VAE cache 结果
-   - 只 add 本轮相关文件，避免混入既有 dirty docs。
+1. 先决定是否提交这份交接文档
+   - VAE cache 的核心代码和 smoke 文档已经在两个本地分支 HEAD 中。
+   - 当前本轮新增内容只有交接文档；如果要提交，只 add 这一个文件。
    - `mem-stage-v4` 建议 add：
 
 ```bash
-git add scripts/precompute_vae_latents.py docs/26-07-03/26-07-03-vae-latent-cache.md docs/26-07-03/26-07-03-fastwam-profiling-handoff.md
+git add docs/26-07-03/26-07-03-fastwam-profiling-handoff.md
 ```
 
    - `profiling-mem-stage-v4` 建议 add：
 
 ```bash
-git add scripts/precompute_vae_latents.py docs/26-07-02/26-07-02-training-profiling.md docs/26-07-03/26-07-03-vae-latent-cache.md docs/26-07-03/26-07-03-fastwam-profiling-handoff.md
+git add docs/26-07-03/26-07-03-fastwam-profiling-handoff.md
 ```
 
-2. 推送后同步 H200
+2. 同步 H200 前先处理远端热修状态
    - H200 不能直接 fetch GitHub，继续用 bundle 或 scp。
    - 注意远端现在有 `scripts/precompute_vae_latents.py` 热修未提交，正式同步时不要误回退。
 
@@ -393,3 +389,52 @@ ssh h200-qinghua-jump 'tail -120 /home/maxliu/.local/state/wandb-sync/sync.log'
 - 不要把 v4 worktree 里的旧 dirty docs 混入 VAE cache 提交。
 - 不要把 `profile_timing_lines.txt` 为空误判为 profiling 失败；trace summary 是有效的。
 - 不要强制 PyTorch flash backend 直接跑当前 mask，已验证会失败。
+
+## Attention backend 最小实验 checklist
+
+接手人如果继续第 3 步，建议按这个顺序做，避免一上来重构 MoT：
+
+1. 保留当前 cached baseline
+   - 固定对照 run：`profile_trace_latcache_fold_clothv4_v4_20260703_045618`。
+   - 固定核心指标：`train/forward_loss`、`train/backward`、`model/v4/video_prefill_cache`、SDPA kernel rows。
+   - 不要换 batch size、profile window、latent cache 或 dataset stats。
+
+2. 增加 SDPA backend 观测开关
+   - 目标：训练日志里明确打印当前 PyTorch 是否能用 flash/efficient。
+   - 位置建议：`src/fastwam/models/wan22/wan_video_dit.py::flash_attention()`。
+   - 只在 rank0 / 前几个 step 打印，避免污染日志。
+   - 用 `torch.nn.attention.SDPAParams`、`can_use_flash_attention`、`can_use_efficient_attention` 做判断。
+
+3. 做 no-mask 上限实验
+   - 目标：测 `video_prefill_cache` 如果能走 flash 的理论收益。
+   - 方法 A：临时把 `model.video_dit_config.video_attention_mask_mode=bidirectional`。
+   - 方法 B：额外临时跳过 `video_key_valid_mask`，否则 `_apply_key_valid_mask()` 仍会创建 `[B,1,Q,K]` mask。
+   - 判断：trace 中应出现 flash attention kernel；`aten::_scaled_dot_product_efficient_attention` 应减少或消失。
+   - 注意：这会改变训练语义，只作为速度上限，不可直接作为最终训练方案。
+
+4. 如果 no-mask 明显更快，再拆 `first_frame_causal`
+   - prefix queries: `q[:prefix]` attend `k[:prefix]`，无 mask。
+   - future queries: `q[prefix:]` attend `k[:]`，无 mask。
+   - 两次 SDPA 输出拼回 `[B,S,H*Dh]`。
+   - 这个拆法只覆盖结构 mask；padding/history dropout 仍需单独处理。
+
+5. 处理 padding / history dropout
+   - 当前训练有 `FastWAM.HISTORY_CONDITION_DROPOUT = 0.2`，会引入 per-sample key-valid mask。
+   - 第一版实验可以把 dropout 设为 0，看拆 mask 是否能跑通并加速。
+   - 若必须保留 dropout，需要按样本分组、varlen attention 或 block-sparse attention，而不是直接传 bool mask。
+
+6. 每次实验都产出同格式 summary
+   - `profile/trace_summary.tsv`
+   - W&B offline run URL
+   - 一张 baseline vs experiment 表：
+     - `train/forward_loss`
+     - `train/backward`
+     - `model/v4/video_prefill_cache`
+     - `aten::_scaled_dot_product_flash_attention*`
+     - `aten::_scaled_dot_product_efficient_attention*`
+
+建议判断标准：
+
+- 如果 no-mask flash 只带来很小收益，先不要做复杂 mask 拆分。
+- 如果 `video_prefill_cache` 明显下降，再实现语义等价的 `first_frame_causal` 拆分。
+- 如果 forward 降了但 backward 不降，下一步要看 activation checkpoint 和 attention backward，而不是继续只优化 forward。
