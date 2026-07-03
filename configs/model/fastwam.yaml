@@ -6,6 +6,8 @@ load_text_encoder: false
 proprio_dim: ${data.train.processor.proprio_output_dim}
 redirect_common_files: true
 mot_checkpoint_mixed_attn: true
+mot_torch_compile: false
+mot_torch_compile_mode: "default"
 attention_debug:
   log_sdpa_backend: false
   force_video_prefill_no_mask: false

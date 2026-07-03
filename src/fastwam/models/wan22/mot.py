@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from typing import Dict, Optional
+import types
+from typing import Callable, Dict, Optional
 
 import torch
 import torch.nn as nn
 
 from .wan_video_dit import flash_attention, modulate, rope_apply
 from fastwam.utils.logging_config import get_logger
+from fastwam.utils.pytorch_utils import is_rank0
 
 logger = get_logger(__name__)
 
@@ -16,6 +18,8 @@ class MoT(nn.Module):
         self,
         mixtures: Dict[str, nn.Module],
         mot_checkpoint_mixed_attn: bool = True,
+        mot_torch_compile: bool = False,
+        mot_torch_compile_mode: str = "default",
     ):
         super().__init__()
         if not mixtures:
@@ -26,6 +30,11 @@ class MoT(nn.Module):
         self.mixtures = nn.ModuleDict(mixtures)
         self.expert_order = list(self.mixtures.keys())
         self.mot_checkpoint_mixed_attn = mot_checkpoint_mixed_attn
+        self.mot_torch_compile = bool(mot_torch_compile)
+        self.mot_torch_compile_mode = str(mot_torch_compile_mode)
+        self.mot_torch_compile_enabled = False
+        self._compiled_attention_io: dict[tuple[str, int], Callable] = {}
+        self._compiled_post_block: dict[tuple[str, int], Callable] = {}
         if mot_checkpoint_mixed_attn:
             logger.info("Using gradient checkpointing for mixture attention. This will save memory but use more computation.")
 
@@ -54,6 +63,159 @@ class MoT(nn.Module):
         for name in self.expert_order:
             expert = self.mixtures[name]
             logger.info(f"  Expert '{name}': num_params={sum(p.numel() for p in expert.parameters()) / 1e9:.2f} B")
+        self._configure_torch_compile()
+
+    @staticmethod
+    def _make_unique_code_callable(fn: Callable, name: str) -> Callable:
+        try:
+            code = fn.__code__.replace(co_name=name, co_qualname=name)
+        except TypeError:
+            code = fn.__code__.replace(co_name=name)
+        unique_fn = types.FunctionType(
+            code,
+            fn.__globals__,
+            name,
+            fn.__defaults__,
+            fn.__closure__,
+        )
+        unique_fn.__dict__.update(getattr(fn, "__dict__", {}))
+        unique_fn.__annotations__ = getattr(fn, "__annotations__", {})
+        unique_fn.__kwdefaults__ = getattr(fn, "__kwdefaults__", None)
+        return unique_fn
+
+    @staticmethod
+    def _safe_name(name: str) -> str:
+        return "".join(c if c.isalnum() else "_" for c in name)
+
+    def _rank0_info(self, message: str, *args) -> None:
+        if is_rank0():
+            logger.info(message, *args)
+
+    def _rank0_warning(self, message: str, *args) -> None:
+        if is_rank0():
+            logger.warning(message, *args)
+
+    def _disable_torch_compile(self, reason: str) -> None:
+        self.mot_torch_compile_enabled = False
+        self._compiled_attention_io.clear()
+        self._compiled_post_block.clear()
+        self._rank0_warning("mot-compile disabled; falling back to eager. reason=%s", reason)
+
+    def _configure_torch_compile(self) -> None:
+        if not self.mot_torch_compile:
+            self._rank0_info(
+                "mot-compile enabled=False mode=%s compiled_blocks=0",
+                self.mot_torch_compile_mode,
+            )
+            return
+        if self.mot_checkpoint_mixed_attn:
+            self._rank0_warning(
+                "mot-compile requested but skipped because mot_checkpoint_mixed_attn=true; "
+                "checkpoint+compile is intentionally avoided."
+            )
+            self._rank0_info(
+                "mot-compile enabled=False mode=%s compiled_blocks=0",
+                self.mot_torch_compile_mode,
+            )
+            return
+
+        try:
+            if not hasattr(torch, "compile"):
+                raise RuntimeError("torch.compile is not available in this PyTorch build")
+            dynamo_config = torch._dynamo.config
+            current_limit = int(getattr(dynamo_config, "cache_size_limit", 0))
+            target_limit = max(current_limit, 4 * int(self.num_layers) + 16)
+            dynamo_config.cache_size_limit = target_limit
+
+            for expert_name in self.expert_order:
+                expert = self.mixtures[expert_name]
+                safe_expert_name = self._safe_name(expert_name)
+                for layer_idx, block in enumerate(expert.blocks):
+                    key = (expert_name, layer_idx)
+                    attention_io_fn = self._make_attention_io_compile_fn(
+                        block=block,
+                        name=f"mot_compile_attention_io_{safe_expert_name}_{layer_idx}",
+                    )
+                    post_block_fn = self._make_post_block_compile_fn(
+                        block=block,
+                        name=f"mot_compile_post_block_{safe_expert_name}_{layer_idx}",
+                    )
+                    self._compiled_attention_io[key] = torch.compile(
+                        attention_io_fn,
+                        mode=self.mot_torch_compile_mode,
+                        dynamic=False,
+                    )
+                    self._compiled_post_block[key] = torch.compile(
+                        post_block_fn,
+                        mode=self.mot_torch_compile_mode,
+                        dynamic=False,
+                    )
+        except Exception as exc:
+            self._disable_torch_compile(repr(exc))
+            return
+
+        self.mot_torch_compile_enabled = True
+        compiled_blocks = len(set(self._compiled_attention_io) | set(self._compiled_post_block))
+        self._rank0_info(
+            "mot-compile enabled=True mode=%s compiled_blocks=%d qkv_blocks=%d post_blocks=%d",
+            self.mot_torch_compile_mode,
+            compiled_blocks,
+            len(self._compiled_attention_io),
+            len(self._compiled_post_block),
+        )
+
+    def _make_attention_io_compile_fn(self, block, name: str) -> Callable:
+        def _attention_io_fn(
+            x: torch.Tensor,
+            freqs: torch.Tensor,
+            t_mod: torch.Tensor,
+        ) -> tuple[
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ]:
+            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = MoT._split_modulation(block, t_mod)
+            attn_input = modulate(block.norm1(x), shift_msa, scale_msa)
+
+            q = block.self_attn.norm_q(block.self_attn.q(attn_input))
+            k = block.self_attn.norm_k(block.self_attn.k(attn_input))
+            v = block.self_attn.v(attn_input)
+
+            q = rope_apply(q, freqs, block.num_heads)
+            k = rope_apply(k, freqs, block.num_heads)
+            return q, k, v, x, gate_msa, shift_mlp, scale_mlp, gate_mlp
+
+        return self._make_unique_code_callable(_attention_io_fn, name)
+
+    def _make_post_block_compile_fn(self, block, name: str) -> Callable:
+        def _post_block_fn(
+            mixed_attn_out: torch.Tensor,
+            residual_x: torch.Tensor,
+            gate_msa: torch.Tensor,
+            shift_mlp: torch.Tensor,
+            scale_mlp: torch.Tensor,
+            gate_mlp: torch.Tensor,
+            context: Optional[torch.Tensor],
+            context_mask: Optional[torch.Tensor],
+        ) -> torch.Tensor:
+            return MoT._apply_expert_post_block_from_context(
+                block=block,
+                residual_x=residual_x,
+                mixed_attn_out=mixed_attn_out,
+                gate_msa=gate_msa,
+                shift_mlp=shift_mlp,
+                scale_mlp=scale_mlp,
+                gate_mlp=gate_mlp,
+                context=context,
+                context_mask=context_mask,
+            )
+
+        return self._make_unique_code_callable(_post_block_fn, name)
 
     @staticmethod
     def _split_modulation(block, t_mod: torch.Tensor):
@@ -165,6 +327,29 @@ class MoT(nn.Module):
         return masked
 
     @staticmethod
+    def _apply_expert_post_block_from_context(
+        block,
+        residual_x: torch.Tensor,
+        mixed_attn_out: torch.Tensor,
+        gate_msa: torch.Tensor,
+        shift_mlp: torch.Tensor,
+        scale_mlp: torch.Tensor,
+        gate_mlp: torch.Tensor,
+        context: Optional[torch.Tensor],
+        context_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        x = block.gate(residual_x, gate_msa, block.self_attn.o(mixed_attn_out))
+
+        if context is not None:
+            if context_mask is not None and context_mask.dim() == 3:
+                context_mask = context_mask.unsqueeze(1)
+            x = x + block.cross_attn(block.norm3(x), context, ctx_mask=context_mask)
+
+        mlp_input = modulate(block.norm2(x), shift_mlp, scale_mlp)
+        x = block.gate(x, gate_mlp, block.ffn(mlp_input))
+        return x
+
+    @staticmethod
     def _apply_expert_post_block(
         block,
         residual_x: torch.Tensor,
@@ -175,19 +360,82 @@ class MoT(nn.Module):
         gate_mlp: torch.Tensor,
         context_payload: Optional[dict],
     ) -> torch.Tensor:
-        x = block.gate(residual_x, gate_msa, block.self_attn.o(mixed_attn_out))
-
+        context = None
+        context_mask = None
         if context_payload is not None:
             context = context_payload.get("context")
             if context is not None:
                 context_mask = context_payload.get("mask")
-                if context_mask is not None and context_mask.dim() == 3:
-                    context_mask = context_mask.unsqueeze(1)
-                x = x + block.cross_attn(block.norm3(x), context, ctx_mask=context_mask)
+        return MoT._apply_expert_post_block_from_context(
+            block=block,
+            residual_x=residual_x,
+            mixed_attn_out=mixed_attn_out,
+            gate_msa=gate_msa,
+            shift_mlp=shift_mlp,
+            scale_mlp=scale_mlp,
+            gate_mlp=gate_mlp,
+            context=context,
+            context_mask=context_mask,
+        )
 
-        mlp_input = modulate(block.norm2(x), shift_mlp, scale_mlp)
-        x = block.gate(x, gate_mlp, block.ffn(mlp_input))
-        return x
+    def _apply_expert_post_block_maybe_compiled(
+        self,
+        key: Optional[tuple[str, int]],
+        block,
+        residual_x: torch.Tensor,
+        mixed_attn_out: torch.Tensor,
+        gate_msa: torch.Tensor,
+        shift_mlp: torch.Tensor,
+        scale_mlp: torch.Tensor,
+        gate_mlp: torch.Tensor,
+        context_payload: Optional[dict],
+    ) -> torch.Tensor:
+        compiled = (
+            self._compiled_post_block.get(key)
+            if self.mot_torch_compile_enabled and key is not None
+            else None
+        )
+        if compiled is None:
+            return self._apply_expert_post_block(
+                block=block,
+                residual_x=residual_x,
+                mixed_attn_out=mixed_attn_out,
+                gate_msa=gate_msa,
+                shift_mlp=shift_mlp,
+                scale_mlp=scale_mlp,
+                gate_mlp=gate_mlp,
+                context_payload=context_payload,
+            )
+
+        context = None
+        context_mask = None
+        if context_payload is not None:
+            context = context_payload.get("context")
+            if context is not None:
+                context_mask = context_payload.get("mask")
+        try:
+            return compiled(
+                mixed_attn_out,
+                residual_x,
+                gate_msa,
+                shift_mlp,
+                scale_mlp,
+                gate_mlp,
+                context,
+                context_mask,
+            )
+        except Exception as exc:
+            self._disable_torch_compile(f"post_block {key}: {exc!r}")
+            return self._apply_expert_post_block(
+                block=block,
+                residual_x=residual_x,
+                mixed_attn_out=mixed_attn_out,
+                gate_msa=gate_msa,
+                shift_mlp=shift_mlp,
+                scale_mlp=scale_mlp,
+                gate_mlp=gate_mlp,
+                context_payload=context_payload,
+            )
 
     def _build_expert_attention_io(
         self,
@@ -196,6 +444,7 @@ class MoT(nn.Module):
         x: torch.Tensor,
         freqs: torch.Tensor,
         t_mod: torch.Tensor,
+        key: Optional[tuple[str, int]] = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -228,22 +477,36 @@ class MoT(nn.Module):
             gate_mlp: Gating tensor for MLP residual branch.
             use_gradient_checkpointing: Whether this expert enables checkpointing.
         """
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self._split_modulation(block, t_mod)
-        attn_input = modulate(block.norm1(x), shift_msa, scale_msa)
+        compiled = (
+            self._compiled_attention_io.get(key)
+            if self.mot_torch_compile_enabled and key is not None
+            else None
+        )
+        if compiled is not None:
+            try:
+                q, k, v, residual_x, gate_msa, shift_mlp, scale_mlp, gate_mlp = compiled(x, freqs, t_mod)
+            except Exception as exc:
+                self._disable_torch_compile(f"attention_io {key}: {exc!r}")
+                compiled = None
 
-        q = block.self_attn.norm_q(block.self_attn.q(attn_input))
-        k = block.self_attn.norm_k(block.self_attn.k(attn_input))
-        v = block.self_attn.v(attn_input)
+        if compiled is None:
+            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self._split_modulation(block, t_mod)
+            attn_input = modulate(block.norm1(x), shift_msa, scale_msa)
 
-        q = rope_apply(q, freqs, block.num_heads)
-        k = rope_apply(k, freqs, block.num_heads)
+            q = block.self_attn.norm_q(block.self_attn.q(attn_input))
+            k = block.self_attn.norm_k(block.self_attn.k(attn_input))
+            v = block.self_attn.v(attn_input)
+
+            q = rope_apply(q, freqs, block.num_heads)
+            k = rope_apply(k, freqs, block.num_heads)
+            residual_x = x
 
         use_gradient_checkpointing = bool(getattr(expert, "use_gradient_checkpointing", False))
         return (
             q,
             k,
             v,
-            x,
+            residual_x,
             gate_msa,
             shift_mlp,
             scale_mlp,
@@ -262,6 +525,7 @@ class MoT(nn.Module):
         use_gradient_checkpointing: bool,
         mixed_slice: torch.Tensor,
         context_payload: Optional[dict],
+        key: Optional[tuple[str, int]] = None,
     ) -> torch.Tensor:
         """Apply post-attention computations, with optional checkpointing.
 
@@ -290,8 +554,10 @@ class MoT(nn.Module):
             _gate_mlp: torch.Tensor,
             _block=block,
             _context_payload=context_payload,
+            _key=key,
         ) -> torch.Tensor:
-            return self._apply_expert_post_block(
+            return self._apply_expert_post_block_maybe_compiled(
+                key=_key,
                 block=_block,
                 residual_x=_x,
                 mixed_attn_out=_mixed_slice,
@@ -388,6 +654,7 @@ class MoT(nn.Module):
                     x=x,
                     freqs=video_freqs,
                     t_mod=video_t_mod,
+                    key=("video", layer_idx),
                 )
             # Video prefill uses only video self-attention mask.
             with torch.profiler.record_function("mot/prefill/attn"):
@@ -409,6 +676,7 @@ class MoT(nn.Module):
                     use_gradient_checkpointing=use_gradient_checkpointing,
                     mixed_slice=mixed,
                     context_payload=video_context_payload,
+                    key=("video", layer_idx),
                 )
             kv_cache.append({"k": k, "v": v})
         return kv_cache, x
@@ -460,6 +728,7 @@ class MoT(nn.Module):
                 x=x,
                 freqs=action_freqs,
                 t_mod=action_t_mod,
+                key=("action", layer_idx),
             )
             mixed = self._mixed_attention(
                 q_cat=q,
@@ -477,6 +746,7 @@ class MoT(nn.Module):
                 use_gradient_checkpointing=use_gradient_checkpointing,
                 mixed_slice=mixed,
                 context_payload=action_context_payload,
+                key=("action", layer_idx),
             )
             kv_cache.append({"k": k, "v": v})
         return kv_cache
@@ -549,6 +819,7 @@ class MoT(nn.Module):
                 x=x,
                 freqs=action_freqs,
                 t_mod=action_t_mod,
+                key=("action", layer_idx),
             )
             layer_cache = video_kv_cache[layer_idx]
             if "k" not in layer_cache or "v" not in layer_cache:
@@ -582,6 +853,7 @@ class MoT(nn.Module):
                 use_gradient_checkpointing=use_gradient_checkpointing,
                 mixed_slice=mixed,
                 context_payload=action_context_payload,
+                key=("action", layer_idx),
             )
         return x
 
@@ -673,6 +945,7 @@ class MoT(nn.Module):
                 x=x,
                 freqs=action_freqs,
                 t_mod=action_t_mod,
+                key=("action", layer_idx),
             )
             layer_cache = condition_kv_cache[layer_idx]
             if "k" not in layer_cache or "v" not in layer_cache:
@@ -702,6 +975,7 @@ class MoT(nn.Module):
                 use_gradient_checkpointing=use_gradient_checkpointing,
                 mixed_slice=mixed,
                 context_payload=action_context_payload,
+                key=("action", layer_idx),
             )
         return x
 
@@ -760,6 +1034,7 @@ class MoT(nn.Module):
                     x=x,
                     freqs=freqs,
                     t_mod=t_mod,
+                    key=(name, layer_idx),
                 )
 
                 q_chunks.append(q)
@@ -809,6 +1084,7 @@ class MoT(nn.Module):
                     use_gradient_checkpointing=cached_expert["use_gradient_checkpointing"],
                     mixed_slice=mixed_slice,
                     context_payload=context_payload,
+                    key=(name, layer_idx),
                 )
 
                 tokens_all[name] = updated_tokens
