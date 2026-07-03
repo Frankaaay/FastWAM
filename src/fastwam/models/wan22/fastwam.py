@@ -231,24 +231,25 @@ class FastWAM(torch.nn.Module):
             )
             return
 
+        original_forward = encoder.forward
         try:
             if not hasattr(torch, "compile"):
                 raise RuntimeError("torch.compile is not available in this PyTorch build")
-            compiled_encoder = torch.compile(
-                encoder,
+            compiled_forward = torch.compile(
+                original_forward,
                 mode=self.vae_torch_compile_mode,
                 dynamic=False,
                 fullgraph=False,
             )
-            vae_model.encoder = compiled_encoder
+            encoder.forward = compiled_forward
         except Exception as exc:
-            vae_model.encoder = encoder
+            encoder.forward = original_forward
             self._disable_vae_torch_compile(repr(exc))
             return
 
         self.vae_torch_compile_enabled = True
         self._rank0_info(
-            "vae-compile enabled=True mode=%s target=encoder",
+            "vae-compile enabled=True mode=%s target=encoder.forward",
             self.vae_torch_compile_mode,
         )
 
