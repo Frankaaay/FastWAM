@@ -1425,7 +1425,8 @@ class FastWAM(torch.nn.Module):
         ).to(device=self.device, dtype=self.torch_dtype)
 
         input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
-        first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
+        with torch.profiler.record_function("model/infer/encode_input_image"):
+            first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
         fuse_flag = bool(getattr(self.video_expert, "fuse_vae_embedding_in_latents", False))
 
         use_prompt = prompt is not None
@@ -1516,7 +1517,8 @@ class FastWAM(torch.nn.Module):
 
             history_video = history_video.to(device=self.device, dtype=self.torch_dtype)
             history_action = history_action.to(device=self.device, dtype=self.torch_dtype)
-            history_video_latents = self._encode_video_latents(history_video, tiled=tiled)
+            with torch.profiler.record_function("model/infer/encode_history_video"):
+                history_video_latents = self._encode_video_latents(history_video, tiled=tiled)
             clean_video_timestep = torch.zeros((1,), device=self.device, dtype=history_video_latents.dtype)
             video_source_ids, video_position_ids = self._history_video_source_and_position_ids(
                 num_latent_frames=history_video_latents.shape[2],
@@ -1551,17 +1553,18 @@ class FastWAM(torch.nn.Module):
                 history_video_latent_valid,
                 tokens_per_frame=int(history_video_pre["meta"]["tokens_per_frame"]),
             )
-            history_video_cache, _history_video_tokens = self.mot.prefill_video_cache(
-                video_tokens=history_video_pre["tokens"],
-                video_freqs=history_video_pre["freqs"],
-                video_t_mod=history_video_pre["t_mod"],
-                video_context_payload={
-                    "context": history_video_pre["context"],
-                    "mask": history_video_pre["context_mask"],
-                },
-                video_attention_mask=history_video_attention_mask,
-                video_key_valid_mask=history_video_token_valid,
-            )
+            with torch.profiler.record_function("model/infer/history_video_prefill"):
+                history_video_cache, _history_video_tokens = self.mot.prefill_video_cache(
+                    video_tokens=history_video_pre["tokens"],
+                    video_freqs=history_video_pre["freqs"],
+                    video_t_mod=history_video_pre["t_mod"],
+                    video_context_payload={
+                        "context": history_video_pre["context"],
+                        "mask": history_video_pre["context_mask"],
+                    },
+                    video_attention_mask=history_video_attention_mask,
+                    video_key_valid_mask=history_video_token_valid,
+                )
 
             history_source_ids = self._action_source_ids(
                 batch_size=1,
@@ -1596,17 +1599,18 @@ class FastWAM(torch.nn.Module):
                 dtype=torch.bool,
                 device=history_action.device,
             )
-            history_action_cache = self.mot.prefill_action_cache(
-                action_tokens=history_action_pre["tokens"],
-                action_freqs=history_action_pre["freqs"],
-                action_t_mod=history_action_pre["t_mod"],
-                action_context_payload={
-                    "context": history_action_pre["context"],
-                    "mask": history_action_pre["context_mask"],
-                },
-                action_attention_mask=history_action_attention_mask,
-                action_key_valid_mask=history_action_valid,
-            )
+            with torch.profiler.record_function("model/infer/history_action_prefill"):
+                history_action_cache = self.mot.prefill_action_cache(
+                    action_tokens=history_action_pre["tokens"],
+                    action_freqs=history_action_pre["freqs"],
+                    action_t_mod=history_action_pre["t_mod"],
+                    action_context_payload={
+                        "context": history_action_pre["context"],
+                        "mask": history_action_pre["context_mask"],
+                    },
+                    action_attention_mask=history_action_attention_mask,
+                    action_key_valid_mask=history_action_valid,
+                )
             condition_kv_cache = self._concat_kv_caches(history_video_cache, history_action_cache)
             condition_key_valid_mask = torch.cat([history_video_token_valid, history_action_valid], dim=1)
         else:
@@ -1630,16 +1634,17 @@ class FastWAM(torch.nn.Module):
                 video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
                 device=video_pre["tokens"].device,
             )
-            video_kv_cache, _video_tokens = self.mot.prefill_video_cache(
-                video_tokens=video_pre["tokens"],
-                video_freqs=video_pre["freqs"],
-                video_t_mod=video_pre["t_mod"],
-                video_context_payload={
-                    "context": video_pre["context"],
-                    "mask": video_pre["context_mask"],
-                },
-                video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
-            )
+            with torch.profiler.record_function("model/infer/current_video_prefill"):
+                video_kv_cache, _video_tokens = self.mot.prefill_video_cache(
+                    video_tokens=video_pre["tokens"],
+                    video_freqs=video_pre["freqs"],
+                    video_t_mod=video_pre["t_mod"],
+                    video_context_payload={
+                        "context": video_pre["context"],
+                        "mask": video_pre["context_mask"],
+                    },
+                    video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
+                )
 
         infer_timesteps_action, infer_deltas_action = self.infer_action_scheduler.build_inference_schedule(
             num_inference_steps=num_inference_steps,
@@ -1648,30 +1653,31 @@ class FastWAM(torch.nn.Module):
             shift_override=sigma_shift,
         )
         for step_t_action, step_delta_action in zip(infer_timesteps_action, infer_deltas_action):
-            timestep_action = step_t_action.unsqueeze(0).to(dtype=latents_action.dtype, device=self.device)
+            with torch.profiler.record_function("model/infer/denoise_step"):
+                timestep_action = step_t_action.unsqueeze(0).to(dtype=latents_action.dtype, device=self.device)
 
-            if use_history_condition:
-                pred_action_posi = self._predict_action_noise_with_condition_cache(
-                    latents_action=latents_action,
-                    timestep_action=timestep_action,
-                    context=context,
-                    context_mask=context_mask,
-                    condition_kv_cache=condition_kv_cache,
-                    condition_key_valid_mask=condition_key_valid_mask,
-                )
-            else:
-                pred_action_posi = self._predict_action_noise_with_cache(
-                    latents_action=latents_action,
-                    timestep_action=timestep_action,
-                    context=context,
-                    context_mask=context_mask,
-                    video_kv_cache=video_kv_cache,
-                    attention_mask=attention_mask,
-                    video_seq_len=video_seq_len,
-                )
-            pred_action = pred_action_posi
+                if use_history_condition:
+                    pred_action_posi = self._predict_action_noise_with_condition_cache(
+                        latents_action=latents_action,
+                        timestep_action=timestep_action,
+                        context=context,
+                        context_mask=context_mask,
+                        condition_kv_cache=condition_kv_cache,
+                        condition_key_valid_mask=condition_key_valid_mask,
+                    )
+                else:
+                    pred_action_posi = self._predict_action_noise_with_cache(
+                        latents_action=latents_action,
+                        timestep_action=timestep_action,
+                        context=context,
+                        context_mask=context_mask,
+                        video_kv_cache=video_kv_cache,
+                        attention_mask=attention_mask,
+                        video_seq_len=video_seq_len,
+                    )
+                pred_action = pred_action_posi
 
-            latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
+                latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
 
         return {
             "action": latents_action[0].detach().to(device="cpu", dtype=torch.float32),
