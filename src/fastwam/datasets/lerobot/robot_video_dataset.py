@@ -1,5 +1,7 @@
 import hashlib
+import json
 import os
+from pathlib import Path
 from typing import Optional
 import time
 import numpy as np
@@ -42,6 +44,11 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         max_padding_retry: int = 3,
         concat_multi_camera: str = "horizontal", # "horizontal", "vertical", "robotwin", or None
         override_instruction: Optional[str] = None, # whether to hardcode a specific instruction for all samples, for debugging
+        vae_latent_cache_dir: Optional[str] = None,
+        vae_latent_cache_keep_video: bool = False,
+        vae_latent_cache_model_id: Optional[str] = None,
+        vae_latent_cache_validate_metadata: bool = True,
+        vae_latent_cache_fingerprint: Optional[str] = None,
     ):
         self.lerobot_dataset = BaseLerobotDataset(
             dataset_dirs=dataset_dirs,
@@ -72,6 +79,37 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         self.max_padding_retry = max_padding_retry
         self.concat_multi_camera = concat_multi_camera
         self.override_instruction = override_instruction
+        self.vae_latent_cache_dir = (
+            str(Path(vae_latent_cache_dir).expanduser()) if vae_latent_cache_dir else None
+        )
+        self.vae_latent_cache_keep_video = bool(vae_latent_cache_keep_video)
+        self.vae_latent_cache_model_id = (
+            str(vae_latent_cache_model_id) if vae_latent_cache_model_id else None
+        )
+        self.vae_latent_cache_validate_metadata = bool(vae_latent_cache_validate_metadata)
+        self.vae_latent_cache_metadata = self._build_vae_latent_cache_metadata(
+            dataset_dirs=dataset_dirs,
+            shape_meta=shape_meta,
+            val_set_proportion=val_set_proportion,
+            is_training_set=is_training_set,
+            global_sample_stride=global_sample_stride,
+        )
+        self.vae_latent_cache_fingerprint_overridden = vae_latent_cache_fingerprint is not None
+        if self.vae_latent_cache_fingerprint_overridden:
+            self.vae_latent_cache_fingerprint = str(vae_latent_cache_fingerprint)
+        else:
+            self.vae_latent_cache_fingerprint = self._hash_vae_latent_cache_metadata(
+                self.vae_latent_cache_metadata
+            )
+        self.vae_latent_cache_emit_sample_idx = False
+        if self.vae_latent_cache_dir is not None:
+            logger.info(
+                "Using VAE latent cache: dir=%s fingerprint=%s keep_video=%s override=%s",
+                self.vae_latent_cache_dir,
+                self.vae_latent_cache_fingerprint,
+                self.vae_latent_cache_keep_video,
+                self.vae_latent_cache_fingerprint_overridden,
+            )
 
         self.resize_transform = ResizeSmallestSideAspectPreserving(
             args={"img_w": self.video_size[1], "img_h": self.video_size[0]},
@@ -112,43 +150,153 @@ class RobotVideoDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.lerobot_dataset)
 
-    def _get(self, idx):
-        sample_idx = idx
-        sample = None
-        for attempt in range(self.max_padding_retry + 1):
-            sample = self.lerobot_dataset[sample_idx]
+    def _build_vae_latent_cache_metadata(
+        self,
+        *,
+        dataset_dirs,
+        shape_meta,
+        val_set_proportion,
+        is_training_set,
+        global_sample_stride,
+    ) -> dict:
+        if isinstance(shape_meta, DictConfig):
+            shape_meta_payload = OmegaConf.to_container(shape_meta, resolve=True)
+        else:
+            shape_meta_payload = shape_meta
+        return {
+            "schema": "fastwam_robot_video_vae_latents_v1",
+            "dataset_dirs": [
+                str(Path(str(path)).expanduser().resolve(strict=False))
+                for path in dataset_dirs
+            ],
+            "shape_meta": shape_meta_payload,
+            "num_frames": int(self.num_frames),
+            "action_video_freq_ratio": int(self.action_video_freq_ratio),
+            "video_sample_indices": list(self.video_sample_indices),
+            "video_size": list(self.video_size),
+            "camera_key": self.camera_key,
+            "concat_multi_camera": self.concat_multi_camera,
+            "val_set_proportion": float(val_set_proportion),
+            "is_training_set": bool(is_training_set),
+            "global_sample_stride": int(global_sample_stride),
+        }
 
-            if not self.skip_padding_as_possible:
-                break
+    @staticmethod
+    def _hash_vae_latent_cache_metadata(metadata: dict) -> str:
+        payload = json.dumps(metadata, sort_keys=True, ensure_ascii=True, default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
-            action_is_pad = sample["action_is_pad"]
-            image_is_pad = sample["image_is_pad"]
-            proprio_is_pad = sample["proprio_is_pad"]
-            has_pad = False
-            if bool(action_is_pad.any().item()):
-                has_pad = True
-            if bool(image_is_pad.any().item()):
-                has_pad = True
-            if bool(proprio_is_pad.any().item()):
-                has_pad = True
+    def vae_latent_cache_path(self, sample_idx: int, cache_dir=None) -> Path:
+        root = cache_dir if cache_dir is not None else self.vae_latent_cache_dir
+        if root is None:
+            raise ValueError("vae_latent_cache_dir is not set.")
+        sample_idx = int(sample_idx)
+        shard = f"{sample_idx // 1000:06d}"
+        return (
+            Path(root).expanduser()
+            / self.vae_latent_cache_fingerprint
+            / shard
+            / f"{sample_idx:09d}.pt"
+        )
 
-            if not has_pad or attempt >= self.max_padding_retry:
-                break
+    def make_vae_latent_cache_payload(
+        self,
+        *,
+        sample_idx: int,
+        input_latents: torch.Tensor,
+        model_id: Optional[str] = None,
+        vae_path: Optional[str] = None,
+    ) -> dict:
+        if not torch.is_tensor(input_latents):
+            raise TypeError(f"`input_latents` cache value must be a tensor, got {type(input_latents)}")
+        if input_latents.ndim != 4:
+            raise ValueError(
+                f"`input_latents` cache tensor must be 4D [C,T,H,W], got {tuple(input_latents.shape)}"
+            )
+        if not input_latents.is_floating_point():
+            raise ValueError(f"`input_latents` cache tensor must be floating point, got {input_latents.dtype}")
+        return {
+            "schema": "fastwam_robot_video_vae_latents_v1",
+            "sample_idx": int(sample_idx),
+            "fingerprint": self.vae_latent_cache_fingerprint,
+            "metadata": self.vae_latent_cache_metadata,
+            "model_id": None if model_id is None else str(model_id),
+            "vae_path": None if vae_path is None else str(vae_path),
+            "input_latents": input_latents.detach().to(device="cpu", dtype=torch.bfloat16).contiguous(),
+        }
 
-            sample_idx = np.random.randint(len(self.lerobot_dataset))
-        
-        image_is_pad = sample["image_is_pad"]
+    @staticmethod
+    def _validate_cached_vae_latents(latents, *, name: str, cache_path: Path) -> torch.Tensor:
+        if not torch.is_tensor(latents):
+            raise TypeError(f"Cached {name} must be a tensor in {cache_path}, got {type(latents)}")
+        if latents.ndim != 4:
+            raise ValueError(
+                f"Cached {name} must be 4D tensor [C,T,H,W] in {cache_path}, got {tuple(latents.shape)}"
+            )
+        if latents.dtype != torch.bfloat16:
+            raise ValueError(f"Cached {name} must use dtype torch.bfloat16 in {cache_path}, got {latents.dtype}")
+        return latents.contiguous()
 
-        video = sample["pixel_values"]  # [T, C, H, W] or [num_cameras, T, C, H, W]
+    def _load_vae_latent_cache(self, sample_idx: int) -> dict[str, torch.Tensor]:
+        cache_path = self.vae_latent_cache_path(sample_idx)
+        if not cache_path.exists():
+            raise FileNotFoundError(
+                f"Missing VAE latent cache for sample_idx={sample_idx}: {cache_path}. "
+                "Run scripts/precompute_vae_latents.py first, or check "
+                "`vae_latent_cache_dir` and `vae_latent_cache_fingerprint`."
+            )
+        payload = torch.load(cache_path, map_location="cpu")
+        if not isinstance(payload, dict):
+            raise TypeError(f"VAE latent cache payload must be a dict in {cache_path}, got {type(payload)}")
+
+        if self.vae_latent_cache_validate_metadata:
+            if payload.get("schema") != "fastwam_robot_video_vae_latents_v1":
+                raise ValueError(f"Invalid VAE latent cache schema in {cache_path}")
+            if int(payload.get("sample_idx", -1)) != int(sample_idx):
+                raise ValueError(
+                    f"VAE latent cache sample_idx mismatch in {cache_path}: "
+                    f"expected {sample_idx}, got {payload.get('sample_idx')}"
+                )
+            if payload.get("fingerprint") != self.vae_latent_cache_fingerprint:
+                raise ValueError(
+                    f"VAE latent cache fingerprint mismatch in {cache_path}: "
+                    f"expected {self.vae_latent_cache_fingerprint}, got {payload.get('fingerprint')}. "
+                    "Check `vae_latent_cache_fingerprint` when reusing caches across branches."
+                )
+            if (
+                not self.vae_latent_cache_fingerprint_overridden
+                and payload.get("metadata") != self.vae_latent_cache_metadata
+            ):
+                raise ValueError(
+                    f"VAE latent cache metadata mismatch in {cache_path}. "
+                    "Re-run scripts/precompute_vae_latents.py or pass the intended "
+                    "`vae_latent_cache_fingerprint` override for a verified compatible cache."
+                )
+            if self.vae_latent_cache_model_id is not None:
+                payload_model_id = payload.get("model_id")
+                if payload_model_id != self.vae_latent_cache_model_id:
+                    raise ValueError(
+                        f"VAE latent cache model_id mismatch in {cache_path}: "
+                        f"expected {self.vae_latent_cache_model_id}, got {payload_model_id}"
+                    )
+
+        input_latents = self._validate_cached_vae_latents(
+            payload.get("input_latents"),
+            name="input_latents",
+            cache_path=cache_path,
+        )
+        return {"input_latents": input_latents}
+
+    def _select_and_format_video(self, pixel_values: torch.Tensor, indices: list[int]) -> torch.Tensor:
+        video = pixel_values
         num_cameras = 1
         if video.ndim == 5:
-            video = video[:, self.video_sample_indices, :, :, :] # [num_cameras, T_video, C, H, W]
+            video = video[:, indices, :, :, :] # [num_cameras, T_video, C, H, W]
             num_cameras, T_video, C, H, W = video.shape
         else:
             assert video.ndim == 4, f"Expected video to have shape [T, C, H, W], but got {video.shape}"
-            video = video[self.video_sample_indices, :, :, :] # [T_video, C, H, W]
+            video = video[indices, :, :, :] # [T_video, C, H, W]
             T_video, C, H, W = video.shape
-        image_is_pad = image_is_pad[self.video_sample_indices]
 
         video = video.view(num_cameras, T_video, C, H, W)  # [num_cameras, T_video, C, H, W]
         if self.concat_multi_camera == "robotwin":
@@ -189,23 +337,60 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         else:
             video = video.squeeze(0)  # [T_video, C, H, W]
 
-        # final resize and normalization
         video = self.resize_transform(video)
         video = self.crop_transform(video)
         video = self.normalize_transform(video)  # [T_video, C, H, W]
+        return video.permute(1, 0, 2, 3) # [C, T_video, H, W], range [-1, 1]
 
-        video = video.permute(1, 0, 2, 3) # [C, T_video, H, W], range [-1, 1]
+    def _get(self, idx):
+        sample_idx = idx
+        sample = None
+        for attempt in range(self.max_padding_retry + 1):
+            sample = self.lerobot_dataset[sample_idx]
+
+            if not self.skip_padding_as_possible:
+                break
+
+            action_is_pad = sample["action_is_pad"]
+            image_is_pad = sample["image_is_pad"]
+            proprio_is_pad = sample["proprio_is_pad"]
+            has_pad = False
+            if bool(action_is_pad.any().item()):
+                has_pad = True
+            if bool(image_is_pad.any().item()):
+                has_pad = True
+            if bool(proprio_is_pad.any().item()):
+                has_pad = True
+
+            if not has_pad or attempt >= self.max_padding_retry:
+                break
+
+            sample_idx = np.random.randint(len(self.lerobot_dataset))
+
+        sample_idx = int(sample.get("idx", sample_idx))
+        image_is_pad = sample["image_is_pad"][self.video_sample_indices]
+
+        latent_cache = None
+        if self.vae_latent_cache_dir is not None:
+            latent_cache = self._load_vae_latent_cache(sample_idx)
+
+        video = None
+        if latent_cache is None or self.vae_latent_cache_keep_video:
+            video = self._select_and_format_video(sample["pixel_values"], self.video_sample_indices)
 
         # Proxy (from lerobot): 
         #   action: [num_frames-1, action_dim] # start from t0, except the last frame
         #   proprio: [num_frames, proprio_dim] # start from t0 to the last frame, aligned with video frames
         action = sample["action"] # [T-1, action_dim]
         proprio = sample["proprio"][:-1, :] # [T-1, state_dim]， to align with action
-        if video.shape[1] <= 1:
-            raise ValueError(f"`video` must have at least 2 frames, got shape {tuple(video.shape)}")
-        if action.shape[0] % (video.shape[1] - 1) != 0:
+        video_transitions = len(self.video_sample_indices) - 1
+        if video is not None:
+            if video.shape[1] <= 1:
+                raise ValueError(f"`video` must have at least 2 frames, got shape {tuple(video.shape)}")
+            video_transitions = int(video.shape[1] - 1)
+        if action.shape[0] % video_transitions != 0:
             raise ValueError(
-                f"`action` horizon must be divisible by `video` transitions, got {action.shape[0]} and {video.shape[1] - 1}"
+                f"`action` horizon must be divisible by `video` transitions, got {action.shape[0]} and {video_transitions}"
             )
 
         task = sample["instruction"]
@@ -221,7 +406,6 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         context_mask = torch.ones_like(context_mask)
         
         data = {
-            "video": video,
             "action": action,
             "proprio": proprio,
             "prompt": instruction,
@@ -231,6 +415,12 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             "action_is_pad": sample["action_is_pad"],
             "proprio_is_pad": sample["proprio_is_pad"],
         }
+        if video is not None:
+            data["video"] = video
+        if latent_cache is not None:
+            data.update(latent_cache)
+        if self.vae_latent_cache_dir is not None or self.vae_latent_cache_emit_sample_idx:
+            data["sample_idx"] = torch.tensor(sample_idx, dtype=torch.long)
         return data
 
     def _get_cached_text_context(self, prompt: str):
@@ -271,6 +461,8 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         try:
             data = self._get(idx)
         except Exception as e:
+            if self.vae_latent_cache_dir is not None:
+                raise
             print(f"Error processing sample idx {idx}: {e}. Returning a random sample instead.")
             # trace back
             print(traceback.format_exc())
