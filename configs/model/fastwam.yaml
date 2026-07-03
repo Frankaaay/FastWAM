@@ -8,6 +8,8 @@ redirect_common_files: true
 mot_checkpoint_mixed_attn: true
 mot_torch_compile: false
 mot_torch_compile_mode: "default"
+vae_torch_compile: false
+vae_torch_compile_mode: "default"
 attention_debug:
   log_sdpa_backend: false
   force_video_prefill_no_mask: false
