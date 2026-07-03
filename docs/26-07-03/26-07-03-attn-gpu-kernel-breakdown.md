@@ -76,15 +76,27 @@ Top kernels（per-step）：
 2. 激活侧非连续/错位（rearrange、slice 产生的视图直接进 Linear）。
 3. cuBLAS/torch 2.7.1+cu128 在这些 shape 上的启发式选择问题（可能性较低）。
 
-### 判别实验（下一步 profiling 的主内容）
+### 判别实验 1：microbench 已完成，机制确认（26-07-03 下午）
+
+在 H200 GPU7 / torch 2.7.1+cu128 上用模型 shape 做纯 GEMM microbench
+（M=72000，K=3072，N∈{3072,14336}，bf16，`F.linear`）：
+
+| case | proj3072 | ffn14336 | kernel |
+| --- | ---: | ---: | --- |
+| 对齐（ptr%16=0） | 1.715ms | 9.097ms | `nvjet_tst_*`（Hopper） |
+| 错位 7 元素（ptr%16=14），x 或 w 任一 | ~14.2ms | ~64.0ms | `cutlass_75_tensorop_bf16_s1688gemm_*` |
+| **slowdown** | **8.3x** | **7.0x** | |
+
+结论：**任一操作数指针 16B 错位即可触发训练 trace 中的同名 align1 kernel，慢 7-8 倍**。
+训练里 1897ms/step 的 align1 GEMM 若对齐后按此比例收缩，可省约 1.6s/step GPU 时间，
+对应约 1.5x 的训练吞吐提升——这是当前最大的单项优化机会。
+
+### 剩余判别实验（定位错位来源）
 
 1. **参数对齐探针**（成本最低，先做）：训练启动后（DeepSpeed wrap 之后）遍历
    `model.named_parameters()`，统计 `p.data_ptr() % 16 != 0` 的数量并打印前几个名字。
-   若大量未对齐 → 假设 1 成立。
-2. **纯 GEMM microbench**：在 H200 上用本模型的 shape
-   （M=B*Sv≈24*3000+，K=3072，N∈{3072, 9216, 14336}，bf16，含对齐/错位两组）
-   跑 torch.profiler，确认对齐时 cuBLAS 选 nvjet 以及两者吞吐差，量化收益上限。
-3. **单卡无 DeepSpeed 短 profile**：同模型 forward-only 几个 step，
+   若大量未对齐 → DeepSpeed ZeRO-1 flatten 假设成立；同时对 forward 中间激活抽查。
+2. **单卡无 DeepSpeed 短 profile**：同模型 forward-only 几个 step，
    若 GEMM 变回 nvjet → 直接锁定 DeepSpeed flatten。
 
 ### 修复方向（待判别实验确认后）
@@ -95,7 +107,7 @@ Top kernels（per-step）：
 
 ## 修正后的优先级
 
-1. align1 GEMM 根因判别 + 修复（潜在 15-25%/step）。
+1. align1 GEMM 根因定位 + 修复（microbench 已确认机制，潜在 ~1.5x 吞吐）。
 2. `other` 类 elementwise fusion / torch.compile（潜在 ~10%/step，风险中）。
 3. attention backend / mask 拆分（≤3%/step，搁置；`attention_debug` 开关已就绪，顺带验证即可）。
 4. 推理侧加速沿用同一结论：GEMM 对齐问题同样影响推理，修复后推理 prefill 直接受益。
