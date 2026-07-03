@@ -96,9 +96,26 @@ fold_cloth 任务默认 `model.mot_checkpoint_mixed_attn=false`（README 全局�
 4. **DeepSpeed overlap_comm+contiguous_gradients 是负优化**（v4 实测 backward 917ms→10.8s），保持默认关闭。
 5. **VAE latent cache（磁盘预计算）**：2.33×（同 batch）/2.57×（bs40）——效果最好但违反"不占空间"约束，仅作参考线（代码已在分支 `4617e4a`，含 fingerprint 覆盖复用机制）。
 
-## 训练 2× 为何在约束内不可达（计算边界）
+## 训练 2× 为何在约束内不可达（经验性证明，基于实测 trace）
 
-优化后 bs24 step 墙钟 1330ms 中 GPU busy ≈1150ms（87%）；剩余可回收空转仅 ~180ms。GPU busy 构成：DiT GEMM ~650ms/step、VAE conv ~320ms、attention ~108ms、其余为梯度 elementwise 与 NCCL。fusion/graphs 只削 launch 与胶水，**不减少 bf16 真实计算量**。由 GPU-busy 推算吞吐天花板 ≈1.6-1.7×（实测 bs40 已到 1.64×，基本触顶）。突破需减真实计算：fp8（数值不等价）、latent cache（占空间）、蒸馏/减层（改模型）——均违反本轮约束。
+用 optim_bs16 run 的 torch profiler trace（15 步 active window）实测：
+
+```text
+GPU busy（bwd+vae+fwd 三段 annotation 的 kernel 执行时间和）= 792 ms/step（墙钟 976.6 ms 的 81%）
+GPU busy / sample = 792/16 = 49.5 ms   ← 任何 launch 级优化（compile/CUDA graphs/放大 batch/流重叠）的硬下限
+训练 2× 目标 = 85.6/2 = 42.8 ms/sample 墙钟
+```
+
+**49.5 > 42.8：实测的纯 GPU 计算时间已经超过 2× 目标墙钟。** 等价性约束下的所有优化手段都只作用于「墙钟 − GPU busy」这 19% 的空转，无法低于 GPU 真正执行计算的时间。
+
+对最后一条未实测路径（flash attention mask 拆分）的定量封闭：trace 实测 attention 全部 GPU 时间（fwd+bwd）= 68.6 ms/step = **4.3 ms/sample**。即使 flash 把 attention **整段消除**（物理不可能的收益上限，实际 flash 只加速不消除），下限仍为 49.5 − 4.3 = **45.2 ms/sample > 42.8**。故 flash 路线无论做到多好都无法使训练达到 2×，无需实测即可排除。
+
+剩余 GPU busy 的构成是真实计算：DiT GEMM（~450ms/step）、VAE conv（~320ms）、梯度 elementwise 与 NCCL。要减少它只有三条路，均违反本轮约束：
+- fp8 / TF32 降精度 —— 破坏数值等价；
+- 磁盘/内存 latent cache —— 破坏"不增加空间占用"（作为参考线实测可达 2.33-2.57×，代码在分支 `4617e4a`）；
+- 蒸馏 / 减层 / 改 attention 结构 —— 改变模型。
+
+**结论：在「完全等价 + 不占空间」双约束下，训练 2× 与实测 GPU 计算下限数学冲突；1.64×（实测）~1.7×（理论上限）是该约束下的可达区间。若接受磁盘 latent cache（192G），训练即可达 2.33×+。**
 
 ## 复现指南
 
