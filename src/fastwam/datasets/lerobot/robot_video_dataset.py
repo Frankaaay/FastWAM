@@ -51,6 +51,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         vae_latent_cache_keep_video: bool = False,
         vae_latent_cache_model_id: Optional[str] = None,
         vae_latent_cache_validate_metadata: bool = True,
+        vae_latent_cache_precompute_only: bool = False,
     ):
         self.num_frames = num_frames
         self.action_video_freq_ratio = action_video_freq_ratio
@@ -103,6 +104,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             str(vae_latent_cache_model_id) if vae_latent_cache_model_id else None
         )
         self.vae_latent_cache_validate_metadata = bool(vae_latent_cache_validate_metadata)
+        self.vae_latent_cache_precompute_only = bool(vae_latent_cache_precompute_only)
 
         self.resize_transform = ResizeSmallestSideAspectPreserving(
             args={"img_w": self.video_size[1], "img_h": self.video_size[0]},
@@ -382,6 +384,18 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             pixel_values = sample["pixel_values"]  # [T, C, H, W] or [num_cameras, T, C, H, W]
             history_video = self._select_and_format_video(pixel_values, self.history_video_sample_indices)
             video = self._select_and_format_video(pixel_values, self.video_sample_indices)
+
+        if self.vae_latent_cache_precompute_only:
+            if video is None or history_video is None:
+                raise ValueError(
+                    "`vae_latent_cache_precompute_only=true` requires videos to be returned. "
+                    "Set `vae_latent_cache_keep_video=true` or unset `vae_latent_cache_dir`."
+                )
+            return {
+                "sample_idx": torch.tensor(sample_idx, dtype=torch.long),
+                "video": video,
+                "history_video": history_video,
+            }
 
         # Proxy (from lerobot): 
         #   action: [num_frames-1, action_dim] # start from t0, except the last frame
