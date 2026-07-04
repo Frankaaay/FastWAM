@@ -107,11 +107,18 @@ export DIFFSYNTH_MODEL_BASE_PATH=/data/home/maxliu/projects/FastWAM/checkpoints
 | loop 内启动 `ram_prefetch_batches=4` | 26.149s | 7.373s | 34.409s | 3.720 | 1634.301ms |
 | VAE load 前启动 `ram_prefetch_batches=16` | 6.987s | 6.487s | 13.648s | 9.379 | 436.685ms |
 
+补充长一点的生产参数 smoke：
+
+- 命令差异：`max_samples=8192`，`compile_encoder=true`，`compile_mode=default`，`sync_timing=false`，其它保持 `batch_size=8`、4 rank、`ram_prefetch_batches=16`。
+- 运行环境：仍与旧全量 VAE cache 任务并发，旧任务占用 GPU1-4 且持续读写 cache；本次使用 GPU0/5/6/7，CPU/DataLoader/I/O 会和旧任务竞争。
+- rank0 结果：`samples=2048`，`batches=256`，`data_wait=328.544s`，`encode=104.727s`，`save=2.470s`，`wall=435.862s`，`wall_samples_per_s=4.699`，`data_wait_ms_per_batch=1283.376`。
+- 4 rank 全局折算：约 `18.8 samples/s`，`0.587 steps/s`（这里 step 指每个 rank 各处理一个 batch 的 VAE cache 预计算 step，`batch_size=8`）。
+
 结论：
 
 - 只在 encode loop 内启动 RAM prefetch 没有解决首批 batch 等待，甚至略慢；这个版本不是有效方向。
 - 把 RAM prefetch 提前到 VAE load 之前启动后，dataset/DataLoader 的等待可以和 VAE 权重加载、warmup 重叠。当前 512-sample smoke 中，rank0 loop wall 从 32.339s 降到 13.648s，吞吐约提升 2.37x。
-- 这验证了“异构地先把 chunk 放 RAM，再让 VAE encode 读取”的方向是可行的；真正全量收益还需要用更长 shard、不同 `ram_prefetch_batches` 和主机 RAM 监控确认。
+- 这验证了“异构地先把 chunk 放 RAM，再让 VAE encode 读取”的方向是可行的；但 8192-sample smoke 显示，在同机已有全量 cache 任务并发时，长期速度主要被 `data_wait` 压住，batch 级 RAM prefetch 仍不够，需要继续提升到 episode/chunk 级缓存或减少保存/读取竞争。
 
 ## 远端 A/B 建议
 
