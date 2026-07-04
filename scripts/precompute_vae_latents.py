@@ -299,7 +299,6 @@ def main(cfg: DictConfig):
             shard_world_size,
         )
 
-    vae, model_id, vae_path = _load_vae(cfg, device=device, torch_dtype=torch_dtype)
     loader = DataLoader(
         **_build_dataloader_kwargs(
             dataset=Subset(dataset, local_indices),
@@ -309,6 +308,28 @@ def main(cfg: DictConfig):
             pin_memory=pin_memory,
         )
     )
+    prefetcher = None
+    if ram_prefetch_batches > 0:
+        prefetcher = AsyncBatchPrefetcher(
+            iter(loader),
+            max_prefetch=ram_prefetch_batches,
+            prepare_fn=lambda batch: _prepare_ram_batch(
+                batch,
+                dtype=torch_dtype,
+                pin_memory=pin_memory,
+                device=device,
+                to_dtype=ram_prefetch_to_dtype,
+            ),
+            name=f"vae-cache-ram-prefetch-{shard_rank}",
+        )
+        if rank == 0:
+            logger.info(
+                "Started RAM batch prefetch before VAE load: max_prefetch=%d to_dtype=%s",
+                ram_prefetch_batches,
+                ram_prefetch_to_dtype,
+            )
+
+    vae, model_id, vae_path = _load_vae(cfg, device=device, torch_dtype=torch_dtype)
 
     stats = {"new": 0, "overwrite": 0, "skip": skipped_existing if rank == 0 else 0}
     timing = {
@@ -329,22 +350,7 @@ def main(cfg: DictConfig):
         disable=is_distributed and rank != 0,
     ) as pbar:
         with torch.no_grad():
-            loader_iter = iter(loader)
-            prefetcher = None
-            if ram_prefetch_batches > 0:
-                prefetcher = AsyncBatchPrefetcher(
-                    loader_iter,
-                    max_prefetch=ram_prefetch_batches,
-                    prepare_fn=lambda batch: _prepare_ram_batch(
-                        batch,
-                        dtype=torch_dtype,
-                        pin_memory=pin_memory,
-                        device=device,
-                        to_dtype=ram_prefetch_to_dtype,
-                    ),
-                    name=f"vae-cache-ram-prefetch-{shard_rank}",
-                )
-                loader_iter = prefetcher
+            loader_iter = prefetcher if prefetcher is not None else iter(loader)
             try:
                 while True:
                     data_wait_start = time.perf_counter()
