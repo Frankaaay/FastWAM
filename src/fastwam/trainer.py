@@ -12,6 +12,7 @@ from omegaconf import DictConfig
 from torch.optim.lr_scheduler import ConstantLR, CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
 
+from .utils.async_prefetch import AsyncBatchPrefetcher
 from .utils.fs import ensure_dir
 from .utils.logging_config import get_logger, setup_logging
 from .utils.pytorch_utils import set_global_seed
@@ -31,6 +32,11 @@ class Wan22Trainer:
         self.weight_decay = float(cfg.weight_decay)
         self.batch_size = int(cfg.batch_size)
         self.num_workers = int(cfg.num_workers)
+        pin_memory_cfg = cfg.get("pin_memory", None)
+        self.pin_memory = torch.cuda.is_available() if pin_memory_cfg is None else bool(pin_memory_cfg)
+        self.prefetch_factor = cfg.get("prefetch_factor", None)
+        self.persistent_workers = bool(cfg.get("persistent_workers", False))
+        self.ram_prefetch_batches = int(cfg.get("ram_prefetch_batches", 0))
         self.num_epochs = int(cfg.num_epochs)
         max_steps = cfg.max_steps
         self.max_steps = int(max_steps) if max_steps is not None else None
@@ -69,6 +75,16 @@ class Wan22Trainer:
             self.max_grad_norm,
         )
         logger.info("using accelerator.device=%s", self.accelerator.device)
+        logger.info(
+            "Train DataLoader: batch_size=%d num_workers=%d pin_memory=%s prefetch_factor=%s "
+            "persistent_workers=%s ram_prefetch_batches=%d",
+            self.batch_size,
+            self.num_workers,
+            self.pin_memory,
+            self.prefetch_factor,
+            self.persistent_workers,
+            self.ram_prefetch_batches,
+        )
         worker_init_fn = set_global_seed(self.seed, get_worker_init_fn=True)
         self._assert_dataset_length_consistent(self.train_dataset, "train_dataset")
         if self.val_dataset is not None:
@@ -166,15 +182,38 @@ class Wan22Trainer:
             batch_size=self.batch_size,
             num_processes=self.accelerator.num_processes,
         )
-        return DataLoader(
-            dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            sampler=self.train_sampler,
-            num_workers=self.num_workers,
-            pin_memory=torch.cuda.is_available(),
-            worker_init_fn=worker_init_fn,
+        kwargs = {
+            "dataset": dataset,
+            "batch_size": self.batch_size,
+            "shuffle": False,
+            "sampler": self.train_sampler,
+            "num_workers": self.num_workers,
+            "pin_memory": self.pin_memory,
+            "worker_init_fn": worker_init_fn,
+        }
+        if self.num_workers > 0:
+            if self.prefetch_factor is not None:
+                kwargs["prefetch_factor"] = int(self.prefetch_factor)
+            kwargs["persistent_workers"] = self.persistent_workers
+        elif self.persistent_workers:
+            raise ValueError("`persistent_workers=true` requires `num_workers > 0`.")
+        return DataLoader(**kwargs)
+
+    def _build_train_iterator(self):
+        iterator = iter(self.train_loader)
+        if self.ram_prefetch_batches <= 0:
+            return iterator
+        return AsyncBatchPrefetcher(
+            iterator,
+            max_prefetch=self.ram_prefetch_batches,
+            name=f"train-ram-prefetch-{self.accelerator.process_index}",
         )
+
+    @staticmethod
+    def _close_iterator(iterator):
+        close = getattr(iterator, "close", None)
+        if close is not None:
+            close()
 
     def _assert_dataset_length_consistent(self, dataset, dataset_name: str):
         if not hasattr(dataset, "__len__"):
@@ -665,125 +704,129 @@ class Wan22Trainer:
             raise ValueError("`max_steps` must be set before entering the while-step training loop.")
 
         logger.info("Starting training with max_steps=%d.", self.max_steps)
-        data_iter = iter(self.train_loader)
+        data_iter = self._build_train_iterator()
         self.run_start_step = self.global_step
         self.run_start_time = time.perf_counter()
 
-        while self.global_step < self.max_steps:
-            try:
-                sample = next(data_iter)
-                self.batch_in_epoch += 1
-            except StopIteration:
-                self.epoch += 1
-                self.batch_in_epoch = 0
-                self.train_sampler.clear_resume_batch_offset()
-                data_iter = iter(self.train_loader)
-                continue
+        try:
+            while self.global_step < self.max_steps:
+                try:
+                    sample = next(data_iter)
+                    self.batch_in_epoch += 1
+                except StopIteration:
+                    self._close_iterator(data_iter)
+                    self.epoch += 1
+                    self.batch_in_epoch = 0
+                    self.train_sampler.clear_resume_batch_offset()
+                    data_iter = self._build_train_iterator()
+                    continue
 
-            with self.accelerator.accumulate(self.model):
-                train_model = self.model if hasattr(self.model, "training_loss") else self.accelerator.unwrap_model(self.model)
+                with self.accelerator.accumulate(self.model):
+                    train_model = self.model if hasattr(self.model, "training_loss") else self.accelerator.unwrap_model(self.model)
 
-                with self.accelerator.autocast():
-                    loss, loss_dict = train_model.training_loss(sample)
-                self.accelerator.backward(loss)
+                    with self.accelerator.autocast():
+                        loss, loss_dict = train_model.training_loss(sample)
+                    self.accelerator.backward(loss)
 
-                if self.accelerator.sync_gradients:
-                    grad_norm = self.accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-                    self.optimizer.step()
-                    if not self.accelerator.optimizer_step_was_skipped:
-                        self.scheduler.step()
-                    self.optimizer.zero_grad(set_to_none=True)
-                    self.global_step += 1
-                    global_loss = float(
-                        self.accelerator.gather(loss.detach().float().reshape(1)).mean().item()
-                    )
-                    global_loss_metrics = {}
-                    for key, value in loss_dict.items():
-                        metric_tensor = torch.tensor(float(value), device=loss.device, dtype=torch.float32).reshape(1)
-                        global_loss_metrics[key] = float(
-                            self.accelerator.gather(metric_tensor).mean().item()
+                    if self.accelerator.sync_gradients:
+                        grad_norm = self.accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                        self.optimizer.step()
+                        if not self.accelerator.optimizer_step_was_skipped:
+                            self.scheduler.step()
+                        self.optimizer.zero_grad(set_to_none=True)
+                        self.global_step += 1
+                        global_loss = float(
+                            self.accelerator.gather(loss.detach().float().reshape(1)).mean().item()
                         )
-                    grad_norm_tensor = torch.tensor(grad_norm, device=loss.device, dtype=torch.float32)
-                    global_grad_norm = float(self.accelerator.gather(grad_norm_tensor).mean().item())
-
-                    current_lr = float(self.optimizer.param_groups[0]["lr"])
-
-                    if self.log_every > 0 and self.global_step % self.log_every == 0 and self.accelerator.is_main_process:
-                        eta_str, steps_per_sec = self._estimate_eta()
-                        description = "[train] epoch=%d step=%d/%d loss=%.4f " % (
-                            self.epoch,
-                            self.global_step,
-                            self.max_steps,
-                            global_loss,
-                        )
-                        if global_loss_metrics:
-                            detail_str = " ".join([f"{k}={v:.4f}" for k, v in sorted(global_loss_metrics.items())])
-                            description += detail_str + " "
-                        description += "lr=%.2e speed=%.2f step/s, %.2f samples/s eta=%s" % (
-                            current_lr,
-                            steps_per_sec,
-                            steps_per_sec * self.batch_size * self.accelerator.num_processes,
-                            eta_str,
-                        )
-                        logger.info(description)
-
-                        wandb_payload = {
-                            "train/loss": global_loss,
-                            "train/grad_norm": global_grad_norm,
-                            "train/lr": current_lr,
-                            "performance/steps_per_sec": steps_per_sec,
-                            "performance/samples_per_sec": steps_per_sec * self.batch_size * self.accelerator.num_processes,
-                        }
-                        for key, value in global_loss_metrics.items():
-                            wandb_payload[f"train/{key}"] = value
-                        self._wandb_log(wandb_payload)
-
-                    if (
-                        self.eval_every > 0
-                        and self.val_dataset is not None
-                        and self.global_step % self.eval_every == 0
-                    ):
-                        metrics = self.evaluate()
-                        self.accelerator.wait_for_everyone()
-                        if metrics is not None and self.accelerator.is_main_process:
-                            description = "[eval] step=%d val_loss=%.4f" % (
-                                self.global_step,
-                                metrics["val_loss"],
+                        global_loss_metrics = {}
+                        for key, value in loss_dict.items():
+                            metric_tensor = torch.tensor(float(value), device=loss.device, dtype=torch.float32).reshape(1)
+                            global_loss_metrics[key] = float(
+                                self.accelerator.gather(metric_tensor).mean().item()
                             )
-                            if "action_l2" in metrics:
-                                description += " action_l2=%.4f" % metrics["action_l2"]
-                            if "action_l1" in metrics:
-                                description += " action_l1=%.4f" % metrics["action_l1"]
+                        grad_norm_tensor = torch.tensor(grad_norm, device=loss.device, dtype=torch.float32)
+                        global_grad_norm = float(self.accelerator.gather(grad_norm_tensor).mean().item())
+
+                        current_lr = float(self.optimizer.param_groups[0]["lr"])
+
+                        if self.log_every > 0 and self.global_step % self.log_every == 0 and self.accelerator.is_main_process:
+                            eta_str, steps_per_sec = self._estimate_eta()
+                            description = "[train] epoch=%d step=%d/%d loss=%.4f " % (
+                                self.epoch,
+                                self.global_step,
+                                self.max_steps,
+                                global_loss,
+                            )
+                            if global_loss_metrics:
+                                detail_str = " ".join([f"{k}={v:.4f}" for k, v in sorted(global_loss_metrics.items())])
+                                description += detail_str + " "
+                            description += "lr=%.2e speed=%.2f step/s, %.2f samples/s eta=%s" % (
+                                current_lr,
+                                steps_per_sec,
+                                steps_per_sec * self.batch_size * self.accelerator.num_processes,
+                                eta_str,
+                            )
                             logger.info(description)
-                            eval_payload = {
-                                "eval/val_loss": float(metrics["val_loss"]),
+
+                            wandb_payload = {
+                                "train/loss": global_loss,
+                                "train/grad_norm": global_grad_norm,
+                                "train/lr": current_lr,
+                                "performance/steps_per_sec": steps_per_sec,
+                                "performance/samples_per_sec": steps_per_sec * self.batch_size * self.accelerator.num_processes,
                             }
-                            if "action_l2" in metrics:
-                                eval_payload["eval/action_l2"] = float(metrics["action_l2"])
-                            if "action_l1" in metrics:
-                                eval_payload["eval/action_l1"] = float(metrics["action_l1"])
-                            self._wandb_log(eval_payload)
+                            for key, value in global_loss_metrics.items():
+                                wandb_payload[f"train/{key}"] = value
+                            self._wandb_log(wandb_payload)
 
-                    if self.save_every > 0 and self.global_step % self.save_every == 0:
-                        ckpt_info = self.save_checkpoint()
-                        if self.accelerator.is_main_process:
-                            logger.info(
-                                "[ckpt] step=%d weights=%s state=%s",
-                                self.global_step,
-                                ckpt_info["weights_path"],
-                                ckpt_info["state_path"],
-                            )
+                        if (
+                            self.eval_every > 0
+                            and self.val_dataset is not None
+                            and self.global_step % self.eval_every == 0
+                        ):
+                            metrics = self.evaluate()
+                            self.accelerator.wait_for_everyone()
+                            if metrics is not None and self.accelerator.is_main_process:
+                                description = "[eval] step=%d val_loss=%.4f" % (
+                                    self.global_step,
+                                    metrics["val_loss"],
+                                )
+                                if "action_l2" in metrics:
+                                    description += " action_l2=%.4f" % metrics["action_l2"]
+                                if "action_l1" in metrics:
+                                    description += " action_l1=%.4f" % metrics["action_l1"]
+                                logger.info(description)
+                                eval_payload = {
+                                    "eval/val_loss": float(metrics["val_loss"]),
+                                }
+                                if "action_l2" in metrics:
+                                    eval_payload["eval/action_l2"] = float(metrics["action_l2"])
+                                if "action_l1" in metrics:
+                                    eval_payload["eval/action_l1"] = float(metrics["action_l1"])
+                                self._wandb_log(eval_payload)
 
-                    if self.global_step >= self.max_steps:
-                        ckpt_info = self.save_checkpoint()
-                        if self.accelerator.is_main_process:
-                            logger.info(
-                                "[done] max_steps reached step=%d weights=%s state=%s",
-                                self.global_step,
-                                ckpt_info["weights_path"],
-                                ckpt_info["state_path"],
-                            )
-                        return
+                        if self.save_every > 0 and self.global_step % self.save_every == 0:
+                            ckpt_info = self.save_checkpoint()
+                            if self.accelerator.is_main_process:
+                                logger.info(
+                                    "[ckpt] step=%d weights=%s state=%s",
+                                    self.global_step,
+                                    ckpt_info["weights_path"],
+                                    ckpt_info["state_path"],
+                                )
+
+                        if self.global_step >= self.max_steps:
+                            ckpt_info = self.save_checkpoint()
+                            if self.accelerator.is_main_process:
+                                logger.info(
+                                    "[done] max_steps reached step=%d weights=%s state=%s",
+                                    self.global_step,
+                                    ckpt_info["weights_path"],
+                                    ckpt_info["state_path"],
+                                )
+                            return
+        finally:
+            self._close_iterator(data_iter)
 
         ckpt_info = self.save_checkpoint()
         if self.accelerator.is_main_process:

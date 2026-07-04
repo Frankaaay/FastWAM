@@ -1,5 +1,7 @@
 import logging
+import inspect
 import os
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,7 @@ from tqdm import tqdm
 
 from fastwam.models.wan22.helpers.loader import _load_registered_model, _resolve_configs
 from fastwam.runtime import _mixed_precision_to_model_dtype, _normalize_mixed_precision
+from fastwam.utils.async_prefetch import AsyncBatchPrefetcher
 from fastwam.utils.config_resolvers import register_default_resolvers
 from fastwam.utils.logging_config import get_logger, setup_logging
 from fastwam.utils import misc
@@ -83,6 +86,7 @@ def _instantiate_train_dataset_without_cache(cfg: DictConfig):
     train_cfg = OmegaConf.create(OmegaConf.to_container(cfg.data.train, resolve=True))
     train_cfg["vae_latent_cache_dir"] = None
     train_cfg["vae_latent_cache_keep_video"] = True
+    train_cfg["vae_latent_cache_precompute_only"] = True
     return instantiate(train_cfg)
 
 
@@ -121,6 +125,62 @@ def _filter_indices(dataset, indices: list[int], *, cache_dir: Path, overwrite: 
         else:
             remaining.append(idx)
     return remaining, skipped
+
+
+def _to_tuple2(value: Any, *, name: str) -> tuple[int, int]:
+    if len(value) != 2:
+        raise ValueError(f"`{name}` must contain exactly 2 integers, got {value!r}")
+    return int(value[0]), int(value[1])
+
+
+def _sync_if_needed(device: str, enabled: bool) -> None:
+    if enabled and str(device).startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def _build_dataloader_kwargs(*, dataset, batch_size: int, num_workers: int, cache_cfg, pin_memory: bool) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "dataset": dataset,
+        "batch_size": batch_size,
+        "shuffle": False,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+    }
+    if num_workers > 0:
+        prefetch_factor = cache_cfg.get("prefetch_factor", None)
+        if prefetch_factor is not None:
+            kwargs["prefetch_factor"] = int(prefetch_factor)
+        kwargs["persistent_workers"] = _to_bool(cache_cfg.get("persistent_workers", False))
+    elif _to_bool(cache_cfg.get("persistent_workers", False)):
+        raise ValueError("vae_latent_cache.persistent_workers=true requires num_workers > 0.")
+
+    in_order = cache_cfg.get("in_order", None)
+    if in_order is not None:
+        if "in_order" not in inspect.signature(DataLoader).parameters:
+            raise ValueError("vae_latent_cache.in_order is not supported by this PyTorch DataLoader.")
+        kwargs["in_order"] = _to_bool(in_order)
+    return kwargs
+
+
+def _prepare_ram_batch(
+    batch: dict[str, Any],
+    *,
+    dtype: torch.dtype,
+    pin_memory: bool,
+    device: str,
+    to_dtype: bool,
+) -> dict[str, Any]:
+    if not to_dtype and not pin_memory:
+        return batch
+    prepared = dict(batch)
+    for key in ("video", "history_video"):
+        tensor = prepared[key]
+        if to_dtype:
+            tensor = tensor.to(dtype=dtype)
+        if pin_memory and str(device).startswith("cuda") and torch.cuda.is_available():
+            tensor = tensor.pin_memory()
+        prepared[key] = tensor
+    return prepared
 
 
 @hydra.main(config_path="../configs", config_name="train", version_base="1.3")
@@ -165,8 +225,14 @@ def main(cfg: DictConfig):
         shard_world_size = world_size
         shard_rank = rank
     tiled = _to_bool(cache_cfg.get("tiled", False))
-    tile_size = tuple(cache_cfg.get("tile_size", (30, 52)))
-    tile_stride = tuple(cache_cfg.get("tile_stride", (15, 26)))
+    tile_size = _to_tuple2(cache_cfg.get("tile_size", (30, 52)), name="vae_latent_cache.tile_size")
+    tile_stride = _to_tuple2(cache_cfg.get("tile_stride", (15, 26)), name="vae_latent_cache.tile_stride")
+    pin_memory_cfg = cache_cfg.get("pin_memory", None)
+    pin_memory = torch.cuda.is_available() if pin_memory_cfg is None else _to_bool(pin_memory_cfg)
+    ram_prefetch_batches = int(cache_cfg.get("ram_prefetch_batches", 0))
+    ram_prefetch_to_dtype = _to_bool(cache_cfg.get("ram_prefetch_to_dtype", True))
+    log_timing = _to_bool(cache_cfg.get("log_timing", False))
+    sync_timing = _to_bool(cache_cfg.get("sync_timing", log_timing))
 
     if torch.cuda.is_available():
         device = f"cuda:{local_rank}" if is_distributed else "cuda"
@@ -178,7 +244,8 @@ def main(cfg: DictConfig):
     if rank == 0:
         logger.info(
             "Precomputing VAE latents: cache_dir=%s overwrite=%s batch_size=%d num_workers=%d "
-            "max_samples=%s device=%s dtype=%s tiled=%s shard=%d/%d distributed=%s",
+            "max_samples=%s device=%s dtype=%s tiled=%s pin_memory=%s prefetch_factor=%s "
+            "persistent_workers=%s ram_prefetch_batches=%d ram_prefetch_to_dtype=%s shard=%d/%d distributed=%s",
             cache_dir,
             overwrite,
             batch_size,
@@ -187,6 +254,11 @@ def main(cfg: DictConfig):
             device,
             torch_dtype,
             tiled,
+            pin_memory,
+            cache_cfg.get("prefetch_factor", None),
+            cache_cfg.get("persistent_workers", False),
+            ram_prefetch_batches,
+            ram_prefetch_to_dtype,
             shard_rank,
             shard_world_size,
             is_distributed,
@@ -222,14 +294,26 @@ def main(cfg: DictConfig):
 
     vae, model_id, vae_path = _load_vae(cfg, device=device, torch_dtype=torch_dtype)
     loader = DataLoader(
-        Subset(dataset, local_indices),
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=torch.cuda.is_available(),
+        **_build_dataloader_kwargs(
+            dataset=Subset(dataset, local_indices),
+            batch_size=batch_size,
+            num_workers=num_workers,
+            cache_cfg=cache_cfg,
+            pin_memory=pin_memory,
+        )
     )
 
     stats = {"new": 0, "overwrite": 0, "skip": skipped_existing if rank == 0 else 0}
+    timing = {
+        "batches": 0,
+        "samples": 0,
+        "wall_seconds": 0.0,
+        "data_wait_seconds": 0.0,
+        "h2d_seconds": 0.0,
+        "encode_seconds": 0.0,
+        "save_seconds": 0.0,
+    }
+    wall_start = time.perf_counter()
     with tqdm(
         total=len(local_indices),
         desc=f"VAE latents shard {shard_rank}/{shard_world_size}",
@@ -238,48 +322,91 @@ def main(cfg: DictConfig):
         disable=is_distributed and rank != 0,
     ) as pbar:
         with torch.no_grad():
-            for batch in loader:
-                video = batch["video"].to(device=device, dtype=torch_dtype, non_blocking=True)
-                history_video = batch["history_video"].to(
-                    device=device,
-                    dtype=torch_dtype,
-                    non_blocking=True,
+            loader_iter = iter(loader)
+            prefetcher = None
+            if ram_prefetch_batches > 0:
+                prefetcher = AsyncBatchPrefetcher(
+                    loader_iter,
+                    max_prefetch=ram_prefetch_batches,
+                    prepare_fn=lambda batch: _prepare_ram_batch(
+                        batch,
+                        dtype=torch_dtype,
+                        pin_memory=pin_memory,
+                        device=device,
+                        to_dtype=ram_prefetch_to_dtype,
+                    ),
+                    name=f"vae-cache-ram-prefetch-{shard_rank}",
                 )
-                input_latents = vae.encode(
-                    video,
-                    device=device,
-                    tiled=tiled,
-                    tile_size=tile_size,
-                    tile_stride=tile_stride,
-                )
-                history_video_latents = vae.encode(
-                    history_video,
-                    device=device,
-                    tiled=tiled,
-                    tile_size=tile_size,
-                    tile_stride=tile_stride,
-                )
-
-                sample_indices = batch["sample_idx"].detach().cpu().tolist()
-                for i, sample_idx in enumerate(sample_indices):
-                    cache_path = dataset.vae_latent_cache_path(sample_idx, cache_dir)
-                    if cache_path.exists() and not overwrite:
-                        stats["skip"] += 1
-                        continue
-                    if cache_path.exists():
-                        stats["overwrite"] += 1
-                    else:
-                        stats["new"] += 1
-                    payload = dataset.make_vae_latent_cache_payload(
-                        sample_idx=int(sample_idx),
-                        input_latents=input_latents[i],
-                        history_video_latents=history_video_latents[i],
-                        model_id=model_id,
-                        vae_path=vae_path,
+                loader_iter = prefetcher
+            try:
+                while True:
+                    data_wait_start = time.perf_counter()
+                    try:
+                        batch = next(loader_iter)
+                    except StopIteration:
+                        break
+                    data_wait_end = time.perf_counter()
+                    _sync_if_needed(device, sync_timing)
+                    h2d_start = time.perf_counter()
+                    video = batch["video"].to(device=device, dtype=torch_dtype, non_blocking=True)
+                    history_video = batch["history_video"].to(
+                        device=device,
+                        dtype=torch_dtype,
+                        non_blocking=True,
                     )
-                    _atomic_torch_save(payload, cache_path)
+                    _sync_if_needed(device, sync_timing)
+                    h2d_end = time.perf_counter()
+                    input_latents = vae.encode(
+                        video,
+                        device=device,
+                        tiled=tiled,
+                        tile_size=tile_size,
+                        tile_stride=tile_stride,
+                    )
+                    history_video_latents = vae.encode(
+                        history_video,
+                        device=device,
+                        tiled=tiled,
+                        tile_size=tile_size,
+                        tile_stride=tile_stride,
+                    )
+                    _sync_if_needed(device, sync_timing)
+                    encode_end = time.perf_counter()
 
-                pbar.update(len(sample_indices))
+                    sample_indices = batch["sample_idx"].detach().cpu().tolist()
+                    save_start = time.perf_counter()
+                    for i, sample_idx in enumerate(sample_indices):
+                        cache_path = dataset.vae_latent_cache_path(sample_idx, cache_dir)
+                        if cache_path.exists() and not overwrite:
+                            stats["skip"] += 1
+                            continue
+                        if cache_path.exists():
+                            stats["overwrite"] += 1
+                        else:
+                            stats["new"] += 1
+                        payload = dataset.make_vae_latent_cache_payload(
+                            sample_idx=int(sample_idx),
+                            input_latents=input_latents[i],
+                            history_video_latents=history_video_latents[i],
+                            model_id=model_id,
+                            vae_path=vae_path,
+                        )
+                        _atomic_torch_save(payload, cache_path)
+                    save_end = time.perf_counter()
+
+                    if log_timing:
+                        timing["batches"] += 1
+                        timing["samples"] += len(sample_indices)
+                        timing["data_wait_seconds"] += data_wait_end - data_wait_start
+                        timing["h2d_seconds"] += h2d_end - h2d_start
+                        timing["encode_seconds"] += encode_end - h2d_end
+                        timing["save_seconds"] += save_end - save_start
+
+                    pbar.update(len(sample_indices))
+            finally:
+                if prefetcher is not None:
+                    prefetcher.close()
+    timing["wall_seconds"] = time.perf_counter() - wall_start
 
     if is_distributed:
         reduce_device = torch.device(device) if str(device).startswith("cuda") else torch.device("cpu")
@@ -303,6 +430,25 @@ def main(cfg: DictConfig):
             stats["overwrite"],
             stats["skip"],
         )
+        if log_timing and timing["samples"] > 0:
+            active_seconds = timing["h2d_seconds"] + timing["encode_seconds"] + timing["save_seconds"]
+            logger.info(
+                "VAE latent precompute timing: samples=%d batches=%d data_wait=%.3fs "
+                "h2d=%.3fs encode=%.3fs save=%.3fs active=%.3fs wall=%.3fs "
+                "wall_samples_per_s=%.3f data_wait_ms_per_batch=%.3f",
+                timing["samples"],
+                timing["batches"],
+                timing["data_wait_seconds"],
+                timing["h2d_seconds"],
+                timing["encode_seconds"],
+                timing["save_seconds"],
+                active_seconds,
+                timing["wall_seconds"],
+                timing["samples"] / timing["wall_seconds"] if timing["wall_seconds"] > 0 else float("nan"),
+                1000.0 * timing["data_wait_seconds"] / timing["batches"]
+                if timing["batches"] > 0
+                else float("nan"),
+            )
 
     if is_distributed and dist.is_initialized():
         dist.barrier()
