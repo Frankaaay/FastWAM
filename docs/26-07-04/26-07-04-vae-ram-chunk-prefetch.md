@@ -45,6 +45,24 @@ python -m py_compile \
 
 结果：通过，无语法错误。
 
+## 远端 smoke 记录
+
+运行位置：
+
+```bash
+cd /data/home/maxliu/projects/FastWAM_worktrees/feature-vae-ram-chunk-prefetch
+```
+
+第一次远端运行在进入预计算前失败：
+
+```text
+ModuleNotFoundError: No module named 'fastwam.utils.async_prefetch'
+```
+
+原因：远端 `fastwam` conda 环境中已有安装版 `fastwam` 包，`scripts/precompute_vae_latents.py` 没有优先插入当前 checkout 的 `src/`，导致新加的 `fastwam.utils.async_prefetch` 不可见。
+
+修复：在脚本入口加入 `REPO_ROOT` / `SRC_ROOT` 到 `sys.path`，与旧测速分支的脚本入口保持一致。
+
 ## 远端 A/B 建议
 
 预计算先做小样本 A/B，不要一上来跑全量：

@@ -1,10 +1,17 @@
 import logging
 import inspect
 import os
+import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = REPO_ROOT / "src"
+for path in (REPO_ROOT, SRC_ROOT):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 import hydra
 import torch
