@@ -114,11 +114,67 @@ export DIFFSYNTH_MODEL_BASE_PATH=/data/home/maxliu/projects/FastWAM/checkpoints
 - rank0 结果：`samples=2048`，`batches=256`，`data_wait=328.544s`，`encode=104.727s`，`save=2.470s`，`wall=435.862s`，`wall_samples_per_s=4.699`，`data_wait_ms_per_batch=1283.376`。
 - 4 rank 全局折算：约 `18.8 samples/s`，`0.587 steps/s`（这里 step 指每个 rank 各处理一个 batch 的 VAE cache 预计算 step，`batch_size=8`）。
 
-结论：
+预计算路径结论：
 
 - 只在 encode loop 内启动 RAM prefetch 没有解决首批 batch 等待，甚至略慢；这个版本不是有效方向。
 - 把 RAM prefetch 提前到 VAE load 之前启动后，dataset/DataLoader 的等待可以和 VAE 权重加载、warmup 重叠。当前 512-sample smoke 中，rank0 loop wall 从 32.339s 降到 13.648s，吞吐约提升 2.37x。
-- 这验证了“异构地先把 chunk 放 RAM，再让 VAE encode 读取”的方向是可行的；但 8192-sample smoke 显示，在同机已有全量 cache 任务并发时，长期速度主要被 `data_wait` 压住，batch 级 RAM prefetch 仍不够，需要继续提升到 episode/chunk 级缓存或减少保存/读取竞争。
+- 这只验证了 VAE cache 预计算路径里“异构地先把 chunk 放 RAM，再让 VAE encode 读取”的方向是可行的；它不是训练吞吐结论。8192-sample smoke 显示，在同机已有全量 cache 任务并发时，长期速度主要被 `data_wait` 压住，batch 级 RAM prefetch 仍不够，需要继续提升到 episode/chunk 级缓存或减少保存/读取竞争。
+
+## 远端训练内 8 卡 A/B 结果
+
+运行机器：`h200-qinghua-1`
+
+运行分支/路径：
+
+- 分支：`feature/vae-ram-chunk-prefetch`
+- 远端测试 worktree：`/data/home/maxliu/projects/FastWAM_worktrees/feature-vae-ram-chunk-prefetch-train8`
+- 代码 commit：`9f208d7`
+- 测试产物目录：`/data/home/maxliu/projects/FastWAM_train_bench_20260704`
+
+共同参数：
+
+- 入口：`bash scripts/train_fold_clothv4_v4_2epoch.sh`
+- 8 卡：`CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`
+- `max_steps=80`，`log_every=10`，`eval_every=0`，`save_every=0`，`wandb.enabled=false`
+- `batch_size=16` 每卡，global batch size = 128 samples/step
+- `num_workers=8`，`pin_memory=true`，`persistent_workers=true`，`prefetch_factor=4`
+- 显式设置 `PYTHONPATH=$PWD/src:$PWD`，避免远端 conda 环境导入主仓库旧版 `fastwam`
+- 显式设置：
+  - `DIFFSYNTH_MODEL_BASE_PATH=/data/home/maxliu/projects/FastWAM/checkpoints`
+  - `model.action_dit_pretrained_path=/data/home/maxliu/projects/FastWAM/checkpoints/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt`
+  - `data.train.pretrained_norm_stats=/data/home/maxliu/projects/FastWAM/runs/fold_clothv4_v4_2epoch/profile_trace_fold_clothv4_v4_20260702_234956/dataset_stats.json`
+
+sanity 记录：
+
+- 直接在 detached feature worktree 里跑训练会找不到相对路径 `checkpoints/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt`；已用主仓库 checkpoint 绝对路径覆盖。
+- `max_steps=2` 的 8 卡 sanity 完成真实 forward/backward/optimizer step，并确认日志来自 feature worktree 的 `src/fastwam/trainer.py`。
+- `accelerate`/`tee` 在 `max_steps reached` 后存在父进程退出不干净的问题，但 GPU 已释放；测试后按 run id 清理父进程。
+
+结果摘要：
+
+| 配置 | step80 累计 step/s | step80 累计 samples/s | step60-80 区间 step/s | step60-80 区间 samples/s | 日志 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| tuned DataLoader，`ram_prefetch_batches=0` | 0.31 | 40.32 | 0.351 | 44.9 | `logs/bench_train8_noram_tuned_20260704_80.log` |
+| tuned DataLoader，`ram_prefetch_batches=16` | 0.30 | 38.98 | 0.345 | 44.1 | `logs/bench_train8_ram16_tuned_20260704_80.log` |
+
+关键日志：
+
+```text
+# ram_prefetch_batches=0
+07/04 [22:53:30] step=60/80 speed=0.31 step/s, 39.04 samples/s
+07/04 [22:54:27] step=80/80 speed=0.31 step/s, 40.32 samples/s
+
+# ram_prefetch_batches=16
+07/04 [23:17:11] step=60/80 speed=0.29 step/s, 37.55 samples/s
+07/04 [23:18:09] step=80/80 speed=0.30 step/s, 38.98 samples/s
+```
+
+训练内结论：
+
+- 在真实训练 forward/backward 路径中，`ram_prefetch_batches=16` 没有带来吞吐提升；80 step 累计吞吐比 no-RAM tuned DataLoader 低约 3.3%，step60-80 稳定区间低约 1.7%，基本可视为无收益或轻微负收益。
+- 稳定后速度约 `44-45 samples/s`，折合约 `0.35 steps/s`；如果使用 trainer 累计日志口径，到 step80 是 `39-40 samples/s`，约 `0.30-0.31 steps/s`。
+- 当前实现只把下一批 raw chunk/batch 从 DataLoader 异步拉进 RAM，能重叠的是 CPU/I/O/解码等待；训练中的 VAE encode 本身仍在当前 GPU forward 内执行，不能被这个 RAM 队列加速。
+- 对这组 8 卡训练，tuned DataLoader 已经基本把 host-side batch 准备隐藏在 GPU forward/backward 后面。继续单纯加深 RAM batch queue 不是主要加速方向；下一步应考虑训练直接读取已经生成的 VAE latent cache，或把异步粒度提升到 episode/chunk 级，减少相邻窗口重复 decode/encode。
 
 ## 远端 A/B 建议
 
@@ -182,10 +238,10 @@ python scripts/train.py \
 
 ## 当前结论
 
-这是一个安全的第一层试验：它复用 DataLoader/worker 的读取机制，只增加有界 RAM 队列来重叠 CPU 数据准备与 VAE load/encode。远端 smoke 已确认早启动 RAM prefetch 对当前卡顿有效，但它仍是 batch 级缓存，不保证解决所有卡顿；如果全量运行中 `data_wait_ms_per_batch` 仍高，下一步应改成 episode/chunk 级缓存，避免相邻窗口反复 decode 同一段视频。
+这是一个安全的第一层试验：它复用 DataLoader/worker 的读取机制，只增加有界 RAM 队列来重叠 CPU 数据准备与 VAE load/encode。远端 precompute-only smoke 已确认早启动 RAM prefetch 对 VAE cache 预计算的前期等待有效，但 8 卡真实训练 A/B 没有看到吞吐提升。训练加速不能只看预计算脚本，必须以训练 loop 的 forward/backward speed 为准。
 
 ## 下一步
 
-1. 在远端用更长 shard 做 `ram_prefetch_batches=0/8/16/32` A/B。
-2. 对比 `data_wait_ms_per_batch`、wall samples/s、显存和主机 RAM。
-3. 如果收益有限，再把缓存粒度从 batch 提升到 episode/chunk，优先复用相邻窗口共享的视频帧。
+1. 如果继续优化训练吞吐，优先接入训练读取 VAE latent cache，绕过训练内 VAE encode，而不是继续增大 batch RAM prefetch queue。
+2. 如果仍要走在线 encode，下一步需要 profile `training_loss` 内 VAE encode、DiT forward/backward、DataLoader wait 的真实占比，确认瓶颈是否已经从 host-side 等待转到 GPU compute。
+3. 如果 host-side 等待在更大规模训练中重新出现，再把缓存粒度从 batch 提升到 episode/chunk，优先复用相邻窗口共享的视频帧。
