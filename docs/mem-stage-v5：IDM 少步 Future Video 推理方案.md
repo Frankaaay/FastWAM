@@ -100,27 +100,45 @@ v5 cache 语义和 v4 不同：
 
 ## 四、核心参数
 
-旧 IDM 只有一个 `num_inference_steps`，同时用于 video stage 和 action stage。v5 应拆成两个参数：
+旧 IDM 只有一个 `num_inference_steps`，同时用于 video stage 和 action stage；future video 的长度则由 `num_video_frames` 间接决定。v5 应把这两类因素拆开：
 
 ```yaml
 inference:
-  num_video_inference_steps: 1   # or 2
-  num_action_inference_steps: 10
+  num_future_video_latent_chunks: 1  # 生成几个 future video latent chunk
+  num_video_inference_steps: 1       # future video denoise steps, e.g. 1 or 2
+  num_action_inference_steps: 10     # action denoise steps
 ```
 
 模型接口建议：
 
 ```python
-infer_action(
+infer_action_v5_idm(
     ...,
     history_video=...,
     history_action=...,
+    num_future_video_latent_chunks=1,
     num_video_inference_steps=1,
     num_action_inference_steps=10,
 )
 ```
 
+参数含义：
+
+- `num_future_video_latent_chunks`：控制 future suffix 的 latent 时间长度。`1` 是最小 future imagination，只给 action 一个短程未来 chunk；`2` 则给更长一点的未来视野。它不应裁掉 history/current clean prefix。
+- `num_video_inference_steps`：控制 future video suffix 从 Gaussian noise 被 denoise 几步。1-2 step 很可能视觉上仍 noisy，但可能已经能提供有用的短程状态/接触提示。
+- `num_action_inference_steps`：保持 action branch 的 denoise 质量，例如继续用 10 step。
+
 代码层面，任意正整数 step 都由 scheduler 支持。`WanContinuousFlowMatchScheduler.build_inference_schedule` 只要求 `num_inference_steps > 0`，然后用 `torch.linspace` 构造 schedule；DiT 本身只是吃当前 timestep 做 forward。也就是说，step 数是外层 scheduler/loop 决定的，不是 Wan DiT 内部固定能力。
+
+### 4.1 latent chunk 数 vs 低帧率
+
+第一版 v5 不直接做“同样时长、低帧率 future video”的重采样实验，而是先用 `num_future_video_latent_chunks` 控制 future suffix 长度。原因：
+
+- Wan/FastWAM 的 raw video 时间长度需要满足 `T % 4 == 1`，VAE 会把 raw frame 时间轴压成 latent 时间轴。
+- `num_future_video_latent_chunks=1` 并不是只生成一张 raw frame，而是生成一个短程 future latent unit。
+- 真正的低帧率方案会牵涉数据采样间隔、position id、action-video 对齐，不是一个单独推理参数。
+
+因此第一轮优先回答更干净的问题：在保留完整 history/current prefix 的情况下，额外加入 1-2 个 predicted future latent chunk，是否能改善 action robustness。
 
 ## 五、clean prefix reset 设计
 
@@ -315,13 +333,14 @@ future_action noisy query
 
 优先做小矩阵，不一上来大训练：
 
-|实验|video steps|action steps|目的|
-|---|---:|---:|---|
-|v4 baseline|0|10|当前 action-only 基线|
-|v5-idm-1v|1|10|最小 future video imagination|
-|v5-idm-2v|2|10|稍强 future video imagination|
-|v5-idm-4v|4|10|观察收益是否继续增长|
-|old-idm sanity|1/2/4/10|同 video|只验证旧实现趋势，非最终结论|
+|实验|future latent chunks|video steps|action steps|目的|
+|---|---:|---:|---:|---|
+|v4 baseline|0|0|10|当前 action-only 基线|
+|v5-idm-1c-1v|1|1|10|最小 future video imagination|
+|v5-idm-1c-2v|1|2|10|同样短 horizon，稍多 video denoise|
+|v5-idm-2c-1v|2|1|10|更长一点 future horizon|
+|v5-idm-2c-2v|2|2|10|更长 horizon + 稍多 denoise|
+|old-idm sanity|由 `num_video_frames` 间接决定|1/2/4/10|同 video|只验证旧实现趋势，非最终结论|
 
 指标：
 

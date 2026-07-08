@@ -1298,6 +1298,356 @@ class FastWAM(torch.nn.Module):
         return self.action_expert.post_dit(action_tokens, action_pre)
 
     @torch.no_grad()
+    def infer_action_v5_idm(
+        self,
+        prompt: Optional[str],
+        input_image: torch.Tensor,
+        action_horizon: int,
+        history_video: torch.Tensor,
+        history_action: torch.Tensor,
+        history_video_is_pad: Optional[torch.Tensor] = None,
+        history_action_is_pad: Optional[torch.Tensor] = None,
+        proprio: Optional[torch.Tensor] = None,
+        context: Optional[torch.Tensor] = None,
+        context_mask: Optional[torch.Tensor] = None,
+        negative_prompt: Optional[str] = None,
+        text_cfg_scale: float = 1.0,
+        num_future_video_latent_chunks: int = 1,
+        num_video_inference_steps: int = 1,
+        num_action_inference_steps: int = 10,
+        sigma_shift: Optional[float] = None,
+        seed: Optional[int] = None,
+        rand_device: str = "cpu",
+        tiled: bool = False,
+        return_video_latents: bool = False,
+    ) -> dict[str, Any]:
+        del negative_prompt, text_cfg_scale
+        self.eval()
+        if str(getattr(self.video_expert, "video_attention_mask_mode", "")) != "first_frame_causal":
+            raise ValueError(
+                "`infer_action_v5_idm` requires `video_attention_mask_mode='first_frame_causal'`."
+            )
+        if not self.enable_mem_stage_v4:
+            raise ValueError("mem-stage-v5 IDM inference is only enabled for base FastWAM.")
+        if num_future_video_latent_chunks <= 0:
+            raise ValueError(
+                "`num_future_video_latent_chunks` must be positive, "
+                f"got {num_future_video_latent_chunks}."
+            )
+        if num_video_inference_steps <= 0:
+            raise ValueError(f"`num_video_inference_steps` must be positive, got {num_video_inference_steps}.")
+        if num_action_inference_steps <= 0:
+            raise ValueError(f"`num_action_inference_steps` must be positive, got {num_action_inference_steps}.")
+
+        if input_image.ndim == 3:
+            input_image = input_image.unsqueeze(0)
+        if input_image.ndim != 4 or input_image.shape[0] != 1 or input_image.shape[1] != 3:
+            raise ValueError(
+                f"`input_image` must have shape [1,3,H,W] or [3,H,W], got {tuple(input_image.shape)}"
+            )
+        _, _, height, width = input_image.shape
+        if height % 16 != 0 or width % 16 != 0:
+            raise ValueError(
+                f"`input_image` must be resized before infer, expected multiples of 16 but got HxW=({height},{width})"
+            )
+        if proprio is not None:
+            if self.proprio_dim is None:
+                raise ValueError("`proprio` was provided but `proprio_dim=None` so `proprio_encoder` is disabled.")
+            if proprio.ndim == 1:
+                proprio = proprio.unsqueeze(0)
+            elif proprio.ndim == 2 and proprio.shape[0] == 1:
+                pass
+            else:
+                raise ValueError(f"`proprio` must be [D] or [1,D], got shape {tuple(proprio.shape)}")
+            if proprio.shape[1] != self.proprio_dim:
+                raise ValueError(f"`proprio` last dim must be {self.proprio_dim}, got {proprio.shape[1]}")
+            proprio = proprio.to(device=self.device, dtype=self.torch_dtype)
+
+        if history_video is None or history_action is None:
+            raise ValueError("v5 IDM inference requires both `history_video` and `history_action`.")
+        if history_video.ndim == 4:
+            history_video = history_video.unsqueeze(0)
+        if history_video.ndim != 5 or history_video.shape[0] != 1 or history_video.shape[1] != 3:
+            raise ValueError(
+                "`history_video` must have shape [3,T,H,W] or [1,3,T,H,W], "
+                f"got {tuple(history_video.shape)}"
+            )
+        if history_video.shape[3] != height or history_video.shape[4] != width:
+            raise ValueError(
+                "`history_video` spatial shape must match `input_image`, "
+                f"got {tuple(history_video.shape[3:])} vs {(height, width)}"
+            )
+        if history_video.shape[2] % 4 != 1:
+            raise ValueError(f"`history_video` T must satisfy T % 4 == 1, got {history_video.shape[2]}")
+        if history_action.ndim == 2:
+            history_action = history_action.unsqueeze(0)
+        if history_action.ndim != 3 or history_action.shape[0] != 1:
+            raise ValueError(
+                "`history_action` must have shape [T,D] or [1,T,D], "
+                f"got {tuple(history_action.shape)}"
+            )
+        if history_action.shape[2] != self.action_expert.action_dim:
+            raise ValueError(
+                f"`history_action` last dim must be {self.action_expert.action_dim}, got {history_action.shape[2]}"
+            )
+        if history_video_is_pad is not None:
+            if history_video_is_pad.ndim == 1:
+                history_video_is_pad = history_video_is_pad.unsqueeze(0)
+            if history_video_is_pad.shape != (1, history_video.shape[2]):
+                raise ValueError(
+                    "`history_video_is_pad` shape mismatch: "
+                    f"got {tuple(history_video_is_pad.shape)} vs expected {(1, history_video.shape[2])}"
+                )
+            history_video_is_pad = history_video_is_pad.to(device=self.device, dtype=torch.bool)
+        if history_action_is_pad is not None:
+            if history_action_is_pad.ndim == 1:
+                history_action_is_pad = history_action_is_pad.unsqueeze(0)
+            if history_action_is_pad.shape != history_action.shape[:2]:
+                raise ValueError(
+                    "`history_action_is_pad` shape mismatch: "
+                    f"got {tuple(history_action_is_pad.shape)} vs expected {tuple(history_action.shape[:2])}"
+                )
+            history_action_is_pad = history_action_is_pad.to(device=self.device, dtype=torch.bool)
+
+        video_generator = None if seed is None else torch.Generator(device=rand_device).manual_seed(seed)
+        action_generator = None if seed is None else torch.Generator(device=rand_device).manual_seed(seed)
+        latents_action = torch.randn(
+            (1, action_horizon, self.action_expert.action_dim),
+            generator=action_generator,
+            device=rand_device,
+            dtype=torch.float32,
+        ).to(device=self.device, dtype=self.torch_dtype)
+
+        use_prompt = prompt is not None
+        use_context = context is not None or context_mask is not None
+        if use_prompt and use_context:
+            raise ValueError("`prompt` and `context/context_mask` are mutually exclusive.")
+        if not use_prompt and not use_context:
+            raise ValueError("Either `prompt` or both `context/context_mask` must be provided.")
+        if use_prompt:
+            context, context_mask = self.encode_prompt(prompt)
+        else:
+            if context is None or context_mask is None:
+                raise ValueError("`context` and `context_mask` must be both provided together.")
+            if context.ndim == 2:
+                context = context.unsqueeze(0)
+            if context_mask.ndim == 1:
+                context_mask = context_mask.unsqueeze(0)
+            if context.ndim != 3 or context_mask.ndim != 2:
+                raise ValueError(
+                    f"`context/context_mask` must be [B,L,D]/[B,L], got {tuple(context.shape)} and {tuple(context_mask.shape)}"
+                )
+            context = context.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
+            context_mask = context_mask.to(device=self.device, dtype=torch.bool, non_blocking=True)
+        if proprio is not None:
+            context, context_mask = self._append_proprio_to_context(
+                context=context,
+                context_mask=context_mask,
+                proprio=proprio,
+            )
+
+        history_video = history_video.to(device=self.device, dtype=self.torch_dtype)
+        history_action = history_action.to(device=self.device, dtype=self.torch_dtype)
+        history_video_latents = self._encode_video_latents(history_video, tiled=tiled)
+        clean_prefix_latent_frames = int(history_video_latents.shape[2])
+        if clean_prefix_latent_frames <= 0:
+            raise ValueError("v5 IDM inference requires non-empty `history_video` latents.")
+
+        future_video_latents = torch.randn(
+            (
+                1,
+                history_video_latents.shape[1],
+                int(num_future_video_latent_chunks),
+                history_video_latents.shape[3],
+                history_video_latents.shape[4],
+            ),
+            generator=video_generator,
+            device=rand_device,
+            dtype=torch.float32,
+        ).to(device=self.device, dtype=self.torch_dtype)
+        combined_video_latents = torch.cat([history_video_latents, future_video_latents], dim=2)
+        video_source_ids, video_position_ids = self._combined_video_source_and_position_ids(
+            clean_prefix_latent_frames=clean_prefix_latent_frames,
+            total_latent_frames=combined_video_latents.shape[2],
+            device=combined_video_latents.device,
+        )
+        history_video_latent_valid = self._latent_valid_from_raw_pad(
+            raw_is_pad=history_video_is_pad,
+            num_latent_frames=clean_prefix_latent_frames,
+            batch_size=1,
+            device=history_video_latents.device,
+        )
+        future_video_latent_valid = torch.ones(
+            (1, int(num_future_video_latent_chunks)),
+            dtype=torch.bool,
+            device=history_video_latents.device,
+        )
+        combined_video_latent_valid = torch.cat(
+            [history_video_latent_valid, future_video_latent_valid],
+            dim=1,
+        )
+        fuse_flag = bool(getattr(self.video_expert, "fuse_vae_embedding_in_latents", False))
+
+        infer_timesteps_video, infer_deltas_video = self.infer_video_scheduler.build_inference_schedule(
+            num_inference_steps=int(num_video_inference_steps),
+            device=self.device,
+            dtype=combined_video_latents.dtype,
+            shift_override=sigma_shift,
+        )
+        for step_t_video, step_delta_video in zip(infer_timesteps_video, infer_deltas_video):
+            timestep_video = step_t_video.unsqueeze(0).to(dtype=combined_video_latents.dtype, device=self.device)
+            video_pre = self.video_expert.pre_dit(
+                x=combined_video_latents,
+                timestep=timestep_video,
+                context=context,
+                context_mask=context_mask,
+                action=None,
+                fuse_vae_embedding_in_latents=fuse_flag,
+                source_ids=video_source_ids,
+                temporal_position_ids=video_position_ids,
+                clean_prefix_latent_frames=clean_prefix_latent_frames,
+                allow_missing_action_condition=True,
+            )
+            video_attention_mask = self.video_expert.build_video_to_video_mask(
+                video_seq_len=video_pre["tokens"].shape[1],
+                video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
+                device=video_pre["tokens"].device,
+                clean_prefix_latent_frames=clean_prefix_latent_frames,
+            )
+            combined_video_token_valid = self._latent_valid_to_token_valid(
+                combined_video_latent_valid,
+                tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
+            )
+            _video_cache, video_tokens = self.mot.prefill_video_cache(
+                video_tokens=video_pre["tokens"],
+                video_freqs=video_pre["freqs"],
+                video_t_mod=video_pre["t_mod"],
+                video_context_payload={
+                    "context": video_pre["context"],
+                    "mask": video_pre["context_mask"],
+                },
+                video_attention_mask=video_attention_mask,
+                video_key_valid_mask=combined_video_token_valid,
+            )
+            pred_combined_video = self.video_expert.post_dit(video_tokens, video_pre)
+            combined_video_latents = self.infer_video_scheduler.step(
+                pred_combined_video,
+                step_delta_video,
+                combined_video_latents,
+            )
+            combined_video_latents[:, :, :clean_prefix_latent_frames] = history_video_latents
+
+        clean_video_timestep = torch.zeros((1,), device=self.device, dtype=combined_video_latents.dtype)
+        video_pre = self.video_expert.pre_dit(
+            x=combined_video_latents,
+            timestep=clean_video_timestep,
+            context=context,
+            context_mask=context_mask,
+            action=None,
+            fuse_vae_embedding_in_latents=fuse_flag,
+            source_ids=video_source_ids,
+            temporal_position_ids=video_position_ids,
+            clean_prefix_latent_frames=clean_prefix_latent_frames,
+            allow_missing_action_condition=True,
+        )
+        video_attention_mask = self.video_expert.build_video_to_video_mask(
+            video_seq_len=video_pre["tokens"].shape[1],
+            video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
+            device=video_pre["tokens"].device,
+            clean_prefix_latent_frames=clean_prefix_latent_frames,
+        )
+        combined_video_token_valid = self._latent_valid_to_token_valid(
+            combined_video_latent_valid,
+            tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
+        )
+        video_cache, _video_tokens = self.mot.prefill_video_cache(
+            video_tokens=video_pre["tokens"],
+            video_freqs=video_pre["freqs"],
+            video_t_mod=video_pre["t_mod"],
+            video_context_payload={
+                "context": video_pre["context"],
+                "mask": video_pre["context_mask"],
+            },
+            video_attention_mask=video_attention_mask,
+            video_key_valid_mask=combined_video_token_valid,
+        )
+
+        history_source_ids = self._action_source_ids(
+            batch_size=1,
+            seq_len=history_action.shape[1],
+            source_id=self.SOURCE_HISTORY_ACTION,
+            device=history_action.device,
+        )
+        history_position_ids = self._action_position_ids(
+            seq_len=history_action.shape[1],
+            start=0,
+            device=history_action.device,
+        )
+        clean_action_timestep = torch.zeros((1,), device=self.device, dtype=history_action.dtype)
+        history_action_pre = self.action_expert.pre_dit(
+            action_tokens=history_action,
+            timestep=clean_action_timestep,
+            context=context,
+            context_mask=context_mask,
+            source_ids=history_source_ids,
+            position_ids=history_position_ids,
+        )
+        if history_action_is_pad is None:
+            history_action_valid = torch.ones(
+                (1, history_action.shape[1]),
+                dtype=torch.bool,
+                device=history_action.device,
+            )
+        else:
+            history_action_valid = ~history_action_is_pad
+        history_action_attention_mask = torch.ones(
+            (history_action.shape[1], history_action.shape[1]),
+            dtype=torch.bool,
+            device=history_action.device,
+        )
+        history_action_cache = self.mot.prefill_action_cache(
+            action_tokens=history_action_pre["tokens"],
+            action_freqs=history_action_pre["freqs"],
+            action_t_mod=history_action_pre["t_mod"],
+            action_context_payload={
+                "context": history_action_pre["context"],
+                "mask": history_action_pre["context_mask"],
+            },
+            action_attention_mask=history_action_attention_mask,
+            action_key_valid_mask=history_action_valid,
+        )
+        condition_kv_cache = self._concat_kv_caches(video_cache, history_action_cache)
+        condition_key_valid_mask = torch.cat([combined_video_token_valid, history_action_valid], dim=1)
+
+        infer_timesteps_action, infer_deltas_action = self.infer_action_scheduler.build_inference_schedule(
+            num_inference_steps=int(num_action_inference_steps),
+            device=self.device,
+            dtype=latents_action.dtype,
+            shift_override=sigma_shift,
+        )
+        for step_t_action, step_delta_action in zip(infer_timesteps_action, infer_deltas_action):
+            timestep_action = step_t_action.unsqueeze(0).to(dtype=latents_action.dtype, device=self.device)
+            pred_action = self._predict_action_noise_with_condition_cache(
+                latents_action=latents_action,
+                timestep_action=timestep_action,
+                context=context,
+                context_mask=context_mask,
+                condition_kv_cache=condition_kv_cache,
+                condition_key_valid_mask=condition_key_valid_mask,
+            )
+            latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
+
+        out = {
+            "action": latents_action[0].detach().to(device="cpu", dtype=torch.float32),
+        }
+        if return_video_latents:
+            out["video_latents"] = combined_video_latents.detach().to(device="cpu", dtype=torch.float32)
+            out["future_video_latents"] = combined_video_latents[
+                :, :, clean_prefix_latent_frames:
+            ].detach().to(device="cpu", dtype=torch.float32)
+        return out
+
+    @torch.no_grad()
     def infer_action(
         self,
         prompt: Optional[str],
