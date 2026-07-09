@@ -18,8 +18,8 @@ import argparse
 import io
 import json
 import pickle
+import re
 import shutil
-import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,6 +60,38 @@ COARSE_TASK = "MemoryBench short-term memory"
 class CameraSpec:
     output_key: str
     obs_attr: str
+
+
+@dataclass(frozen=True)
+class DemoRef:
+    raw_name: str
+    episode_dir: str
+
+
+class _MissingPickleBase:
+    """Placeholder for RLBench/PyRep classes when only their attributes are needed."""
+
+
+_MISSING_PICKLE_CLASSES: dict[tuple[str, str], type] = {}
+
+
+def missing_pickle_class(module: str, name: str) -> type:
+    key = (module, name)
+    if key not in _MISSING_PICKLE_CLASSES:
+        _MISSING_PICKLE_CLASSES[key] = type(name, (_MissingPickleBase,), {"__module__": module})
+    return _MISSING_PICKLE_CLASSES[key]
+
+
+class LenientUnpickler(pickle.Unpickler):
+    def find_class(self, module: str, name: str) -> Any:
+        try:
+            return super().find_class(module, name)
+        except (AttributeError, ImportError, ModuleNotFoundError):
+            return missing_pickle_class(module, name)
+
+
+def natural_key(value: str) -> list[Any]:
+    return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", value)]
 
 
 def parse_camera_specs(raw: str) -> list[CameraSpec]:
@@ -172,19 +204,122 @@ def prepare_source(path: Path, tmp_root: Path) -> Path:
     return out_dir
 
 
-def find_demo_pickles(root: Path) -> list[Path]:
-    names = {"low_dim_obs.pkl", "low_dim_obs.pickle", "variation_descriptions.pkl", "variation_descriptions.pickle"}
-    candidates = [p for p in root.rglob("*") if p.name in names or (p.suffix in {".pkl", ".pickle"} and "low_dim" in p.name)]
-    # RLBench stores one low_dim_obs.pkl per episode. Prefer those over metadata pickles.
-    low_dim = [p for p in candidates if "low_dim_obs" in p.name]
-    if low_dim:
-        return sorted(low_dim)
-    return sorted(candidates)
+def load_pickle_bytes(payload: bytes) -> Any:
+    return LenientUnpickler(io.BytesIO(payload)).load()
 
 
-def load_pickle(path: Path) -> Any:
-    with path.open("rb") as f:
-        return pickle.load(f)
+class TaskReader:
+    def __init__(self, source: Path):
+        self.source = source
+
+    def __enter__(self) -> "TaskReader":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def find_demo_pickles(self) -> list[DemoRef]:
+        raise NotImplementedError
+
+    def load_pickle(self, ref: DemoRef) -> Any:
+        raise NotImplementedError
+
+    def load_image(self, ref: DemoRef, camera_attr: str, frame_index: int) -> Image.Image:
+        raise NotImplementedError
+
+    def get_instruction(self, task: str, ref: DemoRef) -> str:
+        return TASK_INSTRUCTIONS[task]
+
+
+class DirectoryTaskReader(TaskReader):
+    def find_demo_pickles(self) -> list[DemoRef]:
+        names = {"low_dim_obs.pkl", "low_dim_obs.pickle"}
+        candidates = [
+            p
+            for p in self.source.rglob("*")
+            if p.name in names or (p.suffix in {".pkl", ".pickle"} and "low_dim" in p.name)
+        ]
+        return [
+            DemoRef(raw_name=str(path), episode_dir=str(path.parent))
+            for path in sorted(candidates, key=lambda p: natural_key(str(p)))
+        ]
+
+    def load_pickle(self, ref: DemoRef) -> Any:
+        with Path(ref.raw_name).open("rb") as f:
+            return load_pickle_bytes(f.read())
+
+    def load_image(self, ref: DemoRef, camera_attr: str, frame_index: int) -> Image.Image:
+        path = Path(ref.episode_dir) / camera_attr / f"{frame_index}.png"
+        if not path.exists():
+            raise FileNotFoundError(f"Missing image frame: {path}")
+        return Image.open(path).convert("RGB")
+
+    def get_instruction(self, task: str, ref: DemoRef) -> str:
+        for name in ("variation_descriptions.pkl", "variation_descriptions.pickle"):
+            path = Path(ref.episode_dir) / name
+            if path.exists():
+                try:
+                    payload = load_pickle_bytes(path.read_bytes())
+                    if isinstance(payload, (list, tuple)) and payload:
+                        return str(payload[0])
+                    if isinstance(payload, str):
+                        return payload
+                except Exception:
+                    pass
+        return super().get_instruction(task, ref)
+
+
+class ZipTaskReader(TaskReader):
+    def __enter__(self) -> "ZipTaskReader":
+        self.zf = zipfile.ZipFile(self.source)
+        self.names = self.zf.namelist()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.zf.close()
+
+    def find_demo_pickles(self) -> list[DemoRef]:
+        lows = [
+            name
+            for name in self.names
+            if name.endswith("low_dim_obs.pkl") or name.endswith("low_dim_obs.pickle")
+        ]
+        return [
+            DemoRef(raw_name=name, episode_dir=name.rsplit("/", 1)[0])
+            for name in sorted(lows, key=natural_key)
+        ]
+
+    def load_pickle(self, ref: DemoRef) -> Any:
+        return load_pickle_bytes(self.zf.read(ref.raw_name))
+
+    def load_image(self, ref: DemoRef, camera_attr: str, frame_index: int) -> Image.Image:
+        name = f"{ref.episode_dir}/{camera_attr}/{frame_index}.png"
+        try:
+            return Image.open(io.BytesIO(self.zf.read(name))).convert("RGB")
+        except KeyError as exc:
+            raise FileNotFoundError(f"Missing image frame in {self.source}: {name}") from exc
+
+    def get_instruction(self, task: str, ref: DemoRef) -> str:
+        for name in ("variation_descriptions.pkl", "variation_descriptions.pickle"):
+            candidate = f"{ref.episode_dir}/{name}"
+            if candidate in self.names:
+                try:
+                    payload = load_pickle_bytes(self.zf.read(candidate))
+                    if isinstance(payload, (list, tuple)) and payload:
+                        return str(payload[0])
+                    if isinstance(payload, str):
+                        return payload
+                except Exception:
+                    pass
+        return super().get_instruction(task, ref)
+
+
+def open_task_reader(source: Path) -> TaskReader:
+    if source.is_dir():
+        return DirectoryTaskReader(source)
+    if source.suffix.lower() == ".zip":
+        return ZipTaskReader(source)
+    raise ValueError(f"Unsupported source type: {source}")
 
 
 def as_demo_sequence(obj: Any) -> list[Any]:
@@ -233,8 +368,15 @@ def image_to_pil(image: Any) -> Image.Image:
     return Image.fromarray(to_uint8_hwc(image), mode="RGB")
 
 
-def infer_image_shape(obs: Any, cameras: list[CameraSpec]) -> tuple[int, int, int]:
-    img = to_uint8_hwc(obs_get(obs, cameras[0].obs_attr))
+def camera_image_to_pil(reader: TaskReader, ref: DemoRef, obs: Any, cam: CameraSpec, frame_index: int) -> Image.Image:
+    image = obs_get(obs, cam.obs_attr)
+    if image is not None:
+        return image_to_pil(image)
+    return reader.load_image(ref, cam.obs_attr, frame_index)
+
+
+def infer_image_shape(reader: TaskReader, ref: DemoRef, obs: Any, cameras: list[CameraSpec]) -> tuple[int, int, int]:
+    img = to_uint8_hwc(camera_image_to_pil(reader, ref, obs, cameras[0], 0))
     return (3, int(img.shape[0]), int(img.shape[1]))
 
 
@@ -291,21 +433,6 @@ def extract_state(obs: Any, *, state_source: str, state_dim: int) -> np.ndarray:
     return np.zeros((state_dim,), dtype=np.float32)
 
 
-def get_instruction(task: str, demo_dir: Path) -> str:
-    for name in ("variation_descriptions.pkl", "variation_descriptions.pickle"):
-        path = demo_dir / name
-        if path.exists():
-            try:
-                payload = load_pickle(path)
-                if isinstance(payload, (list, tuple)) and payload:
-                    return str(payload[0])
-                if isinstance(payload, str):
-                    return payload
-            except Exception:
-                pass
-    return TASK_INSTRUCTIONS[task]
-
-
 def task_tuple(task: str, instruction: str) -> list[str]:
     return [COARSE_TASK, instruction, QUALITY_TASK, QUALITY_TASK]
 
@@ -356,26 +483,25 @@ def write_dataset(
     global_index = 0
     task_to_index: dict[str, int] = {}
 
-    with tempfile.TemporaryDirectory(prefix="memorybench_convert_") as tmp:
-        tmp_root = Path(tmp)
-        for task in MEMORYBENCH_TASKS:
-            if task not in task_sources:
-                continue
-            source_dir = prepare_source(task_sources[task], tmp_root)
-            demo_pickles = find_demo_pickles(source_dir)
+    for task in MEMORYBENCH_TASKS:
+        if task not in task_sources:
+            continue
+        source = task_sources[task]
+        with open_task_reader(source) as reader:
+            demo_pickles = reader.find_demo_pickles()
             if limit_episodes is not None:
                 demo_pickles = demo_pickles[:limit_episodes]
-            print(f"[{split}:{task}] source={task_sources[task]} extracted={source_dir} demos={len(demo_pickles)}")
+            print(f"[{split}:{task}] source={source} demos={len(demo_pickles)}")
 
             for demo_pickle in demo_pickles:
-                demo = as_demo_sequence(load_pickle(demo_pickle))
+                demo = as_demo_sequence(reader.load_pickle(demo_pickle))
                 if not demo:
                     print(f"  skip empty demo: {demo_pickle}")
                     continue
-                instruction = get_instruction(task, demo_pickle.parent)
+                instruction = reader.get_instruction(task, demo_pickle)
                 obs0 = demo[0]
                 if info is None:
-                    image_shape = infer_image_shape(obs0, cameras)
+                    image_shape = infer_image_shape(reader, demo_pickle, obs0, cameras)
                     features = build_features(
                         cameras=cameras,
                         image_shape=image_shape,
@@ -387,7 +513,18 @@ def write_dataset(
                         print(json.dumps(info, indent=2, default=str))
                 if inspect_only:
                     attrs = sorted(k for k in dir(obs0) if not k.startswith("_"))
-                    print(f"  demo={demo_pickle} len={len(demo)} obs_type={type(obs0)} attrs={attrs[:80]}")
+                    camera_shapes = {}
+                    for cam in cameras:
+                        try:
+                            camera_shapes[cam.output_key] = np.asarray(
+                                camera_image_to_pil(reader, demo_pickle, obs0, cam, 0)
+                            ).shape
+                        except Exception as exc:
+                            camera_shapes[cam.output_key] = f"{type(exc).__name__}: {exc}"
+                    print(
+                        f"  demo={demo_pickle.raw_name} len={len(demo)} "
+                        f"obs_type={type(obs0)} attrs={attrs[:80]} camera_shapes={camera_shapes}"
+                    )
                     continue
 
                 assert info is not None
@@ -411,7 +548,8 @@ def write_dataset(
                         extract_state(obs, state_source=state_source, state_dim=state_dim)
                     )
                     for cam in cameras:
-                        episode_data[image_feature_key(cam.output_key)].append(pil_bytes(image_to_pil(obs_get(obs, cam.obs_attr))))
+                        image = camera_image_to_pil(reader, demo_pickle, obs, cam, t)
+                        episode_data[image_feature_key(cam.output_key)].append(pil_bytes(image))
                     global_index += 1
 
                 for task_text in tasks:
@@ -461,7 +599,7 @@ def write_dataset(
                         "episode_index": episode_index,
                         "tasks": tasks,
                         "length": frame_count,
-                        "raw_file_name": str(demo_pickle),
+                        "raw_file_name": demo_pickle.raw_name,
                     },
                     out_root,
                 )
