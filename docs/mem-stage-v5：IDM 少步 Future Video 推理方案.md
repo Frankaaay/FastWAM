@@ -329,6 +329,125 @@ future_action noisy query
   -> reads [video condition cache + history action cache]
 ```
 
+## 八点五、训练侧对齐
+
+当前 v5 代码区分两种训练语义：
+
+- `model.training_mode=v4`：默认路径，保持 v4 action-only memory 训练；action 只读 `history/current video + history action` cache，不读 future video cache。
+- `model.training_mode=v5_idm`：v5 对齐路径；训练时从数据里的 future video latent 中取可配置数量的 future suffix，加噪后与 clean `history/current` prefix 拼接，再让 action 读取 `history/current video + noisy future video suffix + history action` 的 condition cache。
+
+对应配置：
+
+```yaml
+model:
+  training_mode: v5_idm
+  v5_num_future_video_latent_chunks: 1
+  v5_action_condition_video_timestep: clean
+```
+
+`v5_num_future_video_latent_chunks` 控制训练时 action 能看到几个 future latent chunk，应该和 eval 的 `EVALUATION.num_future_video_latent_chunks` 对齐。LIBERO 当前 `video=9 raw frames` 对应 `3 latent frames`，其中第 0 个是 current，因此可用 future latent suffix 是 2 个。
+
+第一版 `v5_idm` 训练采用 teacher-forced/noisy future suffix，而不是在训练内 unroll `num_video_inference_steps` 做 predicted future suffix。这样先解决最核心的 train/eval mismatch：action branch 学会读取 future video cache。更严格的 predicted-suffix 训练会更接近推理，但训练成本更高，可作为后续扩展。
+
+### Teacher-forced/noisy suffix vs predicted suffix
+
+两者的区别在于 action 训练时看到的 future video condition 从哪里来：
+
+```text
+teacher-forced/noisy suffix:
+GT future video latent + sampled noise
+  -> 直接作为 future video suffix
+  -> action 读 [clean prefix + noisy GT future suffix + history action]
+```
+
+这个版本的优点是训练便宜、稳定、能直接控制 future suffix 噪声分布；缺点是 future suffix 的底层内容仍来自真实未来视频 latent，虽然被加噪，但不是模型自己一步 denoise 后的错误分布。
+
+```text
+unroll 1-step predicted suffix:
+Gaussian future video latent
+  -> video_expert 预测 noise/velocity
+  -> scheduler step 得到 predicted future suffix
+  -> action 读 [clean prefix + predicted future suffix + history action]
+```
+
+这个版本更接近 v5 推理，因为推理时没有 GT future latent，action 看到的是 video branch 自己从 Gaussian suffix 做 1-2 step 后留下的 noisy/predicted future representation。代价是训练更慢、显存更高，而且 action loss 会受到 video branch 当前预测误差影响；是否让 action loss 反传进 video unroll 也需要单独决定。
+
+因此推荐顺序是：
+
+1. 先跑 `teacher-forced/noisy suffix`，验证 action 读取 future video cache 是否有收益。
+2. 如果 LIBERO-plus 有趋势，再加 `unroll 1-step predicted suffix`，验证 train/eval 分布进一步对齐是否值得额外训练成本。
+
+## 八点六、Eval 侧配置
+
+LIBERO eval 默认仍是 v4：
+
+```yaml
+EVALUATION:
+  inference_mode: v4
+```
+
+代码位置：`configs/sim_libero.yaml:30`。因此即使 checkpoint 是 v5 训练出来的，如果不显式 override，eval 仍会调用 `model.infer_action(...)` 的 v4 action-only history path。
+
+要跑 v5 eval，必须显式设置：
+
+```bash
+EVALUATION.inference_mode=v5_idm \
+EVALUATION.num_future_video_latent_chunks=1 \
+EVALUATION.num_video_inference_steps=1 \
+EVALUATION.num_action_inference_steps=10
+```
+
+`experiments/libero/eval_libero_single.py:335` 会读取 `EVALUATION.inference_mode`，只允许 `v4` 或 `v5_idm`。当 `inference_mode == "v5_idm"` 时，`eval_libero_single.py:382` 会切到 `model.infer_action_v5_idm`，并传入：
+
+- `num_future_video_latent_chunks`
+- `num_video_inference_steps`
+- `num_action_inference_steps`
+- `return_video_latents`
+
+所以 v5 实验需要同时对齐两边：
+
+```text
+training:
+  model.training_mode=v5_idm
+  model.v5_num_future_video_latent_chunks=1
+
+eval:
+  EVALUATION.inference_mode=v5_idm
+  EVALUATION.num_future_video_latent_chunks=1
+  EVALUATION.num_video_inference_steps=1
+```
+
+当前已接好的 v5 训练 task 配置：
+
+- LIBERO：`configs/task/libero_uncond_2cam224_v5_idm_1e-4.yaml`
+- MemoryBench short：`configs/task/memorybench_short_v5_idm_1e-5.yaml`
+
+LIBERO v5 smoke test 推荐显式覆盖关键参数：
+
+```bash
+PYTHONPATH=$PWD/src:$PWD \
+bash scripts/train_zero2.sh 1 \
+  task=libero_uncond_2cam224_v5_idm_1e-4 \
+  batch_size=1 \
+  max_steps=1 \
+  save_every=1 \
+  eval_every=999999 \
+  model.redirect_common_files=false \
+  wandb.enabled=false
+```
+
+正式 LIBERO v5 训练沿用 v4 规格时，建议把 batch size 也显式写在命令里：
+
+```bash
+PYTHONPATH=$PWD/src:$PWD \
+bash scripts/train_zero2.sh 8 \
+  task=libero_uncond_2cam224_v5_idm_1e-4 \
+  batch_size=24 \
+  model.v5_num_future_video_latent_chunks=1 \
+  model.redirect_common_files=false \
+  wandb.enabled=false
+```
+
 ## 九、实验计划
 
 优先做小矩阵，不一上来大训练：
@@ -349,4 +468,3 @@ future_action noisy query
 - 单次 replan latency。
 - action L1/L2 离线指标。
 - 可选：pred future video 可视化，只作为诊断，不作为 policy 输出。
-

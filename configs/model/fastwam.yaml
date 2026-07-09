@@ -8,6 +8,9 @@ redirect_common_files: true
 mot_checkpoint_mixed_attn: true
 action_dit_pretrained_path: checkpoints/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt
 skip_dit_load_from_pretrain: false
+training_mode: v4
+v5_num_future_video_latent_chunks: 1
+v5_action_condition_video_timestep: clean
 
 video_dit_config:
   has_image_input: false

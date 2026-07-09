@@ -47,6 +47,9 @@ class FastWAM(torch.nn.Module):
         action_num_train_timesteps: int = 1000,
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
+        training_mode: str = "v4",
+        v5_num_future_video_latent_chunks: int = 1,
+        v5_action_condition_video_timestep: str = "clean",
     ):
         super().__init__()
         self.video_expert = video_expert
@@ -93,6 +96,21 @@ class FastWAM(torch.nn.Module):
         self.torch_dtype = torch_dtype
         self.loss_lambda_video = float(loss_lambda_video)
         self.loss_lambda_action = float(loss_lambda_action)
+        self.training_mode = str(training_mode).strip().lower()
+        if self.training_mode not in {"v4", "v5_idm"}:
+            raise ValueError(f"Unsupported FastWAM training_mode: {training_mode}. Expected 'v4' or 'v5_idm'.")
+        self.v5_num_future_video_latent_chunks = int(v5_num_future_video_latent_chunks)
+        if self.v5_num_future_video_latent_chunks <= 0:
+            raise ValueError(
+                "`v5_num_future_video_latent_chunks` must be positive, "
+                f"got {self.v5_num_future_video_latent_chunks}."
+            )
+        self.v5_action_condition_video_timestep = str(v5_action_condition_video_timestep).strip().lower()
+        if self.v5_action_condition_video_timestep not in {"clean", "video"}:
+            raise ValueError(
+                "`v5_action_condition_video_timestep` must be 'clean' or 'video', "
+                f"got {v5_action_condition_video_timestep!r}."
+            )
         self.history_action_len = self.HISTORY_ACTION_LEN
         self.current_timeline_index = self.CURRENT_TIMELINE_INDEX
         self.history_condition_dropout = self.HISTORY_CONDITION_DROPOUT
@@ -124,6 +142,9 @@ class FastWAM(torch.nn.Module):
         action_num_train_timesteps: int = 1000,
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
+        training_mode: str = "v4",
+        v5_num_future_video_latent_chunks: int = 1,
+        v5_action_condition_video_timestep: str = "clean",
     ):
         if video_dit_config is None:
             raise ValueError("`video_dit_config` is required for FastWAM.from_wan22_pretrained().")
@@ -181,6 +202,9 @@ class FastWAM(torch.nn.Module):
             action_num_train_timesteps=action_num_train_timesteps,
             loss_lambda_video=loss_lambda_video,
             loss_lambda_action=loss_lambda_action,
+            training_mode=training_mode,
+            v5_num_future_video_latent_chunks=v5_num_future_video_latent_chunks,
+            v5_action_condition_video_timestep=v5_action_condition_video_timestep,
         )
         model.model_paths = {
             "video_dit": components.dit_path,
@@ -650,6 +674,24 @@ class FastWAM(torch.nn.Module):
         valid_sum = valid.sum(dim=1).clamp(min=1.0)
         return (video_loss_token * valid).sum(dim=1) / valid_sum
 
+    @staticmethod
+    def _compute_video_loss_per_sample_with_latent_valid(
+        pred_video: torch.Tensor,
+        target_video: torch.Tensor,
+        latent_valid: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        video_loss_token = F.mse_loss(pred_video.float(), target_video.float(), reduction="none").mean(dim=(1, 3, 4))
+        if latent_valid is None:
+            return video_loss_token.mean(dim=1)
+        if latent_valid.shape != video_loss_token.shape:
+            raise ValueError(
+                "`latent_valid` shape mismatch for video loss: "
+                f"got {tuple(latent_valid.shape)} vs expected {tuple(video_loss_token.shape)}"
+            )
+        video_valid = latent_valid.to(device=video_loss_token.device, dtype=video_loss_token.dtype)
+        valid_sum = video_valid.sum(dim=1).clamp(min=1.0)
+        return (video_loss_token * video_valid).sum(dim=1) / valid_sum
+
     def _action_source_ids(
         self,
         batch_size: int,
@@ -1089,6 +1131,278 @@ class FastWAM(torch.nn.Module):
         }
         return loss_total, loss_dict
 
+    def _training_loss_v5_idm(self, inputs: dict[str, Any]):
+        input_latents = inputs["input_latents"]
+        history_video_latents = inputs["history_video_latents"]
+        history_action = inputs["history_action"]
+        if history_video_latents is None or history_action is None:
+            raise ValueError("mem-stage-v5 IDM training requires both `history_video` and `history_action`.")
+
+        batch_size = input_latents.shape[0]
+        context = inputs["context"]
+        context_mask = inputs["context_mask"]
+        action = inputs["action"]
+        action_is_pad = inputs["action_is_pad"]
+        image_is_pad = inputs["image_is_pad"]
+        history_video_is_pad = inputs["history_video_is_pad"]
+        history_action_is_pad = inputs["history_action_is_pad"]
+
+        noise_video = torch.randn_like(input_latents)
+        timestep_video = self.train_video_scheduler.sample_training_t(
+            batch_size=batch_size,
+            device=self.device,
+            dtype=input_latents.dtype,
+        )
+        latents = self.train_video_scheduler.add_noise(input_latents, noise_video, timestep_video)
+        target_video = self.train_video_scheduler.training_target(input_latents, noise_video, timestep_video)
+
+        if input_latents.shape[2] <= 1:
+            raise ValueError("mem-stage-v5 IDM video loss requires at least one future video latent frame.")
+        available_future_latent_frames = int(input_latents.shape[2] - 1)
+        future_latent_frames = int(self.v5_num_future_video_latent_chunks)
+        if future_latent_frames > available_future_latent_frames:
+            raise ValueError(
+                "`v5_num_future_video_latent_chunks` exceeds available future latent frames: "
+                f"requested={future_latent_frames}, available={available_future_latent_frames}."
+            )
+        clean_prefix_latent_frames = int(history_video_latents.shape[2])
+        if clean_prefix_latent_frames <= 0:
+            raise ValueError("mem-stage-v5 IDM requires non-empty `history_video_latents`.")
+
+        future_noisy_latents = latents[:, :, 1 : 1 + future_latent_frames]
+        target_video = target_video[:, :, 1 : 1 + future_latent_frames]
+        combined_video_latents = torch.cat([history_video_latents, future_noisy_latents], dim=2)
+
+        noise_action = torch.randn_like(action)
+        timestep_action = self.train_action_scheduler.sample_training_t(
+            batch_size=batch_size,
+            device=self.device,
+            dtype=action.dtype,
+        )
+        noisy_action = self.train_action_scheduler.add_noise(action, noise_action, timestep_action)
+        target_action = self.train_action_scheduler.training_target(action, noise_action, timestep_action)
+
+        future_source_ids = self._action_source_ids(
+            batch_size=batch_size,
+            seq_len=action.shape[1],
+            source_id=self.SOURCE_FUTURE_ACTION,
+            device=action.device,
+        )
+        future_position_ids = self._action_position_ids(
+            seq_len=action.shape[1],
+            start=self.current_timeline_index,
+            device=action.device,
+        )
+
+        video_source_ids, video_position_ids = self._combined_video_source_and_position_ids(
+            clean_prefix_latent_frames=clean_prefix_latent_frames,
+            total_latent_frames=combined_video_latents.shape[2],
+            device=combined_video_latents.device,
+        )
+        video_pre = self.video_expert.pre_dit(
+            x=combined_video_latents,
+            timestep=timestep_video,
+            context=context,
+            context_mask=context_mask,
+            action=action,
+            fuse_vae_embedding_in_latents=inputs["fuse_vae_embedding_in_latents"],
+            source_ids=video_source_ids,
+            temporal_position_ids=video_position_ids,
+            clean_prefix_latent_frames=clean_prefix_latent_frames,
+        )
+
+        video_attention_mask = self.video_expert.build_video_to_video_mask(
+            video_seq_len=video_pre["tokens"].shape[1],
+            video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
+            device=video_pre["tokens"].device,
+            clean_prefix_latent_frames=clean_prefix_latent_frames,
+        )
+
+        history_video_latent_valid = self._latent_valid_from_raw_pad(
+            raw_is_pad=history_video_is_pad,
+            num_latent_frames=clean_prefix_latent_frames,
+            batch_size=batch_size,
+            device=history_video_latents.device,
+        )
+        input_video_latent_valid = self._latent_valid_from_raw_pad(
+            raw_is_pad=image_is_pad,
+            num_latent_frames=input_latents.shape[2],
+            batch_size=batch_size,
+            device=input_latents.device,
+        )
+        future_video_latent_valid = input_video_latent_valid[:, 1 : 1 + future_latent_frames]
+        combined_video_latent_valid = torch.cat(
+            [history_video_latent_valid, future_video_latent_valid],
+            dim=1,
+        )
+        drop_history_video, drop_history_action = self._condition_dropout_masks(
+            batch_size=batch_size,
+            device=action.device,
+        )
+        video_history_latent = video_source_ids.eq(self.SOURCE_HISTORY_VIDEO).view(1, -1)
+        combined_video_read_latent_valid = combined_video_latent_valid & (
+            ~video_history_latent | ~drop_history_video.view(-1, 1)
+        )
+        combined_video_read_token_valid = self._latent_valid_to_token_valid(
+            combined_video_read_latent_valid,
+            tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
+        )
+        video_cache, video_tokens = self.mot.prefill_video_cache(
+            video_tokens=video_pre["tokens"],
+            video_freqs=video_pre["freqs"],
+            video_t_mod=video_pre["t_mod"],
+            video_context_payload={
+                "context": video_pre["context"],
+                "mask": video_pre["context_mask"],
+            },
+            video_attention_mask=video_attention_mask,
+            video_key_valid_mask=combined_video_read_token_valid,
+        )
+        pred_combined_video = self.video_expert.post_dit(video_tokens, video_pre)
+        pred_video = pred_combined_video[:, :, clean_prefix_latent_frames:]
+        if pred_video.shape[2] != target_video.shape[2]:
+            raise ValueError(
+                "Combined v5 IDM video target length mismatch: "
+                f"pred={pred_video.shape[2]}, target={target_video.shape[2]}"
+            )
+        loss_video_per_sample = self._compute_video_loss_per_sample_with_latent_valid(
+            pred_video=pred_video,
+            target_video=target_video,
+            latent_valid=future_video_latent_valid,
+        )
+        video_weight = self.train_video_scheduler.training_weight(timestep_video).to(
+            loss_video_per_sample.device, dtype=loss_video_per_sample.dtype
+        )
+        loss_video = (loss_video_per_sample * video_weight).mean()
+
+        if self.v5_action_condition_video_timestep == "clean":
+            clean_video_timestep = torch.zeros((batch_size,), device=self.device, dtype=combined_video_latents.dtype)
+            video_pre_condition = self.video_expert.pre_dit(
+                x=combined_video_latents,
+                timestep=clean_video_timestep,
+                context=context,
+                context_mask=context_mask,
+                action=None,
+                fuse_vae_embedding_in_latents=inputs["fuse_vae_embedding_in_latents"],
+                source_ids=video_source_ids,
+                temporal_position_ids=video_position_ids,
+                clean_prefix_latent_frames=clean_prefix_latent_frames,
+                allow_missing_action_condition=True,
+            )
+            video_condition_attention_mask = self.video_expert.build_video_to_video_mask(
+                video_seq_len=video_pre_condition["tokens"].shape[1],
+                video_tokens_per_frame=int(video_pre_condition["meta"]["tokens_per_frame"]),
+                device=video_pre_condition["tokens"].device,
+                clean_prefix_latent_frames=clean_prefix_latent_frames,
+            )
+            video_cache, _video_tokens = self.mot.prefill_video_cache(
+                video_tokens=video_pre_condition["tokens"],
+                video_freqs=video_pre_condition["freqs"],
+                video_t_mod=video_pre_condition["t_mod"],
+                video_context_payload={
+                    "context": video_pre_condition["context"],
+                    "mask": video_pre_condition["context_mask"],
+                },
+                video_attention_mask=video_condition_attention_mask,
+                video_key_valid_mask=combined_video_read_token_valid,
+            )
+
+        history_source_ids = self._action_source_ids(
+            batch_size=batch_size,
+            seq_len=history_action.shape[1],
+            source_id=self.SOURCE_HISTORY_ACTION,
+            device=history_action.device,
+        )
+        history_position_ids = self._action_position_ids(
+            seq_len=history_action.shape[1],
+            start=0,
+            device=history_action.device,
+        )
+        clean_action_timestep = torch.zeros((batch_size,), device=self.device, dtype=history_action.dtype)
+        history_action_pre = self.action_expert.pre_dit(
+            action_tokens=history_action,
+            timestep=clean_action_timestep,
+            context=context,
+            context_mask=context_mask,
+            source_ids=history_source_ids,
+            position_ids=history_position_ids,
+        )
+        if history_action_is_pad is None:
+            history_action_valid = torch.ones(
+                (batch_size, history_action.shape[1]),
+                dtype=torch.bool,
+                device=history_action.device,
+            )
+        else:
+            history_action_valid = ~history_action_is_pad
+
+        history_action_read_valid = history_action_valid & ~drop_history_action.view(-1, 1)
+        history_action_attention_mask = torch.ones(
+            (history_action.shape[1], history_action.shape[1]),
+            dtype=torch.bool,
+            device=history_action.device,
+        )
+        history_action_cache = self.mot.prefill_action_cache(
+            action_tokens=history_action_pre["tokens"],
+            action_freqs=history_action_pre["freqs"],
+            action_t_mod=history_action_pre["t_mod"],
+            action_context_payload={
+                "context": history_action_pre["context"],
+                "mask": history_action_pre["context_mask"],
+            },
+            action_attention_mask=history_action_attention_mask,
+            action_key_valid_mask=history_action_valid,
+        )
+        condition_cache = self._concat_kv_caches(video_cache, history_action_cache)
+        condition_key_valid = torch.cat(
+            [combined_video_read_token_valid, history_action_read_valid],
+            dim=1,
+        )
+
+        action_pre = self.action_expert.pre_dit(
+            action_tokens=noisy_action,
+            timestep=timestep_action,
+            context=context,
+            context_mask=context_mask,
+            source_ids=future_source_ids,
+            position_ids=future_position_ids,
+        )
+        if action_is_pad is None:
+            action_key_valid = torch.ones(
+                (batch_size, action.shape[1]),
+                dtype=torch.bool,
+                device=action.device,
+            )
+        else:
+            action_key_valid = ~action_is_pad
+        action_tokens = self.mot.forward_action_with_condition_cache(
+            action_tokens=action_pre["tokens"],
+            action_freqs=action_pre["freqs"],
+            action_t_mod=action_pre["t_mod"],
+            action_context_payload={
+                "context": action_pre["context"],
+                "mask": action_pre["context_mask"],
+            },
+            condition_kv_cache=condition_cache,
+            condition_key_valid_mask=condition_key_valid,
+            action_key_valid_mask=action_key_valid,
+        )
+        pred_action = self.action_expert.post_dit(action_tokens, action_pre)
+        loss_action = self._compute_action_loss(
+            pred_action=pred_action,
+            target_action=target_action,
+            action_is_pad=action_is_pad,
+            timestep_action=timestep_action,
+        )
+
+        loss_total = self.loss_lambda_video * loss_video + self.loss_lambda_action * loss_action
+        loss_dict = {
+            "loss_video": self.loss_lambda_video * float(loss_video.detach().item()),
+            "loss_action": self.loss_lambda_action * float(loss_action.detach().item()),
+            "v5_future_video_latent_chunks": float(future_latent_frames),
+        }
+        return loss_total, loss_dict
+
     def training_loss(self, sample, tiled: bool = False):
         inputs = self.build_inputs(sample, tiled=tiled)
         # v4 要求 history_video 与 history_action 成对出现（_training_loss_v4 内部强校验），
@@ -1096,6 +1410,8 @@ class FastWAM(torch.nn.Module):
         if self.enable_mem_stage_v4 and (
             inputs["history_video_latents"] is not None and inputs["history_action"] is not None
         ):
+            if self.training_mode == "v5_idm":
+                return self._training_loss_v5_idm(inputs)
             return self._training_loss_v4(inputs)
         input_latents = inputs["input_latents"]
         batch_size = input_latents.shape[0]

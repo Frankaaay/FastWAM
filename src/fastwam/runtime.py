@@ -84,6 +84,9 @@ def create_fastwam(
     video_scheduler=None,
     action_scheduler=None,
     loss=None,
+    training_mode: str = "v4",
+    v5_num_future_video_latent_chunks: int = 1,
+    v5_action_condition_video_timestep: str = "clean",
     mot_checkpoint_mixed_attn: bool = True,
     redirect_common_files: bool = True,
     model_dtype: torch.dtype = torch.bfloat16,
@@ -153,6 +156,9 @@ def create_fastwam(
         action_num_train_timesteps=int(action_scheduler["num_train_timesteps"]),
         loss_lambda_video=float(loss.get("lambda_video", 1.0)),
         loss_lambda_action=float(loss.get("lambda_action", 1.0)),
+        training_mode=str(training_mode),
+        v5_num_future_video_latent_chunks=int(v5_num_future_video_latent_chunks),
+        v5_action_condition_video_timestep=str(v5_action_condition_video_timestep),
     )
 
 
