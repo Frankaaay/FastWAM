@@ -105,7 +105,7 @@ v5 cache 语义和 v4 不同：
 ```yaml
 inference:
   num_future_video_latent_chunks: 1  # 生成几个 future video latent chunk
-  num_video_inference_steps: 1       # future video denoise steps, e.g. 1 or 2
+  num_video_inference_steps: 2       # future video denoise steps, e.g. 1 or 2
   num_action_inference_steps: 10     # action denoise steps
 ```
 
@@ -117,7 +117,7 @@ infer_action_v5_idm(
     history_video=...,
     history_action=...,
     num_future_video_latent_chunks=1,
-    num_video_inference_steps=1,
+    num_video_inference_steps=2,
     num_action_inference_steps=10,
 )
 ```
@@ -393,7 +393,7 @@ EVALUATION:
 ```bash
 EVALUATION.inference_mode=v5_idm \
 EVALUATION.num_future_video_latent_chunks=1 \
-EVALUATION.num_video_inference_steps=1 \
+EVALUATION.num_video_inference_steps=2 \
 EVALUATION.num_action_inference_steps=10
 ```
 
@@ -414,7 +414,7 @@ training:
 eval:
   EVALUATION.inference_mode=v5_idm
   EVALUATION.num_future_video_latent_chunks=1
-  EVALUATION.num_video_inference_steps=1
+  EVALUATION.num_video_inference_steps=2
 ```
 
 当前已接好的 v5 训练 task 配置：
