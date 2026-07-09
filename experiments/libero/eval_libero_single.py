@@ -332,6 +332,10 @@ def _predict_action_chunk(
     input_h: int,
     model_device: str,
 ) -> tuple[np.ndarray, dict]:
+    inference_mode = str(cfg.EVALUATION.get("inference_mode", "v4")).strip().lower()
+    if inference_mode not in {"v4", "v5_idm"}:
+        raise ValueError(f"Unsupported EVALUATION.inference_mode: {inference_mode}")
+
     num_inference_steps_cfg = cfg.EVALUATION.get("num_inference_steps", None)
     if num_inference_steps_cfg is None:
         num_inference_steps = int(cfg.get("eval_num_inference_steps", 20))
@@ -357,7 +361,6 @@ def _predict_action_chunk(
         "action_horizon": action_horizon,
         "negative_prompt": str(cfg.EVALUATION.get("negative_prompt", "")),
         "text_cfg_scale": float(cfg.EVALUATION.get("text_cfg_scale", 1.0)),
-        "num_inference_steps": num_inference_steps,
         "proprio": proprio,
         "sigma_shift": (
             None
@@ -376,9 +379,30 @@ def _predict_action_chunk(
                 dtype=model.torch_dtype,
             )
         )
+    if inference_mode == "v5_idm":
+        if not FastWAMOnlineHistoryBuffer.enabled_for_model(model):
+            raise ValueError("v5_idm requires a mem-stage-v4/v5 FastWAM model with history enabled.")
+        if not hasattr(model, "infer_action_v5_idm"):
+            raise ValueError("Model does not expose infer_action_v5_idm().")
+        infer_kwargs.update(
+            {
+                "num_future_video_latent_chunks": int(
+                    cfg.EVALUATION.get("num_future_video_latent_chunks", 1)
+                ),
+                "num_video_inference_steps": int(cfg.EVALUATION.get("num_video_inference_steps", 1)),
+                "num_action_inference_steps": int(
+                    cfg.EVALUATION.get("num_action_inference_steps", num_inference_steps)
+                ),
+                "return_video_latents": bool(cfg.EVALUATION.get("return_video_latents", False)),
+            }
+        )
+        infer_fn = model.infer_action_v5_idm
+    else:
+        infer_kwargs["num_inference_steps"] = num_inference_steps
+        infer_fn = model.infer_action
 
     with torch.no_grad():
-        pred = model.infer_action(**infer_kwargs)
+        pred = infer_fn(**infer_kwargs)
     model_action = pred["action"]  # [T, D]
 
     action = _denormalize_action(model_action, processor)[0]  # [T, D]
