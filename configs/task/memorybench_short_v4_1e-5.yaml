@@ -5,7 +5,7 @@ defaults:
   - override /model: fastwam
   - _self_
 
-batch_size: 16
+batch_size: 24
 num_workers: 8
 
 model:

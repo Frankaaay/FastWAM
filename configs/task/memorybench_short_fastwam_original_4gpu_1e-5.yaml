@@ -5,8 +5,8 @@ defaults:
   - override /model: fastwam
   - _self_
 
-# Per-GPU batch size. The 4-GPU launcher gives global batch size 64.
-batch_size: 16
+# Per-GPU batch size. The 4-GPU launcher gives global batch size 96.
+batch_size: 24
 num_workers: 8
 
 model:
