@@ -52,4 +52,7 @@ train:
         size: [224, 224]
   text_embedding_cache_dir: ${oc.env:MEMORYBENCH_DATA_ROOT,/data/shared/offline/datasets/memorybench}/text_embeds_cache
   context_len: 128
+  vae_latent_cache_dir: ${oc.env:MEMORYBENCH_VAE_CACHE_DIR,/data/shared/offline/datasets/memorybench/vae_latent_cache/memorybench_short_wan22}
+  vae_latent_cache_model_id: Wan-AI/Wan2.2-TI2V-5B
+  vae_latent_cache_keep_video: false
 
