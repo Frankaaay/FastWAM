@@ -18,8 +18,11 @@ learning_rate: 1e-5
 num_epochs: 10
 max_steps: 10000
 log_every: 10
-save_every: 2000
-eval_every: 1000
+# VAE latent cache keeps raw video out of samples, so the current training-time
+# eval path is disabled for MemoryBench cache runs. Final checkpoint is still
+# saved when max_steps is reached.
+save_every: 0
+eval_every: 100000
 
 gradient_accumulation_steps: 1
 weight_decay: 1e-2
