@@ -85,6 +85,7 @@ def create_fastwam(
     action_scheduler=None,
     loss=None,
     mot_checkpoint_mixed_attn: bool = True,
+    enable_mem_stage_v4: bool = True,
     redirect_common_files: bool = True,
     model_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
@@ -153,6 +154,7 @@ def create_fastwam(
         action_num_train_timesteps=int(action_scheduler["num_train_timesteps"]),
         loss_lambda_video=float(loss.get("lambda_video", 1.0)),
         loss_lambda_action=float(loss.get("lambda_action", 1.0)),
+        enable_mem_stage_v4=bool(enable_mem_stage_v4),
     )
 
 

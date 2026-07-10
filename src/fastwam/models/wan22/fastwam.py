@@ -47,6 +47,7 @@ class FastWAM(torch.nn.Module):
         action_num_train_timesteps: int = 1000,
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
+        enable_mem_stage_v4: bool = True,
     ):
         super().__init__()
         self.video_expert = video_expert
@@ -96,7 +97,7 @@ class FastWAM(torch.nn.Module):
         self.history_action_len = self.HISTORY_ACTION_LEN
         self.current_timeline_index = self.CURRENT_TIMELINE_INDEX
         self.history_condition_dropout = self.HISTORY_CONDITION_DROPOUT
-        self.enable_mem_stage_v4 = self.__class__ is FastWAM
+        self.enable_mem_stage_v4 = bool(enable_mem_stage_v4) and self.__class__ is FastWAM
 
         self.to(self.device)
 
@@ -124,6 +125,7 @@ class FastWAM(torch.nn.Module):
         action_num_train_timesteps: int = 1000,
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
+        enable_mem_stage_v4: bool = True,
     ):
         if video_dit_config is None:
             raise ValueError("`video_dit_config` is required for FastWAM.from_wan22_pretrained().")
@@ -181,6 +183,7 @@ class FastWAM(torch.nn.Module):
             action_num_train_timesteps=action_num_train_timesteps,
             loss_lambda_video=loss_lambda_video,
             loss_lambda_action=loss_lambda_action,
+            enable_mem_stage_v4=enable_mem_stage_v4,
         )
         model.model_paths = {
             "video_dit": components.dit_path,
@@ -1614,7 +1617,7 @@ class FastWAM(torch.nn.Module):
             "mot": self.mot.state_dict(),
             "step": step,
             "torch_dtype": str(self.torch_dtype),
-            "mem_stage_v4": True,
+            "mem_stage_v4": bool(self.enable_mem_stage_v4),
         }
         if self.proprio_encoder is not None:
             payload["proprio_encoder"] = self.proprio_encoder.state_dict()
