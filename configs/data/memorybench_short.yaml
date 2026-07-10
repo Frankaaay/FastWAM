@@ -1,7 +1,7 @@
 train:
   _target_: fastwam.datasets.lerobot.robot_video_dataset.RobotVideoDataset
   dataset_dirs:
-    - /data-214-30-239-40/shared/offline/datasets/memorybench/lerobot/memorybench_short_train
+    - ${oc.env:MEMORYBENCH_DATA_ROOT,/data/shared/offline/datasets/memorybench}/lerobot/memorybench_short_train
   shape_meta:
     images:
       - key: image
@@ -50,6 +50,6 @@ train:
       - _target_: fastwam.datasets.lerobot.transforms.image.ToTensor
       - _target_: torchvision.transforms.Resize
         size: [224, 224]
-  text_embedding_cache_dir: /data-214-30-239-40/shared/offline/datasets/memorybench/text_embeds_cache
+  text_embedding_cache_dir: ${oc.env:MEMORYBENCH_DATA_ROOT,/data/shared/offline/datasets/memorybench}/text_embeds_cache
   context_len: 128
 

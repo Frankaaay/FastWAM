@@ -10,12 +10,13 @@ LOG_DIR="${LOG_DIR:-./runs/logs}"
 LOG_FILE="${LOG_FILE:-${LOG_DIR}/${RUN_ID}.log}"
 AUTO_PRECOMPUTE_TEXT="${AUTO_PRECOMPUTE_TEXT:-1}"
 
-DATA_ROOT="${MEMORYBENCH_DATA_ROOT:-/data-214-30-239-40/shared/offline/datasets/memorybench}"
+DATA_ROOT="${MEMORYBENCH_DATA_ROOT:-/data/shared/offline/datasets/memorybench}"
 TRAIN_DATA="${DATA_ROOT}/lerobot/memorybench_short_train"
 TEXT_CACHE="${DATA_ROOT}/text_embeds_cache"
 TEXT_CACHE_GLOB="*.t5_len128.wan22ti2v5b.pt"
 
 export RUN_ID
+export MEMORYBENCH_DATA_ROOT="$DATA_ROOT"
 export DIFFSYNTH_SKIP_DOWNLOAD="${DIFFSYNTH_SKIP_DOWNLOAD:-true}"
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
 export PYTHONUNBUFFERED=1
