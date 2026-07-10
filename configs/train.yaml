@@ -16,6 +16,11 @@ num_workers: 4
 # scheduler
 lr_scheduler_type: "cosine"
 learning_rate: 1.0e-4
+# Move parameters whose lengths are not 16B-aligned to the tail before DeepSpeed
+# flattens optimizer state. This avoids slow bf16 align1 GEMM kernels observed in
+# profiling. Do not resume optimizer-state checkpoints from runs with a different
+# value for this flag.
+align_optimizer_param_order: true
 num_epochs: 1
 max_steps: null
 log_every: 10

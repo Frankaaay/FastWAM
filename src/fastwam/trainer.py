@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 
 from .utils.fs import ensure_dir
 from .utils.logging_config import get_logger, setup_logging
+from .utils.param_order import log_param_order_tail, reorder_params_for_alignment
 from .utils.pytorch_utils import set_global_seed
 from .utils.samplers import ResumableEpochSampler
 
@@ -28,6 +29,7 @@ class Wan22Trainer:
         self.cfg = cfg
         self.output_dir = str(cfg.output_dir)
         self.learning_rate = float(cfg.learning_rate)
+        self.align_optimizer_param_order = bool(cfg.get("align_optimizer_param_order", True))
         self.weight_decay = float(cfg.weight_decay)
         self.batch_size = int(cfg.batch_size)
         self.num_workers = int(cfg.num_workers)
@@ -81,6 +83,21 @@ class Wan22Trainer:
         proprio_encoder = getattr(self.model, "proprio_encoder", None)
         if proprio_encoder is not None:
             trainable_params.extend(list(proprio_encoder.parameters()))
+        if self.align_optimizer_param_order:
+            param_name_lookup = {id(param): name for name, param in self.model.named_parameters()}
+            trainable_params, param_order_tail = reorder_params_for_alignment(trainable_params)
+            log_param_order_tail(
+                param_order_tail,
+                param_name_lookup,
+                logger=logger,
+                is_main_process=self.accelerator.is_main_process,
+            )
+            if self.accelerator.is_main_process:
+                logger.warning(
+                    "param-order align_optimizer_param_order=true reorders DeepSpeed flatten parameter order; "
+                    "optimizer-state checkpoints from runs without this ordering are incompatible. "
+                    "Do not resume old runs with this flag enabled."
+                )
         self.optimizer = torch.optim.AdamW(
             trainable_params,
             lr=self.learning_rate,
