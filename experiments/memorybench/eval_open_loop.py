@@ -100,7 +100,7 @@ def _configure_eval_dataset(cfg: DictConfig, stats_path: Path) -> Path:
     dataset_dir = _expand_path(
         cfg.memorybench_eval.get(
             "dataset_dir",
-            data_root / "lerobot" / "memorybench_short_test",
+            data_root / "lerobot" / "memorybench_short_test_v2",
         )
     )
     _require_path(dataset_dir, what="MemoryBench test dataset")

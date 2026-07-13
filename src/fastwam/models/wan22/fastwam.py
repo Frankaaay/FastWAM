@@ -1739,10 +1739,43 @@ class FastWAM(torch.nn.Module):
             payload["optimizer"] = optimizer.state_dict()
         torch.save(payload, path)
 
-    def load_checkpoint(self, path, optimizer=None):
+    @staticmethod
+    def _reinitialize_mismatched_action_tensors(checkpoint_state, target_state):
+        reinitialize_keys = {
+            "mixtures.action.action_encoder.weight",
+            "mixtures.action.head.weight",
+            "mixtures.action.head.bias",
+            "mixtures.video.action_embedding.weight",
+        }
+        adapted_state = dict(checkpoint_state)
+        reinitialized_keys = []
+        for key in reinitialize_keys:
+            if key not in adapted_state or key not in target_state:
+                continue
+            source = adapted_state[key]
+            target = target_state[key]
+            if tuple(source.shape) == tuple(target.shape):
+                continue
+            adapted_state[key] = target.detach().clone()
+            reinitialized_keys.append((key, tuple(source.shape), tuple(target.shape)))
+        return adapted_state, reinitialized_keys
+
+    def load_checkpoint(self, path, optimizer=None, allow_action_dim_reinit=False):
         payload = torch.load(path, map_location="cpu")
         if "mot" in payload:
-            missing_keys, unexpected_keys = self.mot.load_state_dict(payload["mot"], strict=False)
+            mot_state = payload["mot"]
+            reinitialized_keys = []
+            if allow_action_dim_reinit:
+                mot_state, reinitialized_keys = self._reinitialize_mismatched_action_tensors(
+                    mot_state,
+                    self.mot.state_dict(),
+                )
+                if reinitialized_keys:
+                    logger.warning(
+                        "Reinitialized checkpoint tensors with incompatible action dimensions: %s",
+                        reinitialized_keys,
+                    )
+            missing_keys, unexpected_keys = self.mot.load_state_dict(mot_state, strict=False)
             if payload.get("mem_stage_v4", False) and (missing_keys or unexpected_keys):
                 raise ValueError(
                     "mem-stage-v4 checkpoint did not restore MoT weights strictly: "

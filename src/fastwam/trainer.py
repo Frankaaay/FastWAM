@@ -291,7 +291,11 @@ class Wan22Trainer:
         if not resume_path.exists():
             raise FileNotFoundError(f"Resume checkpoint not found: {resume}")
         logger.info("Loading weight checkpoint only: %s", resume)
-        self.accelerator.unwrap_model(self.model).load_checkpoint(str(resume_path), optimizer=None)
+        self.accelerator.unwrap_model(self.model).load_checkpoint(
+            str(resume_path),
+            optimizer=None,
+            allow_action_dim_reinit=bool(self.cfg.get("allow_action_dim_checkpoint_reinit", False)),
+        )
         logger.warning("Loaded .pt weights only; optimizer/scheduler/step were not restored under ZeRO2.")
 
     def _set_dit_only_train_mode(self):

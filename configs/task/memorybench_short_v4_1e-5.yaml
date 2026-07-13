@@ -27,4 +27,5 @@ eval_every: 100000
 gradient_accumulation_steps: 1
 weight_decay: 1e-2
 resume: checkpoints/fastwam_release/libero_uncond_2cam224.pt
+allow_action_dim_checkpoint_reinit: true
 

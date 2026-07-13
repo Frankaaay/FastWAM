@@ -15,6 +15,7 @@ first conversion pass.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import io
 import json
 import pickle
@@ -47,6 +48,10 @@ from fastwam.datasets.lerobot.lerobot.datasets.utils import (
 
 
 MEMORYBENCH_TASKS = ("put_block_back", "rearrange_block", "reopen_drawer")
+DEFAULT_ACTION_SOURCE = "joint_velocities+gripper_open"
+DEFAULT_STATE_SOURCE = "gripper_pose+gripper_open"
+DEFAULT_ACTION_DIM = 8
+DEFAULT_STATE_DIM = 8
 TASK_INSTRUCTIONS = {
     "put_block_back": "Put the block to the centre and then back to its initial position while pushing the button in between.",
     "rearrange_block": "Move the block not on the patch to the empty patch, then press the button, then move the block that has not been moved off the patch.",
@@ -115,14 +120,16 @@ def image_feature_key(camera_key: str) -> str:
     return f"observation.images.{camera_key}"
 
 
-def action_names(dim: int) -> list[str]:
-    base = ["x", "y", "z", "roll", "pitch", "yaw", "gripper"]
-    return base[:dim] if dim <= len(base) else [f"action_{i}" for i in range(dim)]
+def action_names(dim: int, source: str) -> list[str]:
+    if source == DEFAULT_ACTION_SOURCE and dim == DEFAULT_ACTION_DIM:
+        return [*[f"joint_velocity_{i}" for i in range(7)], "gripper_open"]
+    return [f"action_{i}" for i in range(dim)]
 
 
-def state_names(dim: int) -> list[str]:
-    base = ["x", "y", "z", "roll", "pitch", "yaw", "gripper_open", "gripper_closed"]
-    return base[:dim] if dim <= len(base) else [f"state_{i}" for i in range(dim)]
+def state_names(dim: int, source: str) -> list[str]:
+    if source == DEFAULT_STATE_SOURCE and dim == DEFAULT_STATE_DIM:
+        return ["x", "y", "z", "qx", "qy", "qz", "qw", "gripper_open"]
+    return [f"state_{i}" for i in range(dim)]
 
 
 def build_features(
@@ -131,17 +138,19 @@ def build_features(
     image_shape: tuple[int, int, int],
     action_dim: int,
     state_dim: int,
+    action_source: str,
+    state_source: str,
 ) -> dict[str, dict[str, Any]]:
     features: dict[str, dict[str, Any]] = {
         "action": {
             "dtype": "float32",
             "shape": (action_dim,),
-            "names": action_names(action_dim),
+            "names": action_names(action_dim, action_source),
         },
         "observation.state": {
             "dtype": "float32",
             "shape": (state_dim,),
-            "names": state_names(state_dim),
+            "names": state_names(state_dim, state_source),
         },
     }
     for cam in cameras:
@@ -380,16 +389,14 @@ def infer_image_shape(reader: TaskReader, ref: DemoRef, obs: Any, cameras: list[
     return (3, int(img.shape[0]), int(img.shape[1]))
 
 
-def vector_from_attrs(obs: Any, names: list[str]) -> np.ndarray | None:
+def vector_from_attrs(obs: Any, names: list[str]) -> np.ndarray:
     parts = []
     for name in names:
         value = obs_get(obs, name)
         if value is None:
-            continue
+            raise ValueError(f"Observation field '{name}' is missing.")
         arr = np.asarray(value, dtype=np.float32).reshape(-1)
         parts.append(arr)
-    if not parts:
-        return None
     return np.concatenate(parts, axis=0).astype(np.float32)
 
 
@@ -397,19 +404,23 @@ def extract_action(obs: Any, *, action_source: str, action_dim: int) -> np.ndarr
     if action_source == "auto":
         candidates = [
             ["action"],
-            ["joint_velocities"],
+            ["joint_velocities", "gripper_open"],
             ["joint_positions", "gripper_open"],
             ["gripper_pose", "gripper_open"],
         ]
     else:
         candidates = [[item.strip() for item in action_source.split("+") if item.strip()]]
+    errors = []
     for names in candidates:
-        vec = vector_from_attrs(obs, names)
-        if vec is None:
+        try:
+            vec = vector_from_attrs(obs, names)
+        except ValueError as exc:
+            errors.append(str(exc))
             continue
-        if vec.shape[0] >= action_dim:
-            return vec[:action_dim].astype(np.float32)
-    return np.zeros((action_dim,), dtype=np.float32)
+        if vec.shape[0] == action_dim:
+            return vec
+        errors.append(f"Fields {names} produced dim {vec.shape[0]}, expected {action_dim}.")
+    raise ValueError(f"Could not extract an exact {action_dim}D action: {'; '.join(errors)}")
 
 
 def extract_state(obs: Any, *, state_source: str, state_dim: int) -> np.ndarray:
@@ -422,15 +433,32 @@ def extract_state(obs: Any, *, state_source: str, state_dim: int) -> np.ndarray:
         ]
     else:
         candidates = [[item.strip() for item in state_source.split("+") if item.strip()]]
+    errors = []
     for names in candidates:
-        vec = vector_from_attrs(obs, names)
-        if vec is None:
+        try:
+            vec = vector_from_attrs(obs, names)
+        except ValueError as exc:
+            errors.append(str(exc))
             continue
-        out = np.zeros((state_dim,), dtype=np.float32)
-        take = min(state_dim, vec.shape[0])
-        out[:take] = vec[:take]
-        return out
-    return np.zeros((state_dim,), dtype=np.float32)
+        if vec.shape[0] == state_dim:
+            return vec
+        errors.append(f"Fields {names} produced dim {vec.shape[0]}, expected {state_dim}.")
+    raise ValueError(f"Could not extract an exact {state_dim}D state: {'; '.join(errors)}")
+
+
+def validate_episode_actions(actions: np.ndarray, *, source: str, demo_name: str) -> int:
+    if actions.ndim != 2:
+        raise ValueError(f"Actions in {demo_name} must be [T,D], got {actions.shape}.")
+    if not np.isfinite(actions).all():
+        raise ValueError(f"Actions in {demo_name} contain NaN or Inf values.")
+    if "gripper_open" not in source.split("+"):
+        return 0
+    gripper = actions[:, -1]
+    binary = np.isclose(gripper, 0.0) | np.isclose(gripper, 1.0)
+    if not binary.all():
+        bad = np.unique(gripper[~binary])[:10].tolist()
+        raise ValueError(f"Non-binary gripper_open values in {demo_name}: {bad}")
+    return int(np.count_nonzero(gripper[1:] != gripper[:-1]))
 
 
 def task_tuple(task: str, instruction: str) -> list[str]:
@@ -472,6 +500,7 @@ def write_dataset(
     limit_episodes: int | None,
     overwrite: bool,
     inspect_only: bool,
+    workers: int,
 ) -> None:
     if overwrite and out_root.exists() and not inspect_only:
         shutil.rmtree(out_root)
@@ -482,6 +511,10 @@ def write_dataset(
     episode_index = 0
     global_index = 0
     task_to_index: dict[str, int] = {}
+    action_min: np.ndarray | None = None
+    action_max: np.ndarray | None = None
+    gripper_transitions = 0
+    gripper_values: set[float] = set()
 
     for task in MEMORYBENCH_TASKS:
         if task not in task_sources:
@@ -507,6 +540,8 @@ def write_dataset(
                         image_shape=image_shape,
                         action_dim=action_dim,
                         state_dim=state_dim,
+                        action_source=action_source,
+                        state_source=state_source,
                     )
                     info = make_info(fps=fps, features=features)
                     if inspect_only:
@@ -521,15 +556,51 @@ def write_dataset(
                             ).shape
                         except Exception as exc:
                             camera_shapes[cam.output_key] = f"{type(exc).__name__}: {exc}"
+                    action0 = extract_action(obs0, action_source=action_source, action_dim=action_dim)
+                    state0 = extract_state(obs0, state_source=state_source, state_dim=state_dim)
                     print(
                         f"  demo={demo_pickle.raw_name} len={len(demo)} "
-                        f"obs_type={type(obs0)} attrs={attrs[:80]} camera_shapes={camera_shapes}"
+                        f"obs_type={type(obs0)} attrs={attrs[:80]} camera_shapes={camera_shapes} "
+                        f"action={action0.tolist()} state={state0.tolist()}"
                     )
                     continue
 
                 assert info is not None
                 features = info["features"]
                 frame_count = len(demo)
+                actions = np.stack(
+                    [extract_action(obs, action_source=action_source, action_dim=action_dim) for obs in demo]
+                ).astype(np.float32)
+                states = np.stack(
+                    [extract_state(obs, state_source=state_source, state_dim=state_dim) for obs in demo]
+                ).astype(np.float32)
+                if not np.isfinite(states).all():
+                    raise ValueError(f"States in {demo_pickle.raw_name} contain NaN or Inf values.")
+                gripper_transitions += validate_episode_actions(
+                    actions,
+                    source=action_source,
+                    demo_name=demo_pickle.raw_name,
+                )
+                action_min = actions.min(axis=0) if action_min is None else np.minimum(action_min, actions.min(axis=0))
+                action_max = actions.max(axis=0) if action_max is None else np.maximum(action_max, actions.max(axis=0))
+                if "gripper_open" in action_source.split("+"):
+                    gripper_values.update(float(value) for value in np.unique(actions[:, -1]))
+
+                def encode_images(frame: tuple[int, Any]) -> dict[str, dict[str, bytes]]:
+                    frame_index, frame_obs = frame
+                    return {
+                        image_feature_key(cam.output_key): pil_bytes(
+                            camera_image_to_pil(reader, demo_pickle, frame_obs, cam, frame_index)
+                        )
+                        for cam in cameras
+                    }
+
+                indexed_demo = list(enumerate(demo))
+                if workers > 1:
+                    with ThreadPoolExecutor(max_workers=workers) as executor:
+                        encoded_images = list(executor.map(encode_images, indexed_demo))
+                else:
+                    encoded_images = [encode_images(frame) for frame in indexed_demo]
                 episode_data: dict[str, list[Any]] = {
                     key: [] for key in features if key not in {"index", "episode_index", "frame_index", "timestamp"}
                 }
@@ -538,18 +609,16 @@ def write_dataset(
                 episode_data["frame_index"] = []
                 episode_data["timestamp"] = []
                 tasks = task_tuple(task, instruction)
-                for t, obs in enumerate(demo):
+                for t, _obs in enumerate(demo):
                     episode_data["index"].append(global_index)
                     episode_data["episode_index"].append(episode_index)
                     episode_data["frame_index"].append(t)
                     episode_data["timestamp"].append(float(t) / float(fps))
-                    episode_data["action"].append(extract_action(obs, action_source=action_source, action_dim=action_dim))
-                    episode_data["observation.state"].append(
-                        extract_state(obs, state_source=state_source, state_dim=state_dim)
-                    )
+                    episode_data["action"].append(actions[t])
+                    episode_data["observation.state"].append(states[t])
                     for cam in cameras:
-                        image = camera_image_to_pil(reader, demo_pickle, obs, cam, t)
-                        episode_data[image_feature_key(cam.output_key)].append(pil_bytes(image))
+                        key = image_feature_key(cam.output_key)
+                        episode_data[key].append(encoded_images[t][key])
                     global_index += 1
 
                 for task_text in tasks:
@@ -609,6 +678,8 @@ def write_dataset(
         return
     if info is None:
         raise RuntimeError("No demos were converted.")
+    if "gripper_open" in action_source.split("+") and gripper_transitions == 0:
+        raise RuntimeError("Converted actions contain no gripper state transitions.")
     info["total_episodes"] = episode_index
     info["total_frames"] = global_index
     info["total_tasks"] = len(task_to_index)
@@ -627,6 +698,14 @@ def write_dataset(
             "cameras": [cam.__dict__ for cam in cameras],
             "action_source": action_source,
             "state_source": state_source,
+            "action_alignment": "observation_t",
+            "action_dim": action_dim,
+            "state_dim": state_dim,
+            "workers": workers,
+            "action_min": None if action_min is None else action_min.tolist(),
+            "action_max": None if action_max is None else action_max.tolist(),
+            "gripper_values": sorted(gripper_values),
+            "gripper_transitions": gripper_transitions,
         },
         out_root / "meta" / "conversion_info.json",
     )
@@ -645,26 +724,29 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated output:observation_attr camera mapping.",
     )
     parser.add_argument("--fps", type=int, default=10)
-    parser.add_argument("--action-dim", type=int, default=7)
-    parser.add_argument("--state-dim", type=int, default=8)
+    parser.add_argument("--action-dim", type=int, default=DEFAULT_ACTION_DIM)
+    parser.add_argument("--state-dim", type=int, default=DEFAULT_STATE_DIM)
     parser.add_argument(
         "--action-source",
-        default="auto",
-        help="Observation fields joined by '+', or 'auto'. Default tries action, joint_velocities, joint_positions+gripper_open, gripper_pose+gripper_open.",
+        default=DEFAULT_ACTION_SOURCE,
+        help="Observation fields joined by '+', or 'auto'. Default is joint_velocities+gripper_open (8D).",
     )
     parser.add_argument(
         "--state-source",
-        default="auto",
-        help="Observation fields joined by '+', or 'auto'. Default tries gripper_pose+gripper_open, joint_positions+gripper_open.",
+        default=DEFAULT_STATE_SOURCE,
+        help="Observation fields joined by '+', or 'auto'. Default is gripper_pose+gripper_open (8D).",
     )
     parser.add_argument("--limit-episodes", type=int, default=None)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--inspect-only", action="store_true")
+    parser.add_argument("--workers", type=int, default=4, help="CPU threads used to decode/encode images per episode.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if args.workers < 1:
+        raise ValueError(f"--workers must be >= 1, got {args.workers}")
     cameras = parse_camera_specs(args.cameras)
     task_sources = {task: find_task_source(args.raw_root, args.split, task) for task in args.tasks}
     write_dataset(
@@ -680,6 +762,7 @@ def main() -> None:
         limit_episodes=args.limit_episodes,
         overwrite=args.overwrite,
         inspect_only=args.inspect_only,
+        workers=args.workers,
     )
 
 

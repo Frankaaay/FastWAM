@@ -1,0 +1,310 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080" role="img" aria-labelledby="title desc">
+  <title id="title">FastWAM v4 Spatial-Temporal Memory</title>
+  <desc id="desc">History video and executed action history are prefetched into layer-aligned key-value caches. Future action tokens alone form queries during iterative action denoising.</desc>
+  <defs>
+    <linearGradient id="headerGlow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#EFF6FF"/>
+      <stop offset="0.55" stop-color="#F5F3FF"/>
+      <stop offset="1" stop-color="#FFF7ED"/>
+    </linearGradient>
+    <linearGradient id="videoFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#E8F3FF"/>
+      <stop offset="1" stop-color="#D9EAFF"/>
+    </linearGradient>
+    <linearGradient id="actionFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFF4E6"/>
+      <stop offset="1" stop-color="#FFE7C2"/>
+    </linearGradient>
+    <linearGradient id="memoryFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#F3EEFF"/>
+      <stop offset="1" stop-color="#E8E0FF"/>
+    </linearGradient>
+    <linearGradient id="futureFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#EAF9EF"/>
+      <stop offset="1" stop-color="#D8F2E1"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#17324D" flood-opacity="0.10"/>
+    </filter>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#17324D" flood-opacity="0.08"/>
+    </filter>
+    <marker id="arrowBlue" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L11,5.5 L0,11 Z" fill="#2F73C5"/>
+    </marker>
+    <marker id="arrowOrange" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L11,5.5 L0,11 Z" fill="#E58A23"/>
+    </marker>
+    <marker id="arrowPurple" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L11,5.5 L0,11 Z" fill="#7658D6"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L11,5.5 L0,11 Z" fill="#26935A"/>
+    </marker>
+    <style>
+      .sans { font-family: "Segoe UI", Inter, Arial, sans-serif; }
+      .title { font-family: "Segoe UI", Inter, Arial, sans-serif; font-size: 48px; font-weight: 750; fill: #102A43; letter-spacing: -0.8px; }
+      .subtitle { font-family: "Segoe UI", Inter, Arial, sans-serif; font-size: 21px; font-weight: 450; fill: #52667A; }
+      .section { font-family: "Segoe UI", Inter, Arial, sans-serif; font-size: 15px; font-weight: 750; fill: #6B7D90; letter-spacing: 1.8px; }
+      .cardTitle { font-family: "Segoe UI", Inter, Arial, sans-serif; font-size: 25px; font-weight: 720; fill: #183B56; }
+      .cardSub { font-family: "Segoe UI", Inter, Arial, sans-serif; font-size: 17px; font-weight: 450; fill: #5B7083; }
+      .small { font-family: "Segoe UI", Inter, Arial, sans-serif; font-size: 14px; font-weight: 500; fill: #667B8F; }
+      .micro { font-family: "Segoe UI", Inter, Arial, sans-serif; font-size: 12px; font-weight: 650; fill: #62788C; }
+      .label { font-family: "Segoe UI", Inter, Arial, sans-serif; font-size: 16px; font-weight: 700; fill: #334E68; }
+      .formula { font-family: "Cambria Math", "Times New Roman", serif; font-size: 19px; font-style: italic; fill: #243B53; }
+    </style>
+  </defs>
+
+  <rect width="1920" height="1080" fill="#FBFCFF"/>
+  <rect x="0" y="0" width="1920" height="138" fill="url(#headerGlow)"/>
+  <path d="M0 138 H1920" stroke="#DCE6F0" stroke-width="1.5"/>
+
+  <g transform="translate(58,34)">
+    <rect x="0" y="0" width="154" height="38" rx="19" fill="#173D6B"/>
+    <text x="77" y="25" text-anchor="middle" class="sans" font-size="16" font-weight="750" fill="#FFFFFF" letter-spacing="0.7">FastWAM v4</text>
+    <text x="0" y="87" class="title">Spatial–Temporal Memory</text>
+    <text x="592" y="84" class="subtitle">Layer-aligned KV conditioning for action generation</text>
+  </g>
+
+  <g transform="translate(1390,43)">
+    <rect x="0" y="0" width="472" height="58" rx="17" fill="#FFF1F2" stroke="#F3A6AF" stroke-width="1.5"/>
+    <circle cx="29" cy="29" r="13" fill="#D94B5C"/>
+    <text x="29" y="34" text-anchor="middle" class="sans" font-size="15" font-weight="800" fill="#FFFFFF">!</text>
+    <text x="53" y="24" class="sans" font-size="14" font-weight="760" fill="#A22F3E" letter-spacing="0.5">KEY IDEA</text>
+    <text x="53" y="43" class="sans" font-size="15" font-weight="600" fill="#7E3540">Memory is K/V-only during action denoising</text>
+  </g>
+
+  <text x="58" y="176" class="section">1  ONLINE HISTORY</text>
+  <text x="423" y="176" class="section">2  CONDITION PREFILL</text>
+  <text x="797" y="176" class="section">3  LAYER-ALIGNED MEMORY</text>
+  <text x="1160" y="176" class="section">4  ACTION DENOISING · ITERATIVE</text>
+  <text x="1600" y="176" class="section">5  EXECUTION</text>
+
+  <!-- Input: video history -->
+  <g filter="url(#shadow)">
+    <rect x="58" y="207" width="312" height="202" rx="25" fill="url(#videoFill)" stroke="#2F73C5" stroke-width="2.2"/>
+  </g>
+  <circle cx="91" cy="241" r="16" fill="#2F73C5"/>
+  <path d="M83 236 h12 l7 5 v8 H83 Z M95 238 v9" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linejoin="round"/>
+  <text x="119" y="249" class="cardTitle">Video window</text>
+  <text x="86" y="279" class="cardSub">past observations + current frame</text>
+  <g transform="translate(85,300)">
+    <g transform="translate(0,0)">
+      <rect x="0" y="12" width="54" height="58" rx="7" fill="#B7D5F6" stroke="#2F73C5"/>
+      <path d="M7 57 L20 43 L30 50 L39 35 L48 57" fill="#DDEEFF" stroke="#6A9FD8" stroke-width="1"/>
+      <text x="27" y="88" text-anchor="middle" class="micro">t−16</text>
+    </g>
+    <g transform="translate(48,0)">
+      <rect x="0" y="9" width="54" height="61" rx="7" fill="#C0DCF8" stroke="#2F73C5"/>
+      <path d="M7 57 L19 39 L31 51 L40 32 L48 57" fill="#E4F1FF" stroke="#6A9FD8" stroke-width="1"/>
+      <text x="27" y="88" text-anchor="middle" class="micro">t−12</text>
+    </g>
+    <g transform="translate(96,0)">
+      <rect x="0" y="6" width="54" height="64" rx="7" fill="#C9E2FA" stroke="#2F73C5"/>
+      <path d="M7 57 L20 41 L30 49 L40 29 L48 57" fill="#EAF5FF" stroke="#6A9FD8" stroke-width="1"/>
+      <text x="27" y="88" text-anchor="middle" class="micro">t−8</text>
+    </g>
+    <g transform="translate(144,0)">
+      <rect x="0" y="3" width="54" height="67" rx="7" fill="#D4E9FC" stroke="#2F73C5"/>
+      <path d="M7 57 L18 45 L31 50 L40 27 L48 57" fill="#F0F8FF" stroke="#6A9FD8" stroke-width="1"/>
+      <text x="27" y="88" text-anchor="middle" class="micro">t−4</text>
+    </g>
+    <g transform="translate(192,0)">
+      <rect x="0" y="0" width="60" height="70" rx="8" fill="#2F73C5" stroke="#15589E" stroke-width="1.8"/>
+      <path d="M8 57 L20 42 L33 50 L45 24 L53 57" fill="#DCEEFF" stroke="#FFFFFF" stroke-width="1.4"/>
+      <text x="30" y="88" text-anchor="middle" class="sans" font-size="12" font-weight="800" fill="#1D5E9F">CURRENT t</text>
+    </g>
+  </g>
+
+  <!-- Input: action history -->
+  <g filter="url(#shadow)">
+    <rect x="58" y="438" width="312" height="137" rx="25" fill="url(#actionFill)" stroke="#E58A23" stroke-width="2.2"/>
+  </g>
+  <circle cx="91" cy="472" r="16" fill="#E58A23"/>
+  <path d="M82 472 H100 M94 466 L100 472 L94 478" fill="none" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="119" y="480" class="cardTitle">Action history</text>
+  <text x="86" y="510" class="cardSub">20 actions actually executed</text>
+  <g transform="translate(86,528)">
+    <rect x="0" y="0" width="28" height="22" rx="6" fill="#E58A23" opacity="0.55"/>
+    <rect x="35" y="0" width="28" height="22" rx="6" fill="#E58A23" opacity="0.65"/>
+    <rect x="70" y="0" width="28" height="22" rx="6" fill="#E58A23" opacity="0.75"/>
+    <circle cx="118" cy="11" r="3" fill="#B7660F"/><circle cx="130" cy="11" r="3" fill="#B7660F"/><circle cx="142" cy="11" r="3" fill="#B7660F"/>
+    <rect x="158" y="0" width="28" height="22" rx="6" fill="#E58A23" opacity="0.85"/>
+    <rect x="193" y="0" width="28" height="22" rx="6" fill="#E58A23"/>
+    <text x="0" y="42" class="micro">A(t−20)</text>
+    <text x="169" y="42" class="micro">A(t−1)</text>
+  </g>
+
+  <!-- Prefill encoders -->
+  <g filter="url(#shadow)">
+    <rect x="423" y="207" width="315" height="202" rx="25" fill="#FFFFFF" stroke="#6A9FD8" stroke-width="2"/>
+  </g>
+  <rect x="445" y="229" width="271" height="40" rx="12" fill="#E8F3FF"/>
+  <text x="581" y="255" text-anchor="middle" class="label" fill="#215C9A">VAE → Video Expert</text>
+  <text x="454" y="300" class="cardSub">Clean visual condition</text>
+  <g transform="translate(454,319)">
+    <rect x="0" y="0" width="236" height="47" rx="10" fill="#F4F8FC" stroke="#C7D8E8"/>
+    <circle cx="28" cy="23" r="12" fill="#2F73C5" opacity="0.18"/>
+    <text x="28" y="29" text-anchor="middle" class="sans" font-size="15" font-weight="800" fill="#2F73C5">ℓ</text>
+    <text x="50" y="21" class="small">run through every layer</text>
+    <text x="50" y="38" class="micro">task / proprio cross-attention</text>
+  </g>
+  <text x="454" y="390" class="small" fill="#2F73C5">Produces Kᵛℓ, Vᵛℓ at each layer</text>
+
+  <g filter="url(#shadow)">
+    <rect x="423" y="438" width="315" height="137" rx="25" fill="#FFFFFF" stroke="#E5A653" stroke-width="2"/>
+  </g>
+  <rect x="445" y="460" width="271" height="40" rx="12" fill="#FFF2DF"/>
+  <text x="581" y="486" text-anchor="middle" class="label" fill="#A95B0A">Action Embed → Action Expert</text>
+  <text x="454" y="526" class="cardSub">Clean executed-action condition</text>
+  <text x="454" y="553" class="small" fill="#C06A12">Produces Kᵃℓ, Vᵃℓ at each layer</text>
+
+  <!-- Arrows into prefill -->
+  <path d="M370 308 H409" stroke="#2F73C5" stroke-width="5" fill="none" marker-end="url(#arrowBlue)"/>
+  <path d="M370 507 H409" stroke="#E58A23" stroke-width="5" fill="none" marker-end="url(#arrowOrange)"/>
+
+  <!-- Layer-aligned cache -->
+  <g filter="url(#shadow)">
+    <rect x="797" y="207" width="298" height="368" rx="27" fill="url(#memoryFill)" stroke="#7658D6" stroke-width="2.3"/>
+  </g>
+  <circle cx="833" cy="243" r="17" fill="#7658D6"/>
+  <path d="M826 236 h14 v5 h-14 Z M826 244 h14 v5 h-14 Z" fill="#FFFFFF" opacity="0.95"/>
+  <text x="862" y="251" class="cardTitle" style="font-size:22px">Condition KV cache</text>
+  <text x="826" y="282" class="cardSub">aligned with every MoT layer</text>
+
+  <g transform="translate(826,305)">
+    <g filter="url(#softShadow)">
+      <rect x="0" y="0" width="240" height="66" rx="13" fill="#FFFFFF" stroke="#C7B8F5"/>
+      <rect x="12" y="12" width="42" height="42" rx="10" fill="#7658D6"/>
+      <text x="33" y="39" text-anchor="middle" class="sans" font-size="16" font-weight="800" fill="#FFFFFF">L1</text>
+      <text x="66" y="27" class="small">K₁ = [Kᵛ₁ ; Kᵃ₁]</text>
+      <text x="66" y="49" class="small">V₁ = [Vᵛ₁ ; Vᵃ₁]</text>
+    </g>
+    <g filter="url(#softShadow)" transform="translate(0,78)">
+      <rect x="0" y="0" width="240" height="66" rx="13" fill="#FFFFFF" stroke="#C7B8F5"/>
+      <rect x="12" y="12" width="42" height="42" rx="10" fill="#7658D6" opacity="0.88"/>
+      <text x="33" y="39" text-anchor="middle" class="sans" font-size="16" font-weight="800" fill="#FFFFFF">L2</text>
+      <text x="66" y="27" class="small">K₂ = [Kᵛ₂ ; Kᵃ₂]</text>
+      <text x="66" y="49" class="small">V₂ = [Vᵛ₂ ; Vᵃ₂]</text>
+    </g>
+    <g transform="translate(0,154)">
+      <circle cx="109" cy="7" r="3" fill="#8C78D8"/><circle cx="120" cy="7" r="3" fill="#8C78D8"/><circle cx="131" cy="7" r="3" fill="#8C78D8"/>
+    </g>
+    <g filter="url(#softShadow)" transform="translate(0,176)">
+      <rect x="0" y="0" width="240" height="66" rx="13" fill="#FFFFFF" stroke="#C7B8F5"/>
+      <rect x="12" y="12" width="42" height="42" rx="10" fill="#7658D6" opacity="0.74"/>
+      <text x="33" y="39" text-anchor="middle" class="sans" font-size="16" font-weight="800" fill="#FFFFFF">Lℓ</text>
+      <text x="66" y="27" class="small">Kℓ = [Kᵛℓ ; Kᵃℓ]</text>
+      <text x="66" y="49" class="small">Vℓ = [Vᵛℓ ; Vᵃℓ]</text>
+    </g>
+  </g>
+
+  <path d="M738 308 H782" stroke="#2F73C5" stroke-width="5" fill="none" marker-end="url(#arrowBlue)"/>
+  <path d="M738 507 H782" stroke="#E58A23" stroke-width="5" fill="none" marker-end="url(#arrowOrange)"/>
+
+  <!-- Action denoising card -->
+  <g filter="url(#shadow)">
+    <rect x="1160" y="207" width="373" height="368" rx="27" fill="#FFFFFF" stroke="#74869A" stroke-width="2.2"/>
+  </g>
+  <rect x="1184" y="229" width="325" height="53" rx="15" fill="#F2F6FA"/>
+  <text x="1205" y="253" class="small" fill="#5A6F83">Initialize</text>
+  <text x="1205" y="273" class="label">noisy future action chunk A(t:t+31)</text>
+
+  <g transform="translate(1190,304)">
+    <rect x="0" y="0" width="313" height="91" rx="17" fill="url(#futureFill)" stroke="#79BF97" stroke-width="1.7"/>
+    <text x="20" y="29" class="cardTitle" font-size="23">Future Action Expert</text>
+    <text x="20" y="57" class="cardSub">creates Qᵃℓ, Kᵃᶠℓ, Vᵃᶠℓ</text>
+    <text x="20" y="80" class="micro">only this stream is updated</text>
+  </g>
+
+  <g transform="translate(1190,414)">
+    <rect x="0" y="0" width="313" height="94" rx="17" fill="#F7F4FF" stroke="#A99AE4" stroke-width="1.7"/>
+    <text x="20" y="29" class="label" fill="#5F46B3">Attention at layer ℓ</text>
+    <text x="20" y="57" class="formula">Qᵃℓ · [Kℓ ; Kᵃᶠℓ]ᵀ</text>
+    <text x="20" y="80" class="small">reads memory K/V + action self K/V</text>
+  </g>
+  <path d="M1478 395 V412" stroke="#26935A" stroke-width="3" marker-end="url(#arrowGreen)"/>
+  <path d="M1498 519 C1518 542 1509 557 1485 563 H1212 C1179 558 1177 528 1190 511" stroke="#26935A" stroke-width="3" fill="none" marker-end="url(#arrowGreen)"/>
+  <rect x="1259" y="535" width="178" height="25" rx="12" fill="#E5F6EB"/>
+  <text x="1348" y="552" text-anchor="middle" class="micro" fill="#26794C">repeat over denoising steps</text>
+
+  <path d="M1095 390 H1145" stroke="#7658D6" stroke-width="5" fill="none" marker-end="url(#arrowPurple)"/>
+  <rect x="1103" y="346" width="118" height="25" rx="12" fill="#F0EBFF"/>
+  <text x="1162" y="363" text-anchor="middle" class="micro" fill="#674CC3">K/V only</text>
+
+  <!-- Output -->
+  <g filter="url(#shadow)">
+    <rect x="1600" y="257" width="262" height="219" rx="27" fill="url(#futureFill)" stroke="#26935A" stroke-width="2.3"/>
+  </g>
+  <circle cx="1637" cy="294" r="17" fill="#26935A"/>
+  <path d="M1629 294 L1635 300 L1646 287" fill="none" stroke="#FFFFFF" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="1666" y="302" class="cardTitle">Action chunk</text>
+  <text x="1631" y="339" class="cardSub">denoised future controls</text>
+  <g transform="translate(1631,361)">
+    <rect x="0" y="0" width="34" height="28" rx="7" fill="#26935A"/>
+    <rect x="43" y="0" width="34" height="28" rx="7" fill="#26935A" opacity="0.86"/>
+    <rect x="86" y="0" width="34" height="28" rx="7" fill="#26935A" opacity="0.72"/>
+    <circle cx="142" cy="14" r="3" fill="#26794C"/><circle cx="154" cy="14" r="3" fill="#26794C"/><circle cx="166" cy="14" r="3" fill="#26794C"/>
+    <rect x="190" y="0" width="34" height="28" rx="7" fill="#26935A" opacity="0.58"/>
+  </g>
+  <rect x="1631" y="408" width="200" height="41" rx="12" fill="#FFFFFF" stroke="#B6DEC5"/>
+  <text x="1731" y="434" text-anchor="middle" class="label" fill="#26794C">execute receding horizon</text>
+  <path d="M1533 366 H1585" stroke="#26935A" stroke-width="5" fill="none" marker-end="url(#arrowGreen)"/>
+
+  <!-- Shared context -->
+  <g filter="url(#softShadow)">
+    <rect x="423" y="608" width="1110" height="61" rx="18" fill="#FFFFFF" stroke="#CCD9E5" stroke-width="1.5"/>
+  </g>
+  <circle cx="455" cy="638" r="14" fill="#64788C"/>
+  <path d="M448 638 h14 M455 631 v14" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/>
+  <text x="481" y="634" class="label">Task instruction + proprioception</text>
+  <text x="481" y="654" class="small">context-modulates prefill and future-action blocks</text>
+  <path d="M579 608 V586" stroke="#8799AA" stroke-width="2" stroke-dasharray="5 5"/>
+  <path d="M1346 608 V585" stroke="#8799AA" stroke-width="2" stroke-dasharray="5 5"/>
+
+  <!-- Attention inset -->
+  <g filter="url(#shadow)">
+    <rect x="423" y="704" width="1110" height="257" rx="28" fill="#F7F9FC" stroke="#B9C8D6" stroke-width="1.8"/>
+  </g>
+  <text x="454" y="741" class="section">INSIDE ONE ACTION-DENOISING LAYER ℓ</text>
+  <text x="454" y="768" class="cardSub">The history branch is frozen as cache; the future-action branch supplies the queries.</text>
+
+  <g transform="translate(454,797)">
+    <rect x="0" y="0" width="305" height="125" rx="19" fill="#EEE9FF" stroke="#9B88E1" stroke-width="1.6"/>
+    <text x="20" y="30" class="label" fill="#5F46B3">Cached condition memory</text>
+    <text x="20" y="61" class="formula">Kᵐᵉᵐℓ = [Kᵛℓ ; Kᵃℓ]</text>
+    <text x="20" y="88" class="formula">Vᵐᵉᵐℓ = [Vᵛℓ ; Vᵃℓ]</text>
+    <rect x="184" y="92" width="101" height="23" rx="11" fill="#FFF1F2"/>
+    <text x="234" y="108" text-anchor="middle" class="micro" fill="#B13B4B">NO memory Q</text>
+  </g>
+
+  <g transform="translate(815,797)">
+    <rect x="0" y="0" width="305" height="125" rx="19" fill="#E8F7ED" stroke="#77BE95" stroke-width="1.6"/>
+    <text x="20" y="30" class="label" fill="#26794C">Future-action stream</text>
+    <text x="20" y="61" class="formula">Qᶠℓ, Kᶠℓ, Vᶠℓ ← xᶠℓ</text>
+    <text x="20" y="90" class="small">query + self K/V are recomputed</text>
+    <text x="20" y="112" class="micro" fill="#26794C">updated at every layer and denoising step</text>
+  </g>
+
+  <g transform="translate(1175,797)">
+    <rect x="0" y="0" width="326" height="125" rx="19" fill="#FFFFFF" stroke="#8DA0B3" stroke-width="1.6"/>
+    <text x="20" y="30" class="label">Memory-augmented attention</text>
+    <text x="20" y="60" class="formula">Attn(Qᶠℓ, [Kᵐᵉᵐℓ;Kᶠℓ],</text>
+    <text x="20" y="85" class="formula">              [Vᵐᵉᵐℓ;Vᶠℓ])</text>
+    <text x="20" y="111" class="micro">output updates future action tokens only</text>
+  </g>
+
+  <path d="M759 859 H801" stroke="#7658D6" stroke-width="4" marker-end="url(#arrowPurple)"/>
+  <path d="M1120 859 H1161" stroke="#26935A" stroke-width="4" marker-end="url(#arrowGreen)"/>
+
+  <!-- Online feedback loop -->
+  <path d="M1731 476 V1012 H206 C130 1012 96 956 96 893 V590" stroke="#26935A" stroke-width="3.2" stroke-dasharray="10 8" fill="none" marker-end="url(#arrowGreen)"/>
+  <path d="M205 1012 C103 1012 31 956 31 893 V308 H43" stroke="#26935A" stroke-width="3.2" stroke-dasharray="10 8" fill="none" marker-end="url(#arrowGreen)"/>
+  <rect x="678" y="987" width="655" height="47" rx="23" fill="#EAF8EF" stroke="#9ED3B3"/>
+  <text x="1006" y="1007" text-anchor="middle" class="label" fill="#26794C">Execute → record actual action + next observation → slide the history window</text>
+  <text x="1006" y="1026" text-anchor="middle" class="micro" fill="#4B8062">Never write an unexecuted predicted chunk into action history</text>
+
+  <text x="58" y="1054" class="small">Current v4 defaults: 5 visual samples V(t−16:t:4), 20 executed actions A(t−20:t), 32-step future action chunk.</text>
+  <text x="1862" y="1054" text-anchor="end" class="small">Spatial memory within frames · temporal memory across the trajectory</text>
+</svg>
