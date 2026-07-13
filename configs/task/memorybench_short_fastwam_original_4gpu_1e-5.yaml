@@ -19,11 +19,12 @@ learning_rate: 1e-5
 num_epochs: 10
 max_steps: 10000
 log_every: 10
-save_every: 2000
-eval_every: 1000
+save_every: 0
+eval_every: 100000
 
 gradient_accumulation_steps: 1
 weight_decay: 1e-2
+align_optimizer_param_order: true
 resume: checkpoints/fastwam_release/libero_uncond_2cam224.pt
 allow_action_dim_checkpoint_reinit: true
 
@@ -32,5 +33,5 @@ wandb:
   workspace: yichx14-uc-irvine
   project: fastwam-mem
   name: memorybench_short_fastwam_original_4gpu_1e-5
-  group: memorybench-short-original-fastwam
+  group: memorybench-short-v2-comparison
   mode: offline

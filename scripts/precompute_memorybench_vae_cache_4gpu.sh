@@ -140,3 +140,9 @@ python scripts/validate_memorybench_vae_cache.py \
   | tee "$RUN_ROOT/full_validation.json"
 
 echo "[done] run_id=$RUN_ID cache=$CACHE_ROOT logs=$RUN_ROOT"
+
+if [[ "${MEMORYBENCH_AUTO_TRAIN_AFTER_CACHE:-1}" == "1" ]]; then
+  echo "[handoff] cache complete; entering dual-training watcher"
+  export MEMORYBENCH_DATASET_STATS_PATH="$STATS_PATH"
+  exec bash scripts/watch_and_train_memorybench_dual_8gpu.sh
+fi
