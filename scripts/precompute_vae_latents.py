@@ -202,19 +202,21 @@ def main(cfg: DictConfig):
     all_indices = list(range(len(dataset)))
     if max_samples is not None:
         all_indices = all_indices[:max(max_samples, 0)]
-    all_indices, skipped_existing = _filter_indices(
+    shard_indices = all_indices[shard_rank::shard_world_size]
+    local_indices, skipped_existing = _filter_indices(
         dataset,
-        all_indices,
+        shard_indices,
         cache_dir=cache_dir,
         overwrite=overwrite,
     )
-    local_indices = all_indices[shard_rank::shard_world_size]
     if rank == 0:
         logger.info(
-            "Dataset size=%d fingerprint=%s to_encode=%d skipped_existing=%d shard=%d/%d",
+            "Dataset size=%d fingerprint=%s shard_candidates=%d to_encode=%d "
+            "skipped_existing=%d shard=%d/%d",
             len(dataset),
             dataset.vae_latent_cache_fingerprint,
-            len(all_indices),
+            len(shard_indices),
+            len(local_indices),
             skipped_existing,
             shard_rank,
             shard_world_size,
@@ -229,7 +231,7 @@ def main(cfg: DictConfig):
         pin_memory=torch.cuda.is_available(),
     )
 
-    stats = {"new": 0, "overwrite": 0, "skip": skipped_existing if rank == 0 else 0}
+    stats = {"new": 0, "overwrite": 0, "skip": skipped_existing}
     with tqdm(
         total=len(local_indices),
         desc=f"VAE latents shard {shard_rank}/{shard_world_size}",
