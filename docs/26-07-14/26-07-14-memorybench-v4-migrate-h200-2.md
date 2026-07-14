@@ -31,12 +31,17 @@ cd /data/home/frank/projects/FastWAM-memorybench-v4
 setsid nohup bash scripts/precompute_memorybench_vae_cache_4gpu.sh > runs/precompute_launcher.log 2>&1 < /dev/null &
 ```
 
-## 状态:进行中
+## 状态:双训练进行中(13:25 起)
 
-- run_id:`memorybench_vae_v2_20260714_125814`,GPU 0-3,4 shard × 23,256 样本,约 23.7 sample/s/shard
-- 日志:`runs/precompute_launcher.log` 与 `runs/vae_latent_cache_precompute/memorybench_short_v2/memorybench_vae_v2_20260714_125814/shard_{0..3}.log`
+- precompute run_id:`memorybench_vae_v2_20260714_125814`,GPU 0-3,4 shard × 23,256 样本,约 30 分钟完成
+- 全量校验通过:恰好 **93,027** 个 cache,fingerprint `d20e3b119e06ad7f`,`full_validation.json` status=ok
 - cache 输出:`/data/shared/offline/datasets/memorybench/vae_latent_cache/memorybench_short_wan22/d20e3b119e06ad7f/`
-- 完成后脚本自动执行 `--require-complete` 校验(恰好 93,027 个 + fingerprint 匹配),随后 `exec` 进入 `watch_and_train_memorybench_dual_8gpu.sh`:等 8 卡全空 → 双模型 1-step smoke → 双模型正式训练(0-3 卡原版 / 4-7 卡 v4,BS 24/卡、LR 1e-5、10,000 steps、GEMM 对齐、只存最终 ckpt)
+- 双模型 1-step smoke 通过(13:19),正式训练 13:25 启动:
+  - 原版:`memorybench_original_v2_full_20260714_132519`,GPU 0-3,约 1.12 step/s,ETA ~2.5h
+  - v4:`memorybench_v4_v2_full_20260714_132519`,GPU 4-7,约 0.79 step/s,ETA ~3.5h
+  - 参数一致:BS 24/卡、LR 1e-5、10,000 steps、GEMM 对齐、只存最终 ckpt
+- 训练日志:`runs/logs/memorybench_{original,v4}_v2_full_20260714_132519.log`
+- wandb offline 目录已生成(`e6n28py1` v4 / `gtflbzka` original),由 jump 上 node-2 daemon 每 600s 同步至云端 `fastwam-mem`
 
 ## 监控命令
 
