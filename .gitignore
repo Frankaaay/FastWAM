@@ -18,6 +18,7 @@ Mem.pdf
 .agents/
 AGENTS.md
 CLAUDE.md
+cluster_gpu_top.py
 
 # Data types
 *.jit
