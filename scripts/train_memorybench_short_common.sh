@@ -12,7 +12,7 @@ LOG_FILE="${LOG_FILE:-${LOG_DIR}/${RUN_ID}.log}"
 AUTO_PRECOMPUTE_TEXT="${AUTO_PRECOMPUTE_TEXT:-1}"
 
 DATA_ROOT="${MEMORYBENCH_DATA_ROOT:-/data/shared/offline/datasets/memorybench}"
-TRAIN_DATA="${DATA_ROOT}/lerobot/memorybench_short_train_v2"
+TRAIN_DATA="${DATA_ROOT}/lerobot/memorybench_short_train_v3"
 TEXT_CACHE="${DATA_ROOT}/text_embeds_cache"
 TEXT_CACHE_GLOB="*.t5_len128.wan22ti2v5b.pt"
 VAE_CACHE="${MEMORYBENCH_VAE_CACHE_DIR:-${DATA_ROOT}/vae_latent_cache/memorybench_short_wan22}"
@@ -33,7 +33,7 @@ conda activate fastwam
 
 if [[ ! -d "$TRAIN_DATA" ]]; then
   echo "[FATAL] MemoryBench train data not found: $TRAIN_DATA" >&2
-  echo "Expected converted data under MEMORYBENCH_DATA_ROOT/lerobot/memorybench_short_train_v2." >&2
+  echo "Expected converted data under MEMORYBENCH_DATA_ROOT/lerobot/memorybench_short_train_v3." >&2
   exit 1
 fi
 

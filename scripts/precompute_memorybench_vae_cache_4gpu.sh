@@ -13,8 +13,8 @@ fi
 DATA_ROOT="${MEMORYBENCH_DATA_ROOT:-/data/shared/offline/datasets/memorybench}"
 CACHE_ROOT="${MEMORYBENCH_VAE_CACHE_DIR:-${DATA_ROOT}/vae_latent_cache/memorybench_short_wan22}"
 TASK_NAME="${MEMORYBENCH_PRECOMPUTE_TASK:-memorybench_short_v4_1e-5}"
-RUN_ID="${MEMORYBENCH_PRECOMPUTE_RUN_ID:-memorybench_vae_v2_$(date +%Y%m%d_%H%M%S)}"
-RUN_ROOT="${MEMORYBENCH_PRECOMPUTE_RUN_ROOT:-$PWD/runs/vae_latent_cache_precompute/memorybench_short_v2}/${RUN_ID}"
+RUN_ID="${MEMORYBENCH_PRECOMPUTE_RUN_ID:-memorybench_vae_v3_$(date +%Y%m%d_%H%M%S)}"
+RUN_ROOT="${MEMORYBENCH_PRECOMPUTE_RUN_ROOT:-$PWD/runs/vae_latent_cache_precompute/memorybench_short_v3}/${RUN_ID}"
 LOCK_FILE="${MEMORYBENCH_PRECOMPUTE_LOCK:-/tmp/fastwam_memorybench_vae_precompute.lock}"
 MAX_USED_MIB="${MEMORYBENCH_GPU_MAX_USED_MIB:-1024}"
 MAX_UTIL="${MEMORYBENCH_GPU_MAX_UTIL:-5}"
@@ -54,7 +54,7 @@ for gpu in "${GPUS[@]}"; do
   fi
 done
 
-TRAIN_DATA="${DATA_ROOT}/lerobot/memorybench_short_train_v2"
+TRAIN_DATA="${DATA_ROOT}/lerobot/memorybench_short_train_v3"
 TEXT_CACHE="${DATA_ROOT}/text_embeds_cache"
 VAE_PATH="$PWD/checkpoints/Wan-AI/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
 [[ -d "$TRAIN_DATA" ]] || { echo "[FATAL] Missing train data: $TRAIN_DATA" >&2; exit 1; }

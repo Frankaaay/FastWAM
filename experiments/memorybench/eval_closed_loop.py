@@ -253,10 +253,10 @@ def _build_obs_config():
     return obs_config
 
 
-def _build_env(dataset_root: Path, task_name: str):
+def _build_env(dataset_root: Path, task_name: str, arm_action_mode_name: str = "joint_position"):
     import importlib
     from rlbench.action_modes.action_mode import MoveArmThenGripper
-    from rlbench.action_modes.arm_action_modes import JointVelocity
+    from rlbench.action_modes.arm_action_modes import JointPosition, JointVelocity
     from rlbench.action_modes.gripper_action_modes import Discrete
     from rlbench.environment import Environment
 
@@ -264,9 +264,22 @@ def _build_env(dataset_root: Path, task_name: str):
         def action(self, scene, action, ignore_collisions=True):
             return super().action(scene, action)
 
+    # v3 默认:绝对关节位置。demos 由 waypoint 规划(位置控制)采集,观测速度经
+    # JointVelocity 回放会漂移(真值回放都失败);绝对位置每步重新锚定,真值回放三任务全成功。
+    class JointPositionIgnoreCollisions(JointPosition):
+        def action(self, scene, action, ignore_collisions=True):
+            return super().action(scene, action)
+
+    if arm_action_mode_name == "joint_position":
+        arm_action_mode = JointPositionIgnoreCollisions(absolute_mode=True)
+    elif arm_action_mode_name == "joint_velocity":
+        arm_action_mode = JointVelocityIgnoreCollisions()
+    else:
+        raise ValueError(f"Unsupported arm_action_mode: {arm_action_mode_name}")
+
     module_name, class_name = TASK_MODULES[task_name]
     task_cls = getattr(importlib.import_module(module_name), class_name)
-    action_mode = MoveArmThenGripper(JointVelocityIgnoreCollisions(), Discrete())
+    action_mode = MoveArmThenGripper(arm_action_mode, Discrete())
     env = Environment(
         action_mode=action_mode,
         dataset_root=str(dataset_root),
@@ -481,7 +494,11 @@ def main(cfg: DictConfig) -> dict[str, Any]:
     logging.info("  stats=%s", stats_path)
     logging.info("  dataset_root=%s", dataset_root)
 
-    env, task_cls = _build_env(dataset_root, task_name)
+    env, task_cls = _build_env(
+        dataset_root,
+        task_name,
+        arm_action_mode_name=str(cfg.memorybench_eval.get("arm_action_mode", "joint_position")),
+    )
     episode_results: list[dict[str, Any]] = []
     try:
         env.launch()
@@ -540,7 +557,7 @@ def main(cfg: DictConfig) -> dict[str, Any]:
         "output_dir": str(output_dir),
         "device": model_device,
         "use_history": FastWAMOnlineHistoryBuffer.enabled_for_model(model),
-        "action_mode": "JointVelocity+Discrete",
+        "action_mode": f"{str(cfg.memorybench_eval.get('arm_action_mode', 'joint_position'))}+Discrete",
         "gripper_strategy": str(cfg.memorybench_eval.get("gripper_strategy", "last_dim")),
         "action_horizon": action_horizon,
         "replan_steps": replan_steps,

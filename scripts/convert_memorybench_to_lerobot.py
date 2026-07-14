@@ -497,6 +497,7 @@ def write_dataset(
     state_dim: int,
     action_source: str,
     state_source: str,
+    action_shift: int,
     limit_episodes: int | None,
     overwrite: bool,
     inspect_only: bool,
@@ -571,6 +572,13 @@ def write_dataset(
                 actions = np.stack(
                     [extract_action(obs, action_source=action_source, action_dim=action_dim) for obs in demo]
                 ).astype(np.float32)
+                if action_shift > 0:
+                    # 绝对位置动作:action[t] = 下一帧(t+shift)的观测值,末帧重复补齐。
+                    # 速度动作(v2)不移位;位置动作若不移位,模型学到的是"停在原地"。
+                    actions = np.concatenate(
+                        [actions[action_shift:], np.repeat(actions[-1:], action_shift, axis=0)],
+                        axis=0,
+                    ).astype(np.float32)
                 states = np.stack(
                     [extract_state(obs, state_source=state_source, state_dim=state_dim) for obs in demo]
                 ).astype(np.float32)
@@ -736,6 +744,16 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_STATE_SOURCE,
         help="Observation fields joined by '+', or 'auto'. Default is gripper_pose+gripper_open (8D).",
     )
+    parser.add_argument(
+        "--action-shift",
+        type=int,
+        default=0,
+        help=(
+            "Shift actions forward by N frames: action[t] = extract(obs[t+N]), last frame repeated. "
+            "Use 1 with absolute-position action sources so action[t] is the NEXT target "
+            "(pos[t] would command 'stay in place')."
+        ),
+    )
     parser.add_argument("--limit-episodes", type=int, default=None)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--inspect-only", action="store_true")
@@ -759,6 +777,7 @@ def main() -> None:
         state_dim=args.state_dim,
         action_source=args.action_source,
         state_source=args.state_source,
+        action_shift=args.action_shift,
         limit_episodes=args.limit_episodes,
         overwrite=args.overwrite,
         inspect_only=args.inspect_only,

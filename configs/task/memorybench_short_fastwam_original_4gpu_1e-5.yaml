@@ -33,5 +33,5 @@ wandb:
   workspace: yichx14-uc-irvine
   project: fastwam-mem
   name: memorybench_short_fastwam_original_4gpu_1e-5
-  group: memorybench-short-v2-comparison
+  group: memorybench-short-v3-comparison
   mode: offline

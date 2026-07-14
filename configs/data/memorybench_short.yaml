@@ -1,7 +1,7 @@
 train:
   _target_: fastwam.datasets.lerobot.robot_video_dataset.RobotVideoDataset
   dataset_dirs:
-    - ${oc.env:MEMORYBENCH_DATA_ROOT,/data/shared/offline/datasets/memorybench}/lerobot/memorybench_short_train_v2
+    - ${oc.env:MEMORYBENCH_DATA_ROOT,/data/shared/offline/datasets/memorybench}/lerobot/memorybench_short_train_v3
   shape_meta:
     images:
       - key: image

@@ -94,8 +94,8 @@ run_pair() {
   local timestamp original_run v4_run original_log v4_log original_port v4_port
   local original_pid v4_pid original_status v4_status status
   timestamp="$(date +%Y%m%d_%H%M%S)"
-  original_run="memorybench_original_v2_${mode}_${timestamp}"
-  v4_run="memorybench_v4_v2_${mode}_${timestamp}"
+  original_run="memorybench_original_v3_${mode}_${timestamp}"
+  v4_run="memorybench_v4_v3_${mode}_${timestamp}"
   original_log="$PWD/runs/logs/${original_run}.log"
   v4_log="$PWD/runs/logs/${v4_run}.log"
   read -r original_port v4_port < <(allocate_ports)

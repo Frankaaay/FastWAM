@@ -122,12 +122,30 @@ rearrange_block、reopen_drawer 的 JointPosition 真值回放同样成功(rewar
 
 **结论**:MemoryBench demos 是 waypoint 规划采集,观测到的 joint_velocities 经 JointVelocity 模式回放会漂移,连真值都无法完成任务——**v2 的"速度当动作"路线在闭环里根本不可行,两次 0/75 均为系统性失败,不反映 memory 能力差异**。正确路线是绝对关节位置动作。
 
-### 下一步建议(v3,待确认)
+### 根因分析(为什么速度动作必然失败)
 
-1. `convert_memorybench_to_lerobot.py` 增加 action 时移(action[t]=pos[t+1],末帧重复),用 `action_source=joint_positions+gripper_open` 重转 v3 数据
-2. `eval_closed_loop.py` 动作模式换成 JointPosition(absolute,包 `ignore_collisions` wrapper),`gripper_strategy=last_dim` 不变
-3. 视频不变 → VAE cache 理论上可复用(取决于 fingerprint 是否含 action 字段,不行就重预计算 ~30 分钟)
-4. 双模型重训(~3.5h)后重跑闭环
+1. **观测≠指令**:MemoryBench demos 由 waypoint 规划器 + 位置控制采集,原始数据没有 `obs.action`;转换 fallback 用的 `joint_velocities` 是传感器读数(运动的结果),不是控制命令(运动的原因),含 PID 瞬态/接触扰动/采样混叠。
+2. **开环积分误差累积**:JointVelocity 回放 = 对含噪导数做无反馈数值积分,位置误差按步累加,300 步后漂移厘米级;抓取需毫米级精度 → proximity sensor 永远不触发。offset 只改对齐,救不了积分发散。
+3. **BC 上界 = 真值回放**:模型最好也就完美复现训练动作,而真值回放成功率为 0,所以速度路线训练的策略天花板就是 0。动作分块(32 步 chunk / 10 步 replan)让 chunk 内是纯开环,复合误差(covariate shift)进一步放大。
+4. **绝对位置自稳定**:每步命令"到 pos[t+1] 去",误差不积累、每 50ms 重新锚定,真值回放 3/3 成功 → BC 上界回到 100%。
+5. open-loop MSE 好看与闭环 0 分不矛盾:teacher-forced 只量单步误差,不暴露复合;v4 关节维比原版准 ~9% 的相对结论仍有效。
+
+## v3 实施(动作空间→绝对关节位置)
+
+代码改动(本地,commit 后部署两节点):
+
+| 文件 | 改动 |
+|---|---|
+| `scripts/convert_memorybench_to_lerobot.py` | 新增 `--action-shift N`:action[t]=extract(obs[t+N]),末帧重复;v3 用 shift=1(pos[t] 是"原地不动") |
+| `scripts/convert_memorybench_short_v3.sh` | 新建:`--action-source joint_positions+gripper_open --action-shift 1`,输出 `lerobot/memorybench_short_{train,test}_v3` |
+| `experiments/memorybench/eval_closed_loop.py` | 动作模式可配置 `++memorybench_eval.arm_action_mode`,默认 `joint_position`(absolute,带 ignore_collisions wrapper);results json 记录实际模式 |
+| `configs/data/memorybench_short.yaml` | train 数据目录 → `memorybench_short_train_v3` |
+| `scripts/{eval,precompute,train,watch_and_train}` 4 个脚本 | v2 → v3 目录/run 名(watcher run 名 `memorybench_{original,v4}_v3_*`) |
+| 2 个 task config | wandb group → `memorybench-short-v3-comparison` |
+
+处理器侧确认无需改:`delta_action_dim_mask` 只对 padding 步置零(速度语义下 0=静止合理;位置语义下 padding 步 loss 有 `action_is_pad` 掩码,不影响),`action_state_transforms: null` 无绝对→相对变换,闭环 `normalizer.backward` 与训练对称。
+
+流水线:raw 训练数据只在 node-1 → **node-1 转换 v3**(CPU)→ tar 经 jump 到 node-2 → node-2 重新 precompute(fingerprint 含 dataset_dirs 路径,v3 新目录必然新 fingerprint,~30 分钟)→ 自动串双模型训练(~3.5h)→ 闭环 eval(JointPosition)。
 
 ## 备注 / 下一步
 
