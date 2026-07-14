@@ -55,6 +55,34 @@ ls runs/logs/                              # 训练开始后的双模型日志
 nvidia-smi
 ```
 
+## Open-loop eval 结果(17:23-17:31,h200-2)
+
+服务器扩容后(`/data` 56T 总 / 34T 可用)启动双 open-loop eval:原版 GPU0、v4 GPU4,单卡单进程,test_v2 数据(stride=32 → 727 样本,22,051 值/维),teacher-forced history,10 inference steps,两者均 0 failures。
+
+| 指标 | 原版 | v4 | v4 相对变化 |
+|---|---|---|---|
+| norm_mse | 0.011382 | 0.011295 | -0.8% |
+| norm_mae | 0.032223 | 0.029667 | **-7.9%** |
+| raw_mse | 0.007806 | 0.007123 | **-8.7%** |
+| raw_mae | 0.028641 | 0.026079 | **-8.9%** |
+| gripper_norm_mse | 0.025135 | 0.033969 | +35%(v4 更差) |
+
+- 逐维看:7 个关节维度 v4 全面更低(norm_mse dim0-6 均优),但 gripper 维(dim7)v4 更差,拉平了整体 norm_mse。
+- v4 `use_history=true` 生效,原版 `use_history=false`,符合预期。
+- 结果:`evaluate_results/memorybench_open_loop/memorybench_{original,v4}_v2_openloop_eval/results.json`(h200-2 worktree 内)
+- 日志:`runs/logs/memorybench_{original,v4}_v2_openloop_eval.log`
+
+## 闭环 eval 基础设施缺口(未解决)
+
+`experiments/memorybench/eval_closed_loop.py` 需要 RLBench 仿真(自定义任务 `put_block_back`/`rearrange_block`/`reopen_drawer`),当前:
+
+- rlbench/pyrep 在两台节点任何 conda env 里都不存在(h200-1 的 `RMBench` env 是另一套 Sapien 风格 benchmark,不是 RLBench)
+- CoppeliaSim Player 4.1 只在 h200-1 `/data/shared/offline/sim/`,h200-2 没有
+- 自定义任务源码在本地 untracked `third_party/SAM2Act/sam2act/libs/{RLBench,PyRep}`(947M),两台服务器都未部署
+- 测试 episodes 在 h200-2 只有未解压 zip:`raw_hf/data/test/{put_block_back,rearrange_block,reopen_drawer}.zip`
+
+搭建方案(待确认):jump 克隆/中转 SAM2Act → NFS 到 h200-2;复制 CoppeliaSim 到 h200-2;clone fastwam env 装 PyRep+RLBench(避免污染训练 env);解压 test zips;之后原版/v4 各占 4 卡按任务并行跑闭环 rollout。
+
 ## 备注 / 下一步
 
 - h200-1 上的 MemoryBench watcher 此前已全部停止,本次未在 h200-1 启动任何任务;bundle 临时文件在两节点 `~/tmp/` 下,可后续清理。
