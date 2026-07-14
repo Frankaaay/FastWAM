@@ -51,5 +51,5 @@ nvidia-smi
 ## 备注 / 下一步
 
 - h200-1 上的 MemoryBench watcher 此前已全部停止,本次未在 h200-1 启动任何任务;bundle 临时文件在两节点 `~/tmp/` 下,可后续清理。
-- wandb:正式训练 `wandb.enabled=true`,但 jump host 上的 wandb 同步 daemon 此前只盯 h200-1 的 `/data-214-30-239-40`;h200-2 的 offline run 落在 `/data-214-30-239-42`,如需云端可见需在 jump 上补一个对应路径的同步进程。
+- wandb:两个 memorybench task 配置均为 `enabled=true, mode=offline`(entity `yichx14-uc-irvine` / project `fastwam-mem` / group `memorybench-short-v2-comparison`)。已在 jump 上为 h200-2 补第二个同步 daemon(复用同一 `sync_daemon.sh`/venv/API key,`SCAN_ROOT=/data-214-30-239-42/home/frank/projects/FastWAM-memorybench-v4/runs`,每 600s 增量 sync,日志 `/data-214-30-239-40/home/frank/wandb_sync/daemon_node2.log`)。原 node-1 daemon 不受影响,两个并存。
 - 训练完成后按计划分别跑各自的闭环 MemoryBench rollout(`eval_memorybench_short_fastwam_original.sh` / `eval_memorybench_short_v4.sh`)比较 benchmark 分数。
