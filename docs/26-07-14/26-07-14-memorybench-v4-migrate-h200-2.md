@@ -72,16 +72,62 @@ nvidia-smi
 - 结果:`evaluate_results/memorybench_open_loop/memorybench_{original,v4}_v2_openloop_eval/results.json`(h200-2 worktree 内)
 - 日志:`runs/logs/memorybench_{original,v4}_v2_openloop_eval.log`
 
-## 闭环 eval 基础设施缺口(未解决)
+## 闭环 eval 设施:h200-1 已有,复制到 h200-2(18:07 完成)
 
-`experiments/memorybench/eval_closed_loop.py` 需要 RLBench 仿真(自定义任务 `put_block_back`/`rearrange_block`/`reopen_drawer`),当前:
+更正早前"设施缺失"的判断:闭环设施一直在 **h200-1** 上(26-07-13 曾跑过一次闭环,双模型 0/75),只是位置在 `/data/shared/offline/repos/SAM2Act`,当时未搜索到。h200-1 的构成:
 
-- rlbench/pyrep 在两台节点任何 conda env 里都不存在(h200-1 的 `RMBench` env 是另一套 Sapien 风格 benchmark,不是 RLBench)
-- CoppeliaSim Player 4.1 只在 h200-1 `/data/shared/offline/sim/`,h200-2 没有
-- 自定义任务源码在本地 untracked `third_party/SAM2Act/sam2act/libs/{RLBench,PyRep}`(947M),两台服务器都未部署
-- 测试 episodes 在 h200-2 只有未解压 zip:`raw_hf/data/test/{put_block_back,rearrange_block,reopen_drawer}.zip`
+- RLBench fork + 自定义任务:`/data/shared/offline/repos/SAM2Act/sam2act/libs/{RLBench,PyRep}`,以 pip editable 装进 fastwam env
+- CoppeliaSim Player 4.1:`/data/shared/offline/sim/CoppeliaSim_Player_V4_1_0_Ubuntu20_04`
+- 环境脚本 `/tmp/fastwam_memorybench_env.sh`:conda activate fastwam + `COPPELIASIM_ROOT`/`LD_LIBRARY_PATH`/`QT_QPA_PLATFORM_PLUGIN_PATH` 三变量;运行必须套 `xvfb-run -a`
+- 测试 demos:`raw_hf/data/test_unzipped/<task>/`(必须传 `++memorybench_eval.rlbench_dataset_root` 指向它,默认 `test/` 只有 zip)
 
-搭建方案(待确认):jump 克隆/中转 SAM2Act → NFS 到 h200-2;复制 CoppeliaSim 到 h200-2;clone fastwam env 装 PyRep+RLBench(避免污染训练 env);解压 test zips;之后原版/v4 各占 4 卡按任务并行跑闭环 rollout。
+26-07-13 的 0/75(`h200-1:.../evaluate_results/memorybench_closed_loop/full_20260713_124951`)用的是 v1(7D 无 gripper)ckpt + `gripper_strategy=keep`,episodes 全部跑满 400 步无报错——系统性抓取失败,不代表 memory 能力。
+
+**h200-2 复制过程**(节点直连 ssh 双向被拒,全部经 jump 跨 NFS,不走本地):
+
+1. node-1 打 tar(SAM2Act 954M + CoppeliaSim 272M = 1.2G)→ jump `cp` 跨挂载点(86s)→ node-2 解包。教训:双层 NFS rsync 小文件极慢(~5MB/min),大目录树必须 tar 单文件传
+2. `test_unzipped`(5.1G)node-2 上此前已有
+3. 依赖 cffi/pycparser/pyquaternion/natsort:从 node-1 fastwam env 的 site-packages 直接 rsync 到 node-2 同路径(同 py3.12 同架构)
+4. node-2 fastwam env:`pip install -e .../PyRep --no-deps --no-build-isolation`,RLBench 同理;`import rlbench, pyrep` 通过
+5. 仿真 smoke:`xvfb-run -a` 启动 CoppeliaSim headless,三个任务各 reset 成功
+
+## 闭环 eval v2 运行(18:07 起,h200-2)
+
+- launcher:node-2 `/tmp/run_closed_loop_dual.sh`(全文即本节参数),run_dir `evaluate_results/memorybench_closed_loop/full_20260714_180732`
+- 切分与 26-07-13 完全一致:原版 GPU0-3 / v4 GPU4-7;put_block_back 0+25、rearrange_block 0+25、reopen_drawer 0+13 与 13+12
+- 与上次的关键差别:v2 ckpt(8D 动作含真实 gripper 维)+ `gripper_strategy=last_dim`(上次 keep);其余同(action_horizon=32, replan_steps=10, max_steps=400)
+- 每 worker 独立 `hydra.run.dir` 防 8 进程冲突;~49 s/episode,25-ep 分片约 21 分钟
+- 踩坑记录:① launcher `set -u` 需先 `export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"` 再 source conda;② 漏传 `rlbench_dataset_root` 会退到 `test/` 报 "Can't find the demos"
+
+### 闭环 v2 结果(18:07-18:33):仍然双 0/75
+
+| 分片 | 原版 | v4 |
+|---|---|---|
+| put_block_back 0+25 | 0/25 | 0/25 |
+| rearrange_block 0+25 | 0/25 | 0/25 |
+| reopen_drawer 0+13 / 13+12 | 0/13, 0/12 | 0/13, 0/12 |
+
+v2 8D ckpt + `gripper_strategy=last_dim` 依旧全 0;episodes 全部跑满 400 步、`errors=[]`。gripper 策略假设被排除,问题更深。
+
+### 真值回放诊断(18:40-19:10):动作空间错了
+
+用测试集 demo 的真值动作直接开环回放(`/tmp/memorybench_gt_replay*.py`,put_block_back ep0,demo 长 311 步):
+
+| 动作定义 | 动作模式 | 结果 |
+|---|---|---|
+| `joint_velocities+gripper`(= v2 训练动作) | JointVelocity | **失败**(offset 0/1 都失败) |
+| `joint_positions(t+1)+gripper` | JointPosition(absolute) | **成功** reward=1.0 @308 |
+
+rearrange_block、reopen_drawer 的 JointPosition 真值回放同样成功(reward=1.0 @301/@284)。
+
+**结论**:MemoryBench demos 是 waypoint 规划采集,观测到的 joint_velocities 经 JointVelocity 模式回放会漂移,连真值都无法完成任务——**v2 的"速度当动作"路线在闭环里根本不可行,两次 0/75 均为系统性失败,不反映 memory 能力差异**。正确路线是绝对关节位置动作。
+
+### 下一步建议(v3,待确认)
+
+1. `convert_memorybench_to_lerobot.py` 增加 action 时移(action[t]=pos[t+1],末帧重复),用 `action_source=joint_positions+gripper_open` 重转 v3 数据
+2. `eval_closed_loop.py` 动作模式换成 JointPosition(absolute,包 `ignore_collisions` wrapper),`gripper_strategy=last_dim` 不变
+3. 视频不变 → VAE cache 理论上可复用(取决于 fingerprint 是否含 action 字段,不行就重预计算 ~30 分钟)
+4. 双模型重训(~3.5h)后重跑闭环
 
 ## 备注 / 下一步
 
