@@ -261,52 +261,104 @@ if [ "$DRY_RUN" = "1" ]; then
     exit 0
 fi
 
-PIDS=()
 # GPU_LIST（空格/逗号分隔的物理 GPU 编号）可覆盖默认的连续映射：worker 按序轮转落在
 # 列表内的 GPU 上，可实现「8 个 shard 只用 4 张卡、每卡 2 worker」这类布局。
-# 场景：h200-1 奇数卡上的进程会被外部反复静默杀掉，全部 worker 改压偶数卡。
+# 场景：h200-1 上的 GPU 进程会被外部反复静默杀掉，worker 改压指定卡。
 GPU_ARR=()
 if [ -n "${GPU_LIST:-}" ]; then
     read -r -a GPU_ARR <<< "${GPU_LIST//,/ }"
     echo "GPU_LIST override: workers rotate over physical GPUs [${GPU_ARR[*]}]"
 fi
-for ((w=0; w<NWORKERS; w++)); do
-    SHARD="$OUT/shards/shard_${w}.json"
-    [ -s "$SHARD" ] || { echo "shard_$w is empty, skip"; continue; }
+
+phys_for_worker() {
+    local w=$1
     if [ ${#GPU_ARR[@]} -gt 0 ]; then
-        PHYS=${GPU_ARR[$(( w % ${#GPU_ARR[@]} ))]}
+        echo "${GPU_ARR[$(( w % ${#GPU_ARR[@]} ))]}"
     else
-        PHYS=$(( (w % NUM_GPUS) + GPU_OFFSET ))
+        echo "$(( (w % NUM_GPUS) + GPU_OFFSET ))"
     fi
-    LOG="$OUT/worker_logs/gpu${PHYS}_w${w}.log"
-    CUDA_VISIBLE_DEVICES=$PHYS nohup python experiments/libero/eval_libero_multi.py \
-        ckpt="$CKPT" \
+}
+
+# 启动 shard worker；worker 正常跑完（rc=0）时落 done_w 标记，供 KEEPALIVE 判断完成。
+launch_worker() {
+    local w=$1 attempt=$2
+    local SHARD="$OUT/shards/shard_${w}.json"
+    local PHYS; PHYS=$(phys_for_worker "$w")
+    local LOG="$OUT/worker_logs/gpu${PHYS}_w${w}$( [ "$attempt" -gt 0 ] && echo "_r${attempt}" ).log"
+    CUDA_VISIBLE_DEVICES=$PHYS nohup bash -c "python experiments/libero/eval_libero_multi.py \
+        ckpt='$CKPT' \
         task=libero_uncond_2cam224_1e-4 \
         EVALUATION.num_trials=$TRIALS \
         +EVALUATION.save_video=$SAVE_VIDEO \
-        +EVALUATION.task_list_file="$SHARD" \
-        EVALUATION.dataset_stats_path="$STATS" \
-        EVALUATION.output_dir="$OUT" \
+        +EVALUATION.task_list_file='$SHARD' \
+        EVALUATION.dataset_stats_path='$STATS' \
+        EVALUATION.output_dir='$OUT' \
         model.redirect_common_files=$REDIRECT_COMMON_FILES \
         gpu_id=$w \
-        "${EXTRA_ARGS[@]}" \
+        $EXTRA_OVERRIDES \
+        && touch '$OUT/shards/done_w${w}'" \
         > "$LOG" 2>&1 &
-    PIDS+=($!)
-    echo "  worker w=$w -> phys_gpu=$PHYS pid=$! log=$LOG"
-    sleep 2
-done
+    LAST_PID=$!
+    echo "  worker w=$w attempt=$attempt -> phys_gpu=$PHYS pid=$LAST_PID log=$LOG"
+}
 
-echo "Started ${#PIDS[@]} workers."
-echo "  progress: tail -f $OUT/progress.log"
-echo "  worker log: tail -f $OUT/worker_logs/gpu${GPU_OFFSET}_w0.log"
+# KEEPALIVE=1：worker 被外部杀掉后自动重启（断点续跑，已有结果自动跳过），直到该
+# shard 正常退出（done_w 标记）或达到重试上限。用于会被静默清卡的机器。
+KEEPALIVE=${KEEPALIVE:-0}
+MAX_RETRY=${MAX_RETRY:-30}
 
 monitor_progress "$OUT" "$TOTAL" &
 MON_PID=$!
 
 FAIL=0
-for pid in "${PIDS[@]}"; do
-    wait "$pid" || FAIL=$((FAIL+1))
-done
+if [ "$KEEPALIVE" = "1" ]; then
+    declare -A WPID WTRY
+    while :; do
+        ALL_DONE=1
+        for ((w=0; w<NWORKERS; w++)); do
+            SHARD="$OUT/shards/shard_${w}.json"
+            [ -s "$SHARD" ] || continue
+            [ -f "$OUT/shards/done_w${w}" ] && continue
+            if [ "${WTRY[$w]:-0}" -gt "$MAX_RETRY" ]; then
+                continue    # 已放弃的 shard 不再算入 ALL_DONE 阻塞（计入 FAIL）
+            fi
+            ALL_DONE=0
+            pid=${WPID[$w]:-}
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                continue
+            fi
+            attempt=${WTRY[$w]:-0}
+            if [ -n "$pid" ]; then
+                echo "[keepalive $(date '+%m-%d %H:%M:%S')] worker w=$w (pid=$pid) died, relaunching (attempt $((attempt+1))/$MAX_RETRY)"
+            fi
+            if [ "$attempt" -ge "$MAX_RETRY" ]; then
+                echo "[keepalive] worker w=$w exceeded MAX_RETRY=$MAX_RETRY, giving up"
+                WTRY[$w]=$((attempt+1)); FAIL=$((FAIL+1))
+                continue
+            fi
+            launch_worker "$w" "$attempt"
+            WPID[$w]=$LAST_PID
+            WTRY[$w]=$((attempt+1))
+            sleep 2
+        done
+        [ "$ALL_DONE" = 1 ] && break
+        sleep 60
+    done
+else
+    PIDS=()
+    for ((w=0; w<NWORKERS; w++)); do
+        SHARD="$OUT/shards/shard_${w}.json"
+        [ -s "$SHARD" ] || { echo "shard_$w is empty, skip"; continue; }
+        launch_worker "$w" 0
+        PIDS+=("$LAST_PID")
+        sleep 2
+    done
+    echo "Started ${#PIDS[@]} workers."
+    echo "  progress: tail -f $OUT/progress.log"
+    for pid in "${PIDS[@]}"; do
+        wait "$pid" || FAIL=$((FAIL+1))
+    done
+fi
 kill "$MON_PID" 2>/dev/null
 
 echo "=========================================================="
