@@ -65,13 +65,32 @@ setsid nohup bash scripts/run_v4_history_ablation.sh > runs/logs/v4_ablation_lau
 
 ## 状态
 
-- **进行中**(2026-07-15):代码已提交;LIBERO-plus 16G 迁移后台进行;等 h200-2 卡空启动。
-- 输出目录约定:`evaluate_results/v4_history_ablation/plus_full_<stamp>/{B_video_only,C_action_only,D_no_history}/`
-- 每个 config 目录内 `progress.log` / `worker_logs/` 同 eval.sh 惯例;汇总用 `summarize_libero_plus.py`。
+- **进行中**(2026-07-15 14:33 启动):B/C/D 全量队列已在 **h200-1** 8 卡运行(h200-2 被用户任务占 4 卡,h200-1 只有零星 12G 小进程、143G 显存充足共存)。
+- 运行 commit:`1955e9f`(含启动 bug 修复:env 前缀经 `${VAR:+...}` 展开不生效导致 rc=127,改为直接传 `TRIALS="$TRIALS"`,空串由 eval.sh `${VAR:-default}` 回落预设)。
+- worktree:h200-1 `/data/home/frank/projects/FastWAM-v4-ablation`(mem-stage-v4 @ 1955e9f);h200-2 同名 worktree 亦就绪(c22778c,备用)。
+- 输出目录:`evaluate_results/v4_history_ablation/plus_full_20260715_143258/{B_video_only,C_action_only,D_no_history}/`(h200-1 worktree 内,串行)
+- launcher 日志:`runs/logs/v4_ablation_launcher.log`;每 config 内 `progress.log` / `worker_logs/`。
+- 预计:~9.6h/config × 3 ≈ 29h,约 2026-07-16 晚跑完。
+- 冒烟验证:h200-2 GPU1(video_only)与 h200-1 GPU0(action_only)各 2-case plus_pilot 均通过,worker 日志确认 `v4 history ablation mode: <mode>` 生效。
+
+## 推理速度口径说明
+
+B/C/D 与 A 的**计算量按构造相同**:屏蔽通过 key-visibility mask 实现,condition prefill 的 token 数、attention 形状完全一致,不跳过任何计算。因此:
+
+- 各消融间 LIBERO-plus 分数可比,无速度混淆因子;
+- 本实验**不产生**有意义的速度差异数据;各 config `progress.log` 的 min/rollout 仅作 sanity(应基本一致);
+- v4 vs base 的推理开销(history prefill 增量)是独立问题,精确数字应在 profiling 分支用 `bench_infer_action` 测;若后续想要"砍掉分支真省算力"的速度收益,需要结构性跳过(不传该分支、缩短 K/V),那是另一个小改动,与本次分数消融解耦。
+
+## 监控命令
+
+```bash
+ssh h200-qinghua-1
+tail -f /data/home/frank/projects/FastWAM-v4-ablation/runs/logs/v4_ablation_launcher.log
+tail -f /data/home/frank/projects/FastWAM-v4-ablation/evaluate_results/v4_history_ablation/plus_full_20260715_143258/B_video_only/progress.log
+```
 
 ## 下一步
 
-1. h200-2 完成 pip install + DRY_RUN/pilot 冒烟;
-2. 卡空后启动全量,按 7 类扰动因子拆分对比 A(26-06-29)/B/C/D;
-3. 结果回填本文档;若需严格结论再评估重训单路变体;
-4. 卡充足时补 A/E 同机 STD 基线(脚本已支持 `CONFIGS="A_full E_base" EVAL=libero_full`)。
+1. 跑完后 `summarize_libero_plus.py` 汇总 B/C/D,与 A(26-06-29 同 ckpt plus_full)按 7 类扰动因子对比;
+2. 结果回填本文档;若出现反直觉结果(如 C≈A)再评估重训单路变体;
+3. 卡充足时补 A/E 同机基线(`CONFIGS="A_full E_base"`,STD 用 `EVAL=libero_full`)。
