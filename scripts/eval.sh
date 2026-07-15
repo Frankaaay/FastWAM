@@ -262,10 +262,22 @@ if [ "$DRY_RUN" = "1" ]; then
 fi
 
 PIDS=()
+# GPU_LIST（空格/逗号分隔的物理 GPU 编号）可覆盖默认的连续映射：worker 按序轮转落在
+# 列表内的 GPU 上，可实现「8 个 shard 只用 4 张卡、每卡 2 worker」这类布局。
+# 场景：h200-1 奇数卡上的进程会被外部反复静默杀掉，全部 worker 改压偶数卡。
+GPU_ARR=()
+if [ -n "${GPU_LIST:-}" ]; then
+    read -r -a GPU_ARR <<< "${GPU_LIST//,/ }"
+    echo "GPU_LIST override: workers rotate over physical GPUs [${GPU_ARR[*]}]"
+fi
 for ((w=0; w<NWORKERS; w++)); do
     SHARD="$OUT/shards/shard_${w}.json"
     [ -s "$SHARD" ] || { echo "shard_$w is empty, skip"; continue; }
-    PHYS=$(( (w % NUM_GPUS) + GPU_OFFSET ))
+    if [ ${#GPU_ARR[@]} -gt 0 ]; then
+        PHYS=${GPU_ARR[$(( w % ${#GPU_ARR[@]} ))]}
+    else
+        PHYS=$(( (w % NUM_GPUS) + GPU_OFFSET ))
+    fi
     LOG="$OUT/worker_logs/gpu${PHYS}_w${w}.log"
     CUDA_VISIBLE_DEVICES=$PHYS nohup python experiments/libero/eval_libero_multi.py \
         ckpt="$CKPT" \

@@ -58,6 +58,7 @@ run_one() {
     EVAL=$EVAL CKPT="$ckpt" \
     TRIALS="$TRIALS" PILOT="$PILOT" \
     NUM_GPUS=$NUM_GPUS GPU_OFFSET=$GPU_OFFSET MAX_PER_GPU=1 \
+    GPU_LIST="${GPU_LIST:-}" \
     OUT="$out" \
     EXTRA_OVERRIDES="+EVALUATION.history_ablate=$mode" \
     bash scripts/eval.sh
