@@ -85,7 +85,8 @@ setsid nohup bash scripts/run_v4_history_ablation.sh > runs/logs/v4_ablation_lau
 
 ## 状态
 
-- **进行中(结构版 + KEEPALIVE)**:2026-07-15 16:49 起以 commit `0c140d8` 重启 B/C/D 全量队列(h200-1),断点续跑同一输出目录(B 已有 499 个结果:274 mask 版 + 结构版,两版等价可混用)。8 worker × 4 偶数卡(每卡 2 worker)+ KEEPALIVE 自动重启。
+- **已暂停(用户要求,2026-07-15 17:57 全部 kill)**:B_video_only 已完成 ~880/10030,结果保留在输出目录,后续可用同一 OUT_ROOT 断点续跑(重启命令同下,KEEPALIVE 版)。
+- 暂停前运行情况:16:49 起以 commit `0c140d8` 重启 B/C/D 全量队列(h200-1),断点续跑同一输出目录(mask 版与结构版等价可混用)。8 worker × 4 偶数卡(每卡 2 worker)+ KEEPALIVE 自动重启;外部杀进程持续(1 小时内 19 次重启,集中在卡 4/6),实际吞吐 ~14 case/min。
 - **h200-1 GPU 进程会被外部静默杀掉(已发生三次)**:14:38-14:47 与 16:0x 两轮打奇数卡(1/3/5/7),16:29-16:32 第三轮打到偶数卡(gpu4/gpu6 各死 1 worker;RAM 96G/2015G 无内存压力,无 traceback/无 OOM),说明"避开奇数卡"不够。对策升级:`eval.sh` 新增 **KEEPALIVE 模式**——worker 死亡(pid 消失且无 `done_w` 标记)后 60s 内自动重启,断点续跑已有结果自动跳过,`MAX_RETRY=30` 上限;shard 正常跑完由 `done_w{w}` 标记判定完成。
 - 中途插曲:16:1x 一次误杀(pkill 模式匹配到自身 shell)导致 B 的 eval.sh 先死、launcher 串到 C 提前启动,已全部清理后重启,无结果污染(结果文件按 task 命名幂等)。
 - 运行 commit 时间线:`1955e9f`(mask 版首启)→ `37320f2`(结构性丢弃 + bench)→ `c7405b1`(PYTHONPATH 修复)→ `55ef514`(GPU_LIST)→ `0c140d8`(KEEPALIVE,当前运行)。
