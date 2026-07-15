@@ -318,6 +318,49 @@ def _libero_command_to_model_action(command_action: np.ndarray, processor: FastW
     return model_action.numpy()
 
 
+_HISTORY_ABLATE_MODES = ("none", "video_only", "action_only", "no_history", "off")
+_history_ablate_logged = False
+
+
+def _apply_history_ablation(condition: dict, mode: str) -> dict:
+    """v4 消融开关：按 mode 屏蔽 history 分支后返回 condition。
+
+    屏蔽实现复刻 episode 起步的 padding 状态（buffer 首次 replan 的合法输入），
+    而非仅改 is_pad：被屏蔽的 history_action 置零 + 全 pad；被屏蔽的 history_video
+    过去帧替换为当前帧 + pad（当前帧永远保留可见）。该状态在训练数据每个 episode
+    开头和在线 rollout 每次首个 replan 中都出现过，且与训练期 20% branch dropout
+    的可见性语义一致（mask 屏蔽、position 不重排）。
+
+    mode:
+      none        -> 完整 v4（默认）
+      video_only  -> 只保留 video history（屏蔽 history_action）
+      action_only -> 只保留 action history（屏蔽 history_video 过去帧）
+      no_history  -> 两路都屏蔽（仍走 v4 condition cache 路径，等价训练期双 drop 状态）
+      off         -> 由调用方处理：完全不传 history（原版 first-frame KV 路径）
+    """
+    global _history_ablate_logged
+    if mode not in _HISTORY_ABLATE_MODES:
+        raise ValueError(
+            f"EVALUATION.history_ablate must be one of {_HISTORY_ABLATE_MODES}, got {mode!r}"
+        )
+    if not _history_ablate_logged:
+        logging.info("v4 history ablation mode: %s", mode)
+        _history_ablate_logged = True
+    if mode in ("none", "off"):
+        return condition
+    if mode in ("video_only", "no_history"):
+        condition["history_action"] = torch.zeros_like(condition["history_action"])
+        condition["history_action_is_pad"] = torch.ones_like(condition["history_action_is_pad"])
+    if mode in ("action_only", "no_history"):
+        history_video = condition["history_video"].clone()  # [3,T,H,W]
+        history_video[:, :-1] = history_video[:, -1:]
+        condition["history_video"] = history_video
+        video_is_pad = torch.ones_like(condition["history_video_is_pad"])
+        video_is_pad[-1] = False
+        condition["history_video_is_pad"] = video_is_pad
+    return condition
+
+
 def _predict_action_chunk(
     obs: dict,
     task_description: str,
@@ -369,13 +412,15 @@ def _predict_action_chunk(
         "tiled": bool(cfg.EVALUATION.get("tiled", False)),
     }
     if FastWAMOnlineHistoryBuffer.enabled_for_model(model):
-        infer_kwargs.update(
-            history_buffer.build_condition(
+        history_ablate = str(cfg.EVALUATION.get("history_ablate", "none")).strip().lower()
+        if history_ablate != "off":
+            condition = history_buffer.build_condition(
                 current_step=current_step,
                 device=model_device,
                 dtype=model.torch_dtype,
             )
-        )
+            infer_kwargs.update(_apply_history_ablation(condition, history_ablate))
+        # history_ablate=off: 完全不传 history,退回原版 first-frame KV 推理路径
 
     with torch.no_grad():
         pred = model.infer_action(**infer_kwargs)
