@@ -85,20 +85,20 @@ setsid nohup bash scripts/run_v4_history_ablation.sh > runs/logs/v4_ablation_lau
 
 ## 状态
 
-- **进行中(结构版)**:2026-07-15 16:23 起以结构性丢弃重启 B/C/D 全量队列(h200-1,commit `55ef514`),断点续跑同一输出目录(B 已有 ~300 个 mask 版结果,两版等价可混用)。
-- **h200-1 奇数卡进程会被外部静默杀掉(已发生两次)**:14:38-14:47 与 16:0x 两轮,奇数卡(1/3/5/7)上的 worker 均无 traceback/无 OOM 死亡,同期其他用户进程也消失,偶数卡不受影响,原因不明(疑似外部按卡清理)。对策:`GPU_LIST="0 2 4 6"`,8 worker 轮转压 4 张偶数卡(每卡 2 worker,~50G/141G 显存),已验证映射正确。
-- 中途插曲:16:1x 一次误杀(pkill 模式匹配到自身 shell)导致 B 的 eval.sh 先死、launcher 串到 C 提前启动,已全部清理后按 GPU_LIST 重启,无结果污染(结果文件按 task 命名幂等)。
-- 运行 commit 时间线:`1955e9f`(mask 版首启)→ `37320f2`(结构性丢弃 + bench)→ `c7405b1`(PYTHONPATH 修复)→ `55ef514`(GPU_LIST,当前运行)。
+- **进行中(结构版 + KEEPALIVE)**:2026-07-15 16:49 起以 commit `0c140d8` 重启 B/C/D 全量队列(h200-1),断点续跑同一输出目录(B 已有 499 个结果:274 mask 版 + 结构版,两版等价可混用)。8 worker × 4 偶数卡(每卡 2 worker)+ KEEPALIVE 自动重启。
+- **h200-1 GPU 进程会被外部静默杀掉(已发生三次)**:14:38-14:47 与 16:0x 两轮打奇数卡(1/3/5/7),16:29-16:32 第三轮打到偶数卡(gpu4/gpu6 各死 1 worker;RAM 96G/2015G 无内存压力,无 traceback/无 OOM),说明"避开奇数卡"不够。对策升级:`eval.sh` 新增 **KEEPALIVE 模式**——worker 死亡(pid 消失且无 `done_w` 标记)后 60s 内自动重启,断点续跑已有结果自动跳过,`MAX_RETRY=30` 上限;shard 正常跑完由 `done_w{w}` 标记判定完成。
+- 中途插曲:16:1x 一次误杀(pkill 模式匹配到自身 shell)导致 B 的 eval.sh 先死、launcher 串到 C 提前启动,已全部清理后重启,无结果污染(结果文件按 task 命名幂等)。
+- 运行 commit 时间线:`1955e9f`(mask 版首启)→ `37320f2`(结构性丢弃 + bench)→ `c7405b1`(PYTHONPATH 修复)→ `55ef514`(GPU_LIST)→ `0c140d8`(KEEPALIVE,当前运行)。
 - 输出目录:`evaluate_results/v4_history_ablation/plus_full_20260715_143258/{B_video_only,C_action_only,D_no_history}/`
-- launcher 日志:`runs/logs/v4_ablation_launcher_structural.log`;每 config 内 `progress.log` / `worker_logs/`。
+- launcher 日志:`runs/logs/v4_ablation_launcher_keepalive.log`;每 config 内 `progress.log` / `worker_logs/`(重启 attempt 带 `_r{n}` 后缀)。
 - 预计:4 卡×2 worker 吞吐接近原 8 卡(rollout 部分受 CPU/sim 限制),单 config 约 10-14h,三个串行预计 7-16 深夜至 7-17 白天完成。
-- 冒烟验证:结构版 worker 日志确认 `v4 history ablation mode: video_only (structural drop)`;bench 等价自检 max|Δaction|=7.8e-3 通过。
+- 冒烟验证:结构版 worker 日志确认 `v4 history ablation mode: video_only (structural drop)`;bench 等价自检 max|Δaction|=7.8e-3 通过;16:50 重启后 8 worker 全部在偶数卡上拉起、进度从 499 续跑。
 
 ## 监控命令
 
 ```bash
 ssh h200-qinghua-1
-tail -f /data/home/frank/projects/FastWAM-v4-ablation/runs/logs/v4_ablation_launcher.log
+tail -f /data/home/frank/projects/FastWAM-v4-ablation/runs/logs/v4_ablation_launcher_keepalive.log
 tail -f /data/home/frank/projects/FastWAM-v4-ablation/evaluate_results/v4_history_ablation/plus_full_20260715_143258/B_video_only/progress.log
 ```
 
