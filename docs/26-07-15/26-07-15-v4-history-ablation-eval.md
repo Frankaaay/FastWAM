@@ -21,22 +21,42 @@
   - `experiments/libero/eval_libero_single.py`:新增 `_apply_history_ablation`,由 `EVALUATION.history_ablate`(hydra,经 eval.sh `EXTRA_OVERRIDES` 透传)控制,五种模式 `none / video_only / action_only / no_history / off`。
   - `scripts/run_v4_history_ablation.sh`:B/C/D 串行批量脚本,默认 `EVAL=plus_full`(10030 case,INCLUDE_NOISE=1,TRIALS=1),支持断点续跑(每 config 目录 `DONE` 标记),单 config 失败不阻塞后续。
 
-## 屏蔽语义(关键设计)
+## 屏蔽语义(关键设计,26-07-15 下午改为结构性丢弃)
 
-复刻 **episode 起步 padding 状态**(在线 buffer 首次 replan 的合法输入),而非仅翻 is_pad:
+初版用 key-visibility mask(复刻 episode 起步 padding 状态);应用户要求改为**结构性丢弃**:被消融分支的 token 完全不进 DiT(`infer_action` 新增 `drop_history_video/drop_history_action`),两者对分数**数学等价**(mask 掉的 key 对 attention 输出贡献恒为零,v4 实现中被 drop 分支对 condition 内部同样不可见),结构版额外省去被丢弃分支的 prefill 计算并缩短 denoise 阶段 condition K/V。等价性已在 H200 上实测:三种模式 mask vs 结构版同 seed 输出动作 max|Δ| = 7.8e-3(bf16 量化精度级)。**因此 mask 版已跑出的结果与结构版可以直接混用续跑。**
 
-- `video_only`(屏蔽 action):`history_action` 置零 + `history_action_is_pad` 全 True;
-- `action_only`(屏蔽 video):`history_video` 过去 4 帧替换为当前帧 + is_pad `[1,1,1,1,0]`,当前帧永远可见;
-- `no_history`:两者同时;
+- `video_only`(丢 action):不做 action prefill,condition cache 只含 video 分支;
+- `action_only`(丢 video):窗口内过去 raw 帧仍替换为当前帧(因果 VAE 会把历史帧像素混入 current latent,替换等价训练 episode 起步 index-clamp 补帧),VAE 编码后只保留 current latent 帧进 DiT;
+- `no_history`:两者同时(仍走 v4 condition cache 路径,current 帧保留);
 - `off`:完全不传 history,退回原版 first-frame KV 路径(留给 base ckpt 的 E 配置)。
 
-正确性依据:
+判读注意:推理时消融衡量"双记忆模型在推理时对该路信息的依赖",给出的单路成绩是偏保守下界,不等价"从头单路训练"。若出现反直觉结果(如 C≈A),再考虑重训单路变体。
 
-1. `_latent_valid_from_raw_pad` 把 raw `[1,1,1,1,0]` 映射为 latent `[屏蔽, 可见]`,与训练 drop_video 只屏蔽 history latent、保留 current latent 完全一致;position_id 不重排。
-2. all-pad action history 是每个 episode 首次 replan 的既有路径,此前 STD/plus 评测已反复经过,无 `ensure_non_empty` 掩码回退风险(future action 的 condition mask 行内始终有有效 video key)。
-3. 过去帧替换为当前帧,避免 VAE 时间压缩把被屏蔽帧像素混进 current latent 的信息泄漏(纯 is_pad 方案做不到),且与训练数据 episode 开头 index-clamp 的补帧行为一致。
+## 推理延迟基准(26-07-15,H200 单卡,bf16,20 denoise steps,端到端每次 replan 含 T5+VAE)
 
-判读注意:推理时屏蔽衡量"双记忆模型在推理时对该路信息的依赖",给出的单路成绩是偏保守下界,不等价"从头单路训练"。若出现反直觉结果(如 C≈A),再考虑重训单路变体。
+脚本 `experiments/libero/bench_v4_history_ablation.py`,warmup 3 + 计时 20 次,结果 JSON 在 h200-1 `~/tmp/bench_v4/bench_v4_history_ablation.json`:
+
+| mode | mean (ms) | Hz | vs A |
+|---|---|---|---|
+| none(A 完整 v4) | 375.7 | 2.66 | — |
+| video_only(B,丢 action hist) | 351.6 | 2.84 | −6.4% |
+| action_only(C,丢 video hist) | 381.0 | 2.62 | +1.4%(反而略慢) |
+| no_history(D) | 353.9 | 2.83 | −5.8% |
+| off(原版路径,≈base 开销) | 339.5 | 2.95 | −9.6% |
+
+结论:
+- **v4 双路 history 的全部推理开销仅 ~36 ms/replan(+10.7% vs 原版路径)**,瓶颈在 20 步 denoise 循环本身,condition K/V 长短影响很小;
+- 丢 action history 省 ~24 ms——主要省的是 action prefill 那次完整 30 层 action expert 前向,不是 K/V 长度;
+- 丢 video history latent **几乎不省时间**(甚至测得 +5ms,应为 kernel 尺寸/dispatch 噪声):video prefill 少一个 latent 帧的收益被淹没;
+- 部署上"lite 版砍分支提速"的空间很小,v4 的速度代价本来就低。
+
+顺带修复:history 路径此前每次 replan 都白算一次单帧 VAE 编码(`first_frame_latents` 只被原版路径使用),已门控跳过,上表 A/B/C/D 均已受益。
+
+## 实现与运行环境备注
+
+- `infer_action` 校验放宽:`drop_history_action=True` 时可不传 `history_action`;`history_video` 始终必传(末帧承载 current observation)。
+- **节点上 `import fastwam` 解析到主仓 editable 安装(`/data/home/frank/projects/FastWAM`,在 mem-v5 分支)**,不含本分支新参数;`run_v4_history_ablation.sh` 已强制 `PYTHONPATH=$ROOT/src` 前置。此前 v4 eval 一直跑的是 mem-v5 分支的模型代码(其 v4 路径语义兼容,26-06-29 A 结果同此环境)。
+- `eval.sh` 新增 `GPU_LIST`(空格/逗号分隔)覆盖 worker→物理卡映射,支持"8 shard 压 4 卡、每卡 2 worker"。
 
 ## 运行位置与设施迁移(node-1 → h200-2,经 jump)
 
@@ -65,21 +85,14 @@ setsid nohup bash scripts/run_v4_history_ablation.sh > runs/logs/v4_ablation_lau
 
 ## 状态
 
-- **进行中**(2026-07-15 14:33 启动):B/C/D 全量队列已在 **h200-1** 8 卡运行(h200-2 被用户任务占 4 卡,h200-1 只有零星 12G 小进程、143G 显存充足共存)。
-- 运行 commit:`1955e9f`(含启动 bug 修复:env 前缀经 `${VAR:+...}` 展开不生效导致 rc=127,改为直接传 `TRIALS="$TRIALS"`,空串由 eval.sh `${VAR:-default}` 回落预设)。
-- worktree:h200-1 `/data/home/frank/projects/FastWAM-v4-ablation`(mem-stage-v4 @ 1955e9f);h200-2 同名 worktree 亦就绪(c22778c,备用)。
-- 输出目录:`evaluate_results/v4_history_ablation/plus_full_20260715_143258/{B_video_only,C_action_only,D_no_history}/`(h200-1 worktree 内,串行)
-- launcher 日志:`runs/logs/v4_ablation_launcher.log`;每 config 内 `progress.log` / `worker_logs/`。
-- 预计:~9.6h/config × 3 ≈ 29h,约 2026-07-16 晚跑完。
-- 冒烟验证:h200-2 GPU1(video_only)与 h200-1 GPU0(action_only)各 2-case plus_pilot 均通过,worker 日志确认 `v4 history ablation mode: <mode>` 生效。
-
-## 推理速度口径说明
-
-B/C/D 与 A 的**计算量按构造相同**:屏蔽通过 key-visibility mask 实现,condition prefill 的 token 数、attention 形状完全一致,不跳过任何计算。因此:
-
-- 各消融间 LIBERO-plus 分数可比,无速度混淆因子;
-- 本实验**不产生**有意义的速度差异数据;各 config `progress.log` 的 min/rollout 仅作 sanity(应基本一致);
-- v4 vs base 的推理开销(history prefill 增量)是独立问题,精确数字应在 profiling 分支用 `bench_infer_action` 测;若后续想要"砍掉分支真省算力"的速度收益,需要结构性跳过(不传该分支、缩短 K/V),那是另一个小改动,与本次分数消融解耦。
+- **进行中(结构版)**:2026-07-15 16:23 起以结构性丢弃重启 B/C/D 全量队列(h200-1,commit `55ef514`),断点续跑同一输出目录(B 已有 ~300 个 mask 版结果,两版等价可混用)。
+- **h200-1 奇数卡进程会被外部静默杀掉(已发生两次)**:14:38-14:47 与 16:0x 两轮,奇数卡(1/3/5/7)上的 worker 均无 traceback/无 OOM 死亡,同期其他用户进程也消失,偶数卡不受影响,原因不明(疑似外部按卡清理)。对策:`GPU_LIST="0 2 4 6"`,8 worker 轮转压 4 张偶数卡(每卡 2 worker,~50G/141G 显存),已验证映射正确。
+- 中途插曲:16:1x 一次误杀(pkill 模式匹配到自身 shell)导致 B 的 eval.sh 先死、launcher 串到 C 提前启动,已全部清理后按 GPU_LIST 重启,无结果污染(结果文件按 task 命名幂等)。
+- 运行 commit 时间线:`1955e9f`(mask 版首启)→ `37320f2`(结构性丢弃 + bench)→ `c7405b1`(PYTHONPATH 修复)→ `55ef514`(GPU_LIST,当前运行)。
+- 输出目录:`evaluate_results/v4_history_ablation/plus_full_20260715_143258/{B_video_only,C_action_only,D_no_history}/`
+- launcher 日志:`runs/logs/v4_ablation_launcher_structural.log`;每 config 内 `progress.log` / `worker_logs/`。
+- 预计:4 卡×2 worker 吞吐接近原 8 卡(rollout 部分受 CPU/sim 限制),单 config 约 10-14h,三个串行预计 7-16 深夜至 7-17 白天完成。
+- 冒烟验证:结构版 worker 日志确认 `v4 history ablation mode: video_only (structural drop)`;bench 等价自检 max|Δaction|=7.8e-3 通过。
 
 ## 监控命令
 
