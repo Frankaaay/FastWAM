@@ -23,6 +23,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT" || exit 1
 
+# 强制优先使用本 worktree 的 src：节点上 fastwam 包是主仓 editable 安装（可能停在
+# 其它分支，如 mem-v5），不含本分支的 drop_history_* 结构性消融参数。
+export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+
 V4_CKPT=${V4_CKPT:?"必须提供 V4_CKPT(mem-stage-v4 的 step_014470.pt 路径)"}
 BASE_CKPT=${BASE_CKPT:-$ROOT/checkpoints/fastwam_release/libero_uncond_2cam224.pt}
 EVAL=${EVAL:-plus_full}
