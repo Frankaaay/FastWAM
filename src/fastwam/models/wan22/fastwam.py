@@ -1307,6 +1307,8 @@ class FastWAM(torch.nn.Module):
         history_action: Optional[torch.Tensor] = None,
         history_video_is_pad: Optional[torch.Tensor] = None,
         history_action_is_pad: Optional[torch.Tensor] = None,
+        drop_history_video: bool = False,
+        drop_history_action: bool = False,
         proprio: Optional[torch.Tensor] = None,
         context: Optional[torch.Tensor] = None,
         context_mask: Optional[torch.Tensor] = None,
@@ -1356,8 +1358,34 @@ class FastWAM(torch.nn.Module):
             dtype=torch.float32,
         ).to(device=self.device, dtype=self.torch_dtype)
 
+        history_requested = history_video is not None or history_action is not None
+        if history_requested and not self.enable_mem_stage_v4:
+            raise ValueError("mem-stage-v4 history inference is only enabled for base FastWAM.")
+        use_history_condition = self.enable_mem_stage_v4 and history_requested
+        drop_history_video = bool(drop_history_video)
+        drop_history_action = bool(drop_history_action)
+        if (drop_history_video or drop_history_action) and not use_history_condition:
+            raise ValueError(
+                "`drop_history_video/drop_history_action` 只在 v4 history 路径下有意义，"
+                "需要同时提供 history 输入。"
+            )
+        if use_history_condition:
+            if history_video is None:
+                raise ValueError(
+                    "v4 history inference requires `history_video`（末帧承载 current observation；"
+                    "结构性丢弃 video history 请传 `drop_history_video=True` 并保留窗口输入）。"
+                )
+            if history_action is None and not drop_history_action:
+                raise ValueError(
+                    "v4 history inference requires `history_action`（结构性丢弃请传 `drop_history_action=True`）。"
+                )
+
         input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
-        first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
+        # history 路径的 current 观测经 history_video 窗口进 VAE；单帧编码只被原版
+        # first-frame KV 路径使用，history 路径下跳过，省一次无用的 VAE 前向。
+        first_frame_latents = None
+        if not use_history_condition:
+            first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
         fuse_flag = bool(getattr(self.video_expert, "fuse_vae_embedding_in_latents", False))
 
         use_prompt = prompt is not None
@@ -1389,19 +1417,19 @@ class FastWAM(torch.nn.Module):
                 proprio=proprio,
             )
 
-        history_requested = history_video is not None or history_action is not None
-        if history_requested and not self.enable_mem_stage_v4:
-            raise ValueError("mem-stage-v4 history inference is only enabled for base FastWAM.")
-        use_history_condition = self.enable_mem_stage_v4 and history_requested
-        if use_history_condition and (history_video is None or history_action is None):
-            raise ValueError("v4 history inference requires both `history_video` and `history_action`.")
-
         condition_kv_cache = None
         condition_key_valid_mask = None
         attention_mask = None
         video_kv_cache = None
         video_seq_len = 0
         if use_history_condition:
+            if drop_history_action:
+                # 结构性丢弃 action history：忽略传入的 history_action，token 完全不进 DiT。
+                history_action = None
+                history_action_is_pad = None
+            if drop_history_video:
+                # 结构性丢弃 video history：latent 切片后只剩 current 帧，raw is_pad 不再适用。
+                history_video_is_pad = None
             if history_video.ndim == 4:
                 history_video = history_video.unsqueeze(0)
             if history_video.ndim != 5 or history_video.shape[0] != 1 or history_video.shape[1] != 3:
@@ -1416,17 +1444,18 @@ class FastWAM(torch.nn.Module):
                 )
             if history_video.shape[2] % 4 != 1:
                 raise ValueError(f"`history_video` T must satisfy T % 4 == 1, got {history_video.shape[2]}")
-            if history_action.ndim == 2:
-                history_action = history_action.unsqueeze(0)
-            if history_action.ndim != 3 or history_action.shape[0] != 1:
-                raise ValueError(
-                    "`history_action` must have shape [T,D] or [1,T,D], "
-                    f"got {tuple(history_action.shape)}"
-                )
-            if history_action.shape[2] != self.action_expert.action_dim:
-                raise ValueError(
-                    f"`history_action` last dim must be {self.action_expert.action_dim}, got {history_action.shape[2]}"
-                )
+            if history_action is not None:
+                if history_action.ndim == 2:
+                    history_action = history_action.unsqueeze(0)
+                if history_action.ndim != 3 or history_action.shape[0] != 1:
+                    raise ValueError(
+                        "`history_action` must have shape [T,D] or [1,T,D], "
+                        f"got {tuple(history_action.shape)}"
+                    )
+                if history_action.shape[2] != self.action_expert.action_dim:
+                    raise ValueError(
+                        f"`history_action` last dim must be {self.action_expert.action_dim}, got {history_action.shape[2]}"
+                    )
             if history_video_is_pad is not None:
                 if history_video_is_pad.ndim == 1:
                     history_video_is_pad = history_video_is_pad.unsqueeze(0)
@@ -1447,8 +1476,15 @@ class FastWAM(torch.nn.Module):
                 history_action_is_pad = history_action_is_pad.to(device=self.device, dtype=torch.bool)
 
             history_video = history_video.to(device=self.device, dtype=self.torch_dtype)
-            history_action = history_action.to(device=self.device, dtype=self.torch_dtype)
+            if history_action is not None:
+                history_action = history_action.to(device=self.device, dtype=self.torch_dtype)
             history_video_latents = self._encode_video_latents(history_video, tiled=tiled)
+            if drop_history_video:
+                # 只保留 current latent 帧，history latent token 不进 DiT。
+                # 注意：因果 VAE 会把窗口内历史帧像素混入 current latent，调用方必须先把
+                # 过去 raw 帧替换为 current 帧（等价训练 episode 起步的 index-clamp 补帧），
+                # 否则这里的切片挡不住像素级信息泄漏。
+                history_video_latents = history_video_latents[:, :, -1:]
             clean_video_timestep = torch.zeros((1,), device=self.device, dtype=history_video_latents.dtype)
             video_source_ids, video_position_ids = self._history_video_source_and_position_ids(
                 num_latent_frames=history_video_latents.shape[2],
@@ -1495,52 +1531,58 @@ class FastWAM(torch.nn.Module):
                 video_key_valid_mask=history_video_token_valid,
             )
 
-            history_source_ids = self._action_source_ids(
-                batch_size=1,
-                seq_len=history_action.shape[1],
-                source_id=self.SOURCE_HISTORY_ACTION,
-                device=history_action.device,
-            )
-            history_position_ids = self._action_position_ids(
-                seq_len=history_action.shape[1],
-                start=0,
-                device=history_action.device,
-            )
-            clean_action_timestep = torch.zeros((1,), device=self.device, dtype=history_action.dtype)
-            history_action_pre = self.action_expert.pre_dit(
-                action_tokens=history_action,
-                timestep=clean_action_timestep,
-                context=context,
-                context_mask=context_mask,
-                source_ids=history_source_ids,
-                position_ids=history_position_ids,
-            )
-            if history_action_is_pad is None:
-                history_action_valid = torch.ones(
-                    (1, history_action.shape[1]),
+            if history_action is None:
+                # 结构性丢弃 action history：跳过 action prefill，condition cache 只含 video 分支。
+                # position id 是绝对时间线编号，去掉 action key 不影响 video/future action 的位置。
+                condition_kv_cache = history_video_cache
+                condition_key_valid_mask = history_video_token_valid
+            else:
+                history_source_ids = self._action_source_ids(
+                    batch_size=1,
+                    seq_len=history_action.shape[1],
+                    source_id=self.SOURCE_HISTORY_ACTION,
+                    device=history_action.device,
+                )
+                history_position_ids = self._action_position_ids(
+                    seq_len=history_action.shape[1],
+                    start=0,
+                    device=history_action.device,
+                )
+                clean_action_timestep = torch.zeros((1,), device=self.device, dtype=history_action.dtype)
+                history_action_pre = self.action_expert.pre_dit(
+                    action_tokens=history_action,
+                    timestep=clean_action_timestep,
+                    context=context,
+                    context_mask=context_mask,
+                    source_ids=history_source_ids,
+                    position_ids=history_position_ids,
+                )
+                if history_action_is_pad is None:
+                    history_action_valid = torch.ones(
+                        (1, history_action.shape[1]),
+                        dtype=torch.bool,
+                        device=history_action.device,
+                    )
+                else:
+                    history_action_valid = ~history_action_is_pad
+                history_action_attention_mask = torch.ones(
+                    (history_action.shape[1], history_action.shape[1]),
                     dtype=torch.bool,
                     device=history_action.device,
                 )
-            else:
-                history_action_valid = ~history_action_is_pad
-            history_action_attention_mask = torch.ones(
-                (history_action.shape[1], history_action.shape[1]),
-                dtype=torch.bool,
-                device=history_action.device,
-            )
-            history_action_cache = self.mot.prefill_action_cache(
-                action_tokens=history_action_pre["tokens"],
-                action_freqs=history_action_pre["freqs"],
-                action_t_mod=history_action_pre["t_mod"],
-                action_context_payload={
-                    "context": history_action_pre["context"],
-                    "mask": history_action_pre["context_mask"],
-                },
-                action_attention_mask=history_action_attention_mask,
-                action_key_valid_mask=history_action_valid,
-            )
-            condition_kv_cache = self._concat_kv_caches(history_video_cache, history_action_cache)
-            condition_key_valid_mask = torch.cat([history_video_token_valid, history_action_valid], dim=1)
+                history_action_cache = self.mot.prefill_action_cache(
+                    action_tokens=history_action_pre["tokens"],
+                    action_freqs=history_action_pre["freqs"],
+                    action_t_mod=history_action_pre["t_mod"],
+                    action_context_payload={
+                        "context": history_action_pre["context"],
+                        "mask": history_action_pre["context_mask"],
+                    },
+                    action_attention_mask=history_action_attention_mask,
+                    action_key_valid_mask=history_action_valid,
+                )
+                condition_kv_cache = self._concat_kv_caches(history_video_cache, history_action_cache)
+                condition_key_valid_mask = torch.cat([history_video_token_valid, history_action_valid], dim=1)
         else:
             timestep_video = torch.zeros(
                 (first_frame_latents.shape[0],),

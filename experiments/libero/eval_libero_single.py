@@ -323,19 +323,22 @@ _history_ablate_logged = False
 
 
 def _apply_history_ablation(condition: dict, mode: str) -> dict:
-    """v4 消融开关：按 mode 屏蔽 history 分支后返回 condition。
+    """v4 消融开关：按 mode 结构性丢弃 history 分支后返回 infer_action kwargs。
 
-    屏蔽实现复刻 episode 起步的 padding 状态（buffer 首次 replan 的合法输入），
-    而非仅改 is_pad：被屏蔽的 history_action 置零 + 全 pad；被屏蔽的 history_video
-    过去帧替换为当前帧 + pad（当前帧永远保留可见）。该状态在训练数据每个 episode
-    开头和在线 rollout 每次首个 replan 中都出现过，且与训练期 20% branch dropout
-    的可见性语义一致（mask 屏蔽、position 不重排）。
+    26-07-15 起由 key-visibility mask 改为结构性丢弃（infer_action 的 drop_history_*，
+    被丢弃分支的 token 完全不进 DiT）。两者对分数数学等价：mask 掉的 key 对 attention
+    输出贡献恒为零，且 v4 实现中被 drop 分支对 condition 内部同样不可见；结构版额外
+    省去被丢弃分支的 prefill 计算并缩短 denoise 阶段的 condition K/V。
+
+    video history 的丢弃仍需先把窗口内过去 raw 帧替换为当前帧：因果 VAE 时间压缩会把
+    历史帧像素混入 current latent，替换后等价训练 episode 起步 index-clamp 的补帧状态，
+    再由 infer_action 切掉 history latent token。
 
     mode:
       none        -> 完整 v4（默认）
-      video_only  -> 只保留 video history（屏蔽 history_action）
-      action_only -> 只保留 action history（屏蔽 history_video 过去帧）
-      no_history  -> 两路都屏蔽（仍走 v4 condition cache 路径，等价训练期双 drop 状态）
+      video_only  -> 只保留 video history（丢弃 action history token）
+      action_only -> 只保留 action history（丢弃 video history latent token）
+      no_history  -> 两路都丢弃（仍走 v4 condition cache 路径，current 帧保留）
       off         -> 由调用方处理：完全不传 history（原版 first-frame KV 路径）
     """
     global _history_ablate_logged
@@ -344,20 +347,20 @@ def _apply_history_ablation(condition: dict, mode: str) -> dict:
             f"EVALUATION.history_ablate must be one of {_HISTORY_ABLATE_MODES}, got {mode!r}"
         )
     if not _history_ablate_logged:
-        logging.info("v4 history ablation mode: %s", mode)
+        logging.info("v4 history ablation mode: %s (structural drop)", mode)
         _history_ablate_logged = True
     if mode in ("none", "off"):
         return condition
     if mode in ("video_only", "no_history"):
-        condition["history_action"] = torch.zeros_like(condition["history_action"])
-        condition["history_action_is_pad"] = torch.ones_like(condition["history_action_is_pad"])
+        condition.pop("history_action", None)
+        condition.pop("history_action_is_pad", None)
+        condition["drop_history_action"] = True
     if mode in ("action_only", "no_history"):
         history_video = condition["history_video"].clone()  # [3,T,H,W]
         history_video[:, :-1] = history_video[:, -1:]
         condition["history_video"] = history_video
-        video_is_pad = torch.ones_like(condition["history_video_is_pad"])
-        video_is_pad[-1] = False
-        condition["history_video_is_pad"] = video_is_pad
+        condition.pop("history_video_is_pad", None)
+        condition["drop_history_video"] = True
     return condition
 
 
