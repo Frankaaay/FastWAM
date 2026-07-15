@@ -50,8 +50,9 @@ run_one() {
         return 0
     fi
     echo "[$(date '+%m-%d %H:%M:%S')] ===== START $tag (EVAL=$EVAL history_ablate=$mode ckpt=$(basename "$ckpt")) ====="
+    # TRIALS/PILOT 传空串时 eval.sh 内 ${VAR:-default} 会回落预设默认值
     EVAL=$EVAL CKPT="$ckpt" \
-    ${TRIALS:+TRIALS=$TRIALS} ${PILOT:+PILOT=$PILOT} \
+    TRIALS="$TRIALS" PILOT="$PILOT" \
     NUM_GPUS=$NUM_GPUS GPU_OFFSET=$GPU_OFFSET MAX_PER_GPU=1 \
     OUT="$out" \
     EXTRA_OVERRIDES="+EVALUATION.history_ablate=$mode" \
