@@ -24,19 +24,38 @@ def verify_episode(original, replay, baselines, pixel_mae_limit=1.0, joint_atol=
     import h5py
     errors = {}
     with h5py.File(original, "r") as source, h5py.File(replay, "r") as target:
-        old_q, new_q = source["joint_action/vector"][:], target["joint_action/vector"][:]
+        canonical = "data_format_version" in source and "vision" in source and "state" in source and "action" in source
+        if canonical:
+            keys = ("left_arm_joint_states", "left_ee_joint_states", "right_arm_joint_states", "right_ee_joint_states")
+            states = np.concatenate([source[f"state/{key}"][:] for key in keys], axis=1)
+            actions = np.concatenate([source[f"action/{key}"][:] for key in keys], axis=1)
+            if states.shape != actions.shape or not np.isfinite(actions).all():
+                raise ValueError("Invalid canonical RoboTwin state/action arrays")
+            np.testing.assert_allclose(states[1:], actions[:-1], atol=joint_atol, rtol=0)
+            # Published canonical HDF5 has N observations and N next-state
+            # targets. The simulator also records the final target observation.
+            old_q = np.concatenate((states, actions[-1:]))
+        else:
+            old_q = source["joint_action/vector"][:]
+        new_q = target["joint_action/vector"][:]
         if old_q.shape != new_q.shape or old_q.ndim != 2 or old_q.shape[1] != 14 or not len(old_q):
             raise ValueError("RoboTwin Aloha frame/action shape mismatch")
         if not np.isfinite(old_q).all() or not np.isfinite(new_q).all():
             raise ValueError("Nonfinite RoboTwin joint observations")
         np.testing.assert_allclose(new_q, old_q, atol=joint_atol, rtol=0)
         for left, right, key in PAIRS:
-            old, new = source[f"observation/{left}/rgb"], target[f"observation/{left}/rgb"]
-            if len(old) != len(new) or len(new) != len(target[f"observation/{right}/rgb"]) or len(new) != len(old_q):
+            canonical_camera = {"head_camera": "cam_head", "left_camera": "cam_left_wrist", "right_camera": "cam_right_wrist"}[left]
+            old = source[f"vision/{canonical_camera}/colors"] if canonical else source[f"observation/{left}/rgb"]
+            new = target[f"observation/{left}/rgb"]
+            if len(old) != len(new) - int(canonical) or len(new) != len(target[f"observation/{right}/rgb"]) or len(new) != len(old_q):
                 raise ValueError(f"Frame count mismatch for {left}")
             max_mae = 0.0
             for index in range(len(old)):
                 a = cv2.imdecode(np.frombuffer(bytes(old[index]), np.uint8), cv2.IMREAD_COLOR)
+                if canonical and a is not None:
+                    # Canonical v2 stores conventional JPEG BGR on decode;
+                    # legacy RoboTwin encodes RGB directly through OpenCV.
+                    a = a[..., ::-1]
                 b = cv2.imdecode(np.frombuffer(bytes(new[index]), np.uint8), cv2.IMREAD_COLOR)
                 r = cv2.imdecode(np.frombuffer(bytes(target[f"observation/{right}/rgb"][index]), np.uint8), cv2.IMREAD_COLOR)
                 if a is None or b is None or r is None or a.shape != b.shape or r.shape != a.shape:
@@ -61,7 +80,8 @@ def verify_episode(original, replay, baselines, pixel_mae_limit=1.0, joint_atol=
             expected[:, 0] = baselines[key]
             np.testing.assert_allclose(offset_cv, expected, atol=1e-5, rtol=0)
             errors[left] = max_mae
-    return dict(frames=len(old_q), max_left_pixel_mae=errors, joint_atol=joint_atol,
+    return dict(frames=len(old_q), observed_source_frames=len(old_q) - int(canonical),
+                canonical_source=canonical, max_left_pixel_mae=errors, joint_atol=joint_atol,
                 pixel_mae_limit=pixel_mae_limit)
 
 
@@ -103,7 +123,7 @@ def replay(args):
             raise ValueError(f"Incomplete original episode index for {task}")
         for index, file in enumerate(files):
             trajectory = folder / "_traj_data" / f"episode{index}.pkl"
-            if not trajectory.is_file():
+            if not trajectory.is_file() and not args.replan_missing:
                 raise FileNotFoundError(trajectory)
             episodes.append((task, index, seeds[index], file, trajectory))
     sys.path.insert(0, str(robotwin))
@@ -122,6 +142,20 @@ def replay(args):
                        left_embodiment_config=embodiment_config, right_embodiment_config=embodiment_config,
                        dual_arm_embodied=True, embodiment_name="aloha-agilex", need_plan=False,
                        render_freq=0, save_data=True, stereo=dict(enabled=True, **baselines))
+        replanned = not trajectory.is_file()
+        if replanned:
+            planner = getattr(importlib.import_module(f"envs.{task_name}"), task_name)()
+            planning_options = dict(options, need_plan=True, save_data=False)
+            try:
+                planner.setup_demo(now_ep_num=index, seed=seed, **planning_options)
+                planner.play_once()
+                if not planner.plan_success or not planner.check_success():
+                    raise RuntimeError(f"Canonical seed planning failed: {task_name}/{index}, seed={seed}")
+                # Save only to this fresh output; original inputs stay read-only.
+                planner.save_traj_data(index)
+            finally:
+                planner.close_env(clear_cache=True)
+            trajectory = destination / "_traj_data" / f"episode{index}.pkl"
         with trajectory.open("rb") as stream:
             recorded = pickle.load(stream)
         options.update(left_joint_path=recorded["left_joint_path"], right_joint_path=recorded["right_joint_path"])
@@ -136,7 +170,8 @@ def replay(args):
             generated = destination / "data" / f"episode{index}.hdf5"
             result = verify_episode(source, generated, baselines, args.pixel_mae_limit, args.joint_atol)
             result.update(task=task_name, episode=index, seed=seed, source=str(source),
-                          source_trajectory=str(trajectory), baselines=baselines, scene_info=scene_info,
+                          source_trajectory=str(trajectory), trajectory_replanned=replanned,
+                          baselines=baselines, scene_info=scene_info,
                           task_config_path=str(config_path), task_config=config)
             (destination / "verified.json").write_text(json.dumps(result, indent=2, default=str))
             print(f"Verified {task_name}/{index}: {result['frames']} frames", flush=True)
@@ -152,6 +187,8 @@ if __name__ == "__main__":
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--task-config-path", required=True, help="Exact original demo_clean.yml")
     parser.add_argument("--tasks", nargs="+")
+    parser.add_argument("--replan-missing", action="store_true",
+                        help="Replan only absent trajectories using their exact recorded seeds; strict replay verification still required")
     parser.add_argument("--head-baseline-m", type=float, default=0.06)
     parser.add_argument("--left-wrist-baseline-m", type=float, default=0.02)
     parser.add_argument("--right-wrist-baseline-m", type=float, default=0.02)
