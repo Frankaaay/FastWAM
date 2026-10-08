@@ -50,7 +50,7 @@ class TestTerminalObservation(unittest.TestCase):
         image = np.full((8, 8, 3), 64, np.uint8)
         ok, jpeg = cv2.imencode(".jpg", image)
         assert ok
-        images = np.array([jpeg.tobytes()] * raw_frames)
+        images = np.array([jpeg.tobytes()] * raw_frames, dtype="S8192")
         with h5py.File(replay / "data/episode0.hdf5", "w") as f:
             f.create_dataset("joint_action/vector", data=qpos)
             for left, right in augmentation.RIGS:
