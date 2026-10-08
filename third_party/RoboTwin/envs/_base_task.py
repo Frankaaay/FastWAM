@@ -93,6 +93,9 @@ class Base_Task(gym.Env):
         self.dual_arm = kwags.get("dual_arm", True)
         self.eval_mode = kwags.get("eval_mode", False)
         self.need_topp = True  # TODO
+        self.recorded_actor_models = kwags.get("recorded_actor_models", {})
+        self.recorded_actor_model_offsets = {}
+        self.replayed_actor_models = []
 
         # Random
         random_setting = kwags.get("domain_randomization")

@@ -7,6 +7,9 @@ left videos are copied unchanged. No trajectory conversion or action shifting.
 import argparse
 import copy
 import json
+import io
+import zipfile
+from contextlib import ExitStack
 import shutil
 from fractions import Fraction
 from pathlib import Path
@@ -71,7 +74,7 @@ def encode_right(images, destination, fps):
     return stats, shape
 
 
-def verify_left_video(video, images, mae_limit):
+def verify_left_video(video, images, mae_limit, canonical_bgr=False):
     import av
     import cv2
     maximum = 0.0
@@ -85,6 +88,8 @@ def verify_left_video(video, images, mae_limit):
             raw = cv2.imdecode(np.frombuffer(bytes(jpeg), np.uint8), cv2.IMREAD_COLOR)
             if raw is None or raw.shape != rgb.shape:
                 raise ValueError(f"Official/raw left image shape mismatch: {video}/{index}")
+            if canonical_bgr:
+                raw = raw[..., ::-1]
             mae = float(np.abs(raw.astype(np.float32) - rgb).mean())
             maximum = max(maximum, mae)
             if mae > mae_limit:
@@ -149,7 +154,18 @@ def augment(source, destination, episode_map, left_video_mae_limit=3.0):
         action = np.array(table["action"].to_pylist(), dtype=np.float32)
         timestamp = np.array(table["timestamp"].to_pylist(), dtype=np.float64)
         np.testing.assert_allclose(timestamp, np.arange(episode["length"]) / info["fps"], atol=1e-4, rtol=0)
-        with h5py.File(raw, "r") as data:
+        with ExitStack() as stack:
+            data = stack.enter_context(h5py.File(raw, "r"))
+            canonical = None
+            if "canonical_reference" in marker:
+                reference = marker["canonical_reference"]
+                if not marker.get("canonical_source") or marker["pixel_mae_limit"] > 1.0:
+                    raise ValueError(f"Missing strict canonical replay verification: {index}")
+                archive = stack.enter_context(zipfile.ZipFile(reference["archive"]))
+                canonical = stack.enter_context(h5py.File(io.BytesIO(archive.read(reference["member"])), "r"))
+                keys = ("left_arm_joint_states", "left_ee_joint_states", "right_arm_joint_states", "right_ee_joint_states")
+                np.testing.assert_allclose(state, np.concatenate([canonical[f"state/{key}"][:] for key in keys], 1), atol=1e-5, rtol=0)
+                np.testing.assert_allclose(action, np.concatenate([canonical[f"action/{key}"][:] for key in keys], 1), atol=1e-5, rtol=0)
             qpos = data["joint_action/vector"][:]
             frames = episode["length"]
             if qpos.shape != (marker["frames"], 14) or state.shape != (frames, 14) or action.shape != state.shape:
@@ -172,8 +188,14 @@ def augment(source, destination, episode_map, left_video_mae_limit=3.0):
                 original_key = f"observation.images.{left}"
                 original_video = source / info["video_path"].format(
                     episode_chunk=chunk, episode_index=index, video_key=original_key)
+                images = data[f"observation/{original_camera}/rgb"][:frames]
+                if canonical is not None:
+                    camera = {"cam_high": "cam_head", "cam_left_wrist": "cam_left_wrist", "cam_right_wrist": "cam_right_wrist"}[left]
+                    images = canonical[f"vision/{camera}/colors"][:]
+                    if len(images) != frames:
+                        raise ValueError(f"Canonical image count mismatch: {index}/{left}")
                 marker["official_left_video_max_mae"][left] = verify_left_video(
-                    original_video, data[f"observation/{original_camera}/rgb"][:frames], left_video_mae_limit)
+                    original_video, images, left_video_mae_limit, canonical_bgr=canonical is not None)
                 key = f"observation.images.{left}_right"
                 video = destination / info["video_path"].format(episode_chunk=chunk, episode_index=index, video_key=key)
                 if video.exists():

@@ -6,10 +6,13 @@ Run from a server with the pinned RoboTwin simulation assets installed.
 """
 import argparse
 import importlib
+import io
 import json
 import os
 import pickle
+import re
 import sys
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -19,7 +22,7 @@ PAIRS = (("head_camera", "head_camera_right", "head_baseline_m"),
          ("right_camera", "right_camera_right", "right_wrist_baseline_m"))
 
 
-def verify_episode(original, replay, baselines, pixel_mae_limit=1.0, joint_atol=1e-5):
+def verify_episode(original, replay, baselines, pixel_mae_limit=1.0, joint_atol=1e-5, rgb_cache=None):
     import cv2
     import h5py
     errors = {}
@@ -57,6 +60,17 @@ def verify_episode(original, replay, baselines, pixel_mae_limit=1.0, joint_atol=
                     # legacy RoboTwin encodes RGB directly through OpenCV.
                     a = a[..., ::-1]
                 b = cv2.imdecode(np.frombuffer(bytes(new[index]), np.uint8), cv2.IMREAD_COLOR)
+                if b is None:
+                    raise ValueError(f"Invalid replay JPEG at {left}/{index}")
+                if canonical and rgb_cache is not None:
+                    # Compare the same JPEG encoding convention as canonical
+                    # data, using the fresh uncompressed replay observation.
+                    with (Path(rgb_cache) / f"{index}.pkl").open("rb") as stream:
+                        pixels = pickle.load(stream)["observation"][left]["rgb"]
+                    ok, jpeg = cv2.imencode(".jpg", pixels[..., ::-1])
+                    if not ok:
+                        raise ValueError(f"Canonical JPEG encoding failed: {left}/{index}")
+                    b = cv2.imdecode(jpeg, cv2.IMREAD_COLOR)[..., ::-1]
                 r = cv2.imdecode(np.frombuffer(bytes(target[f"observation/{right}/rgb"][index]), np.uint8), cv2.IMREAD_COLOR)
                 if a is None or b is None or r is None or a.shape != b.shape or r.shape != a.shape:
                     raise ValueError(f"Invalid stereo image at {left}/{index}")
@@ -94,6 +108,7 @@ def replay(args):
         raise ValueError("Source and output roots must be disjoint")
     config_path = Path(args.task_config_path).resolve(strict=True)
     config = yaml.safe_load(config_path.read_text())
+    archives = Path(args.canonical_archives_root).resolve(strict=True) if args.canonical_archives_root else None
     if config.get("embodiment") != ["aloha-agilex"]:
         raise ValueError("This experiment uses official Aloha clean demonstrations only")
     randomization = config["domain_randomization"]
@@ -142,6 +157,23 @@ def replay(args):
                        left_embodiment_config=embodiment_config, right_embodiment_config=embodiment_config,
                        dual_arm_embodied=True, embodiment_name="aloha-agilex", need_plan=False,
                        render_freq=0, save_data=True, stereo=dict(enabled=True, **baselines))
+        reference, canonical_reference = source, None
+        if archives is not None:
+            archive = archives / task_name / "demo_clean.zip"
+            with zipfile.ZipFile(archive) as stream:
+                members = [name for name in stream.namelist() if name.endswith(f"/data/episode_{index:07d}.hdf5")]
+                scenes = [name for name in stream.namelist() if name.endswith("/scene_info.json")]
+                if len(members) != 1 or len(scenes) != 1:
+                    raise ValueError(f"Ambiguous canonical episode: {task_name}/{index}")
+                reference = io.BytesIO(stream.read(members[0]))
+                recorded_scene = json.loads(stream.read(scenes[0]))[f"episode_{index}"]
+            models = {}
+            for value in recorded_scene["info"].values():
+                match = re.fullmatch(r"(.+)/base(\d+)", str(value))
+                if match:
+                    models.setdefault(match[1], []).append(int(match[2]))
+            options["recorded_actor_models"] = models
+            canonical_reference = dict(archive=str(archive), member=members[0], scene_info=recorded_scene)
         replanned = not trajectory.is_file()
         if replanned:
             planner = getattr(importlib.import_module(f"envs.{task_name}"), task_name)()
@@ -168,11 +200,15 @@ def replay(args):
                 raise RuntimeError(f"Replay failed: {task_name}/{index}, seed={seed}")
             env.merge_pkl_to_hdf5_video()
             generated = destination / "data" / f"episode{index}.hdf5"
-            result = verify_episode(source, generated, baselines, args.pixel_mae_limit, args.joint_atol)
+            result = verify_episode(reference, generated, baselines, args.pixel_mae_limit, args.joint_atol,
+                                    rgb_cache=env.folder_path["cache"] if archives is not None else None)
             result.update(task=task_name, episode=index, seed=seed, source=str(source),
                           source_trajectory=str(trajectory), trajectory_replanned=replanned,
                           baselines=baselines, scene_info=scene_info,
                           task_config_path=str(config_path), task_config=config)
+            if canonical_reference is not None:
+                result["canonical_reference"] = canonical_reference
+                result["replayed_actor_models"] = env.replayed_actor_models
             (destination / "verified.json").write_text(json.dumps(result, indent=2, default=str))
             print(f"Verified {task_name}/{index}: {result['frames']} frames", flush=True)
         finally:
@@ -186,6 +222,8 @@ if __name__ == "__main__":
     parser.add_argument("--source-root", required=True, help="Original raw task/demo_clean tree")
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--task-config-path", required=True, help="Exact original demo_clean.yml")
+    parser.add_argument("--canonical-archives-root",
+                        help="Official task/demo_clean.zip root; restore recorded actor variants and verify canonical left images")
     parser.add_argument("--tasks", nargs="+")
     parser.add_argument("--replan-missing", action="store_true",
                         help="Replan only absent trajectories using their exact recorded seeds; strict replay verification still required")

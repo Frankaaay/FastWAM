@@ -400,6 +400,7 @@ def create_obj(
         model_id=None,
         no_collision=False,
 ) -> Actor:
+    model_id = _recorded_model_id(scene, modelname, model_id)
     scene, pose = preprocess(scene, pose)
 
     modeldir = Path("assets/objects") / modelname
@@ -446,6 +447,7 @@ def create_glb(
         is_static=False,
         model_id=None,
 ) -> Actor:
+    model_id = _recorded_model_id(scene, modelname, model_id)
     scene, pose = preprocess(scene, pose)
 
     modeldir = Path("./assets/objects") / modelname
@@ -498,6 +500,24 @@ def get_glb_or_obj_file(modeldir, model_id):
     return file
 
 
+def _recorded_model_id(scene, modelname, model_id):
+    models = getattr(scene, "recorded_actor_models", {})
+    if modelname not in models:
+        return model_id
+    ids = models[modelname]
+    offset = scene.recorded_actor_model_offsets.get(modelname, 0)
+    # Repeated identical models (e.g. three bowls) share the recorded variant.
+    if len(set(ids)) == 1:
+        selected = ids[0]
+    else:
+        if offset >= len(ids):
+            raise ValueError(f"Unexpected extra recorded actor: {modelname}")
+        selected = ids[offset]
+    scene.recorded_actor_model_offsets[modelname] = offset + 1
+    scene.replayed_actor_models.append(f"{modelname}/base{selected}")
+    return selected
+
+
 def create_actor(
         scene,
         pose: sapien.Pose,
@@ -507,6 +527,7 @@ def create_actor(
         is_static=False,
         model_id=0,
 ) -> Actor:
+    model_id = _recorded_model_id(scene, modelname, model_id)
     scene, pose = preprocess(scene, pose)
     modeldir = Path("assets/objects") / modelname
 

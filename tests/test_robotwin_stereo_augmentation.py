@@ -116,7 +116,13 @@ class TestTerminalObservation(unittest.TestCase):
                     if name == right:
                         extrinsic[:, 0, 3] = -baselines[key]
                     target.create_dataset(f"observation/{name}/extrinsic_cv", data=extrinsic)
-        result = renderer.verify_episode(canonical, replay, baselines)
+        import pickle
+        cache = replay.parent / "cache"
+        cache.mkdir()
+        for index in range(3):
+            with (cache / f"{index}.pkl").open("wb") as stream:
+                pickle.dump({"observation": {left: {"rgb": rgb} for left, _, _ in renderer.PAIRS}}, stream)
+        result = renderer.verify_episode(canonical, replay, baselines, rgb_cache=cache)
         self.assertEqual((result["frames"], result["observed_source_frames"]), (4, 3))
         self.assertTrue(result["canonical_source"])
         with h5py.File(canonical, "r+") as source:

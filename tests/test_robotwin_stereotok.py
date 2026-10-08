@@ -65,6 +65,7 @@ class TestStereoContracts(unittest.TestCase):
                 self.fusion = types.SimpleNamespace(max_disparity=112)
             def encode_posterior(self, left, right, mask, disparity, camera_regions):
                 self.last = (right.clone(), camera_regions.clone())
+                self.batches = getattr(self, "batches", []) + [len(left)]
                 shape = (len(left), 48, 1 + (left.shape[2] - 1) // 4, 24, 20)
                 return torch.zeros(shape), torch.zeros(shape)
         codec = StereoTokVAE.__new__(StereoTokVAE)
@@ -83,6 +84,10 @@ class TestStereoContracts(unittest.TestCase):
         torch.testing.assert_close(encoded[0, :, 0, 0, 0], -shift * scale)
         torch.testing.assert_close(codec.model.last[0], right)
         self.assertEqual(codec.model.last[1][64, 40].item(), 2)
+        codec.model.batches = []
+        batched = codec.encode(left.expand(2, -1, -1, -1, -1), "cpu", right_videos=right.expand(2, -1, -1, -1, -1))
+        self.assertEqual(codec.model.batches, [1, 1])
+        torch.testing.assert_close(batched, encoded.expand(2, -1, -1, -1, -1))
         with self.assertRaises(ValueError):
             codec.encode(left, "cpu")
         with self.assertRaises(ValueError):
@@ -140,6 +145,21 @@ class TestStereoContracts(unittest.TestCase):
                                               "provenance": {"generator_updates": 5000}}):
             with self.assertRaisesRegex(ValueError, "u8000"):
                 load_student("unused.pt")
+
+    def test_recorded_actor_variants_preserve_order_and_reuse(self):
+        tree = ast.parse((ROOT / "third_party/RoboTwin/envs/utils/create_actor.py").read_text())
+        helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_recorded_model_id")
+        scope = {}
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), "create_actor.py", "exec"), scope)
+        scene = types.SimpleNamespace(recorded_actor_models={"bottle": [13, 16], "bowl": [3]},
+                                      recorded_actor_model_offsets={}, replayed_actor_models=[])
+        restore = scope["_recorded_model_id"]
+        self.assertEqual(restore(scene, "unrecorded", 7), 7)
+        self.assertEqual([restore(scene, "bottle", 99) for _ in range(2)], [13, 16])
+        with self.assertRaises(ValueError):
+            restore(scene, "bottle", 99)
+        self.assertEqual([restore(scene, "bowl", 99) for _ in range(3)], [3, 3, 3])
+        self.assertEqual(scene.replayed_actor_models, ["bottle/base13", "bottle/base16"] + ["bowl/base3"] * 3)
 
     def test_right_camera_translation_preserves_rotation(self):
         # Exercise the actual renderer pose method without importing SAPIEN/Open3D.
