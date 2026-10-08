@@ -7,6 +7,7 @@ import argparse
 import getpass
 import json
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -53,6 +54,12 @@ def prepare(args):
                 z.extract(info, assets)
             extracted.append(dict(archive=str(archive_path), prefix=prefix,
                                   files=len(selected), bytes=sum(i.file_size for i in selected)))
+    # Use upstream's path substitution, preserving its planner parameters.
+    for template in (assets / 'embodiments/aloha-agilex').glob('*_tmp.yml'):
+        if template.with_name(template.name.replace('_tmp.yml', '.yml')).exists():
+            raise FileExistsError(template)
+    subprocess.run([sys.executable, str(environment / 'script/update_embodiment_config_path.py')],
+                   cwd=environment, check=True)
     index = destination / 'source-index/adjust_bottle/demo_clean'
     (index / 'data').mkdir(parents=True)
     (index / '_traj_data').mkdir()
