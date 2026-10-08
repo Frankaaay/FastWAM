@@ -9,6 +9,7 @@ import copy
 import json
 import os
 from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import get_context
 import io
 import zipfile
 from contextlib import ExitStack
@@ -221,7 +222,8 @@ def augment(source, destination, episode_map, left_video_mae_limit=3.0):
     worker_info = copy.deepcopy(info)
     jobs = [(source, destination, worker_info, episode, stats_by_episode[episode["episode_index"]],
              *resolved[episode["episode_index"]], left_video_mae_limit) for episode in episodes]
-    executor = ProcessPoolExecutor(max_workers=min(8, os.cpu_count() or 1, len(episodes)))
+    executor = ProcessPoolExecutor(max_workers=min(8, os.cpu_count() or 1, len(episodes)),
+                                   mp_context=get_context("spawn"))
     try:
         for index, statistics, marker, features in executor.map(_augment_episode, jobs):
             stats_by_episode[index] = statistics
