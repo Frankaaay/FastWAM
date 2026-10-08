@@ -47,7 +47,7 @@ class TestTerminalObservation(unittest.TestCase):
         table = pa.table({"observation.state": qpos[:3].tolist(), "action": targets.tolist(),
                           "timestamp": (np.arange(3) / 15).tolist()})
         pq.write_table(table, source / "data/episode_000000.parquet")
-        image = np.full((8, 8, 3), 64, np.uint8)
+        image = np.full((8, 8, 3), [32, 80, 160], np.uint8)
         ok, jpeg = cv2.imencode(".jpg", image)
         assert ok
         images = np.array([jpeg.tobytes()] * raw_frames, dtype="S8192")
@@ -82,6 +82,46 @@ class TestTerminalObservation(unittest.TestCase):
 
     def test_wrong_action_is_rejected(self):
         source, output, mapping = self.run_case(4, wrong_action=True)
+        with self.assertRaises(AssertionError):
+            augmentation.augment(source, output, mapping)
+
+    def canonical_case(self, wrong_state=False):
+        import cv2
+        import zipfile
+        source, output, mapping = self.run_case(4)
+        folder = Path(json.loads(mapping.read_text())["0"])
+        marker = json.loads((folder / "verified.json").read_text())
+        canonical = folder / "canonical.hdf5"
+        with h5py.File(folder / "data/episode0.hdf5") as replay, h5py.File(canonical, "w") as f:
+            qpos = replay["joint_action/vector"][:]
+            if wrong_state:
+                qpos = qpos.copy()
+                qpos[0, 0] += 1
+            for key, section in zip(("left_arm_joint_states", "left_ee_joint_states", "right_arm_joint_states", "right_ee_joint_states"),
+                                    (slice(0, 6), slice(6, 7), slice(7, 13), slice(13, 14))):
+                f.create_dataset(f"state/{key}", data=qpos[:-1, section])
+                f.create_dataset(f"action/{key}", data=qpos[1:, section])
+            rgb = np.full((8, 8, 3), [32, 80, 160], np.uint8)
+            _, jpeg = cv2.imencode(".jpg", rgb[..., ::-1])
+            for camera in ("cam_head", "cam_left_wrist", "cam_right_wrist"):
+                f.create_dataset(f"vision/{camera}/colors", data=np.array([jpeg.tobytes()] * 3, dtype="S8192"))
+        archive = folder / "canonical.zip"
+        with zipfile.ZipFile(archive, "w") as f:
+            f.write(canonical, "data/episode_0000000.hdf5")
+        marker.update(canonical_source=True, pixel_mae_limit=1.0,
+                      canonical_reference={"archive": str(archive), "member": "data/episode_0000000.hdf5"})
+        (folder / "verified.json").write_text(json.dumps(marker))
+        return source, output, mapping
+
+    def test_canonical_zip_reference_checks_colors_and_preserves_original_video(self):
+        source, output, mapping = self.canonical_case()
+        augmentation.augment(source, output, mapping)
+        for left, _ in augmentation.RIGS:
+            path = f"videos/observation.images.{left}/episode_000000.mp4"
+            self.assertEqual((source / path).read_bytes(), (output / path).read_bytes())
+
+    def test_canonical_zip_state_mismatch_is_rejected(self):
+        source, output, mapping = self.canonical_case(wrong_state=True)
         with self.assertRaises(AssertionError):
             augmentation.augment(source, output, mapping)
 
