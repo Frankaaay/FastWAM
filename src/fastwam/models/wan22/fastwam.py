@@ -111,6 +111,7 @@ class FastWAM(torch.nn.Module):
         action_num_train_timesteps: int = 1000,
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
+        stereotok_checkpoint: str | None = None,
     ):
         if video_dit_config is None:
             raise ValueError("`video_dit_config` is required for FastWAM.from_wan22_pretrained().")
@@ -127,6 +128,7 @@ class FastWAM(torch.nn.Module):
             dit_config=video_dit_config,
             skip_dit_load_from_pretrain=skip_dit_load_from_pretrain,
             load_text_encoder=load_text_encoder,
+            stereotok_checkpoint=stereotok_checkpoint,
         )
 
         video_expert = components.dit
@@ -240,18 +242,20 @@ class FastWAM(torch.nn.Module):
         )
 
     @torch.no_grad()
-    def _encode_video_latents(self, video_tensor, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)):
+    def _encode_video_latents(self, video_tensor, tiled=False, tile_size=(30, 52), tile_stride=(15, 26), right_video=None):
+        stereo_kwargs = {"right_videos": right_video} if getattr(self.vae, "requires_stereo", False) else {}
         z = self.vae.encode(
             video_tensor,
             device=self.device,
             tiled=tiled,
             tile_size=tile_size,
             tile_stride=tile_stride,
+            **stereo_kwargs,
         )
-        return z
+        return z.to(dtype=self.torch_dtype) if stereo_kwargs else z
 
     @torch.no_grad()
-    def _encode_input_image_latents_tensor(self, input_image: torch.Tensor, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)):
+    def _encode_input_image_latents_tensor(self, input_image: torch.Tensor, tiled=False, tile_size=(30, 52), tile_stride=(15, 26), input_image_right=None):
         if input_image.ndim == 3:
             input_image = input_image.unsqueeze(0)
         if input_image.ndim != 4 or input_image.shape[0] != 1 or input_image.shape[1] != 3:
@@ -259,10 +263,17 @@ class FastWAM(torch.nn.Module):
                 f"`input_image` must have shape [1,3,H,W] or [3,H,W], got {tuple(input_image.shape)}"
             )
         image = input_image.to(device=self.device)[0].unsqueeze(1)
-        z = self.vae.encode([image], device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+        stereo_kwargs = {}
+        if getattr(self.vae, "requires_stereo", False):
+            if input_image_right is not None and input_image_right.ndim == 3:
+                input_image_right = input_image_right.unsqueeze(0)
+            if input_image_right is None or input_image_right.shape != input_image.shape:
+                raise ValueError("StereoTok inference requires a matching right-eye mosaic")
+            stereo_kwargs["right_videos"] = [input_image_right.to(device=self.device)[0].unsqueeze(1)]
+        z = self.vae.encode([image], device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride, **stereo_kwargs)
         if isinstance(z, list):
             z = z[0].unsqueeze(0)
-        return z
+        return z.to(dtype=self.torch_dtype) if stereo_kwargs else z
 
     def _decode_latents(self, latents, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)):
         video_tensor = self.vae.decode(latents, device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
@@ -334,8 +345,9 @@ class FastWAM(torch.nn.Module):
                     f"got {tuple(image_is_pad.shape)} vs expected ({batch_size}, {num_frames})"
                 )
         
-        input_video = video.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
-        input_latents = self._encode_video_latents(input_video, tiled=tiled)
+        codec_dtype = torch.float32 if getattr(self.vae, "requires_stereo", False) else self.torch_dtype
+        input_video = video.to(device=self.device, dtype=codec_dtype, non_blocking=True)
+        input_latents = self._encode_video_latents(input_video, tiled=tiled, right_video=sample.get("video_right"))
 
         first_frame_latents = None
         fuse_flag = False
@@ -741,6 +753,7 @@ class FastWAM(torch.nn.Module):
         rand_device: str = "cpu",
         tiled: bool = False,
         test_action_with_infer_action: bool = True,
+        input_image_right: Optional[torch.Tensor] = None,
     ) -> dict[str, Any]:
         self.eval()
         if test_action_with_infer_action:
@@ -749,6 +762,7 @@ class FastWAM(torch.nn.Module):
             action_only_out = self.infer_action(
                 prompt=prompt,
                 input_image=input_image.clone(),
+                input_image_right=input_image_right,
                 action_horizon=action_horizon,
                 context=context.clone() if context is not None else None,
                 context_mask=context_mask.clone() if context_mask is not None else None,
@@ -817,8 +831,9 @@ class FastWAM(torch.nn.Module):
             dtype=torch.float32,
         ).to(device=self.device, dtype=self.torch_dtype)
 
-        input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
-        first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
+        codec_dtype = torch.float32 if getattr(self.vae, "requires_stereo", False) else self.torch_dtype
+        input_image = input_image.to(device=self.device, dtype=codec_dtype)
+        first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled, input_image_right=input_image_right)
         latents_video[:, :, 0:1] = first_frame_latents.clone()
         fuse_flag = bool(getattr(self.video_expert, "fuse_vae_embedding_in_latents", False))
 
@@ -918,6 +933,7 @@ class FastWAM(torch.nn.Module):
         seed: Optional[int] = None,
         rand_device: str = "cpu",
         tiled: bool = False,
+        input_image_right: Optional[torch.Tensor] = None,
     ) -> dict[str, Any]:
         self.eval()
         if str(getattr(self.video_expert, "video_attention_mask_mode", "")) != "first_frame_causal":
@@ -957,8 +973,9 @@ class FastWAM(torch.nn.Module):
             dtype=torch.float32,
         ).to(device=self.device, dtype=self.torch_dtype)
 
-        input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
-        first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
+        codec_dtype = torch.float32 if getattr(self.vae, "requires_stereo", False) else self.torch_dtype
+        input_image = input_image.to(device=self.device, dtype=codec_dtype)
+        first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled, input_image_right=input_image_right)
         fuse_flag = bool(getattr(self.video_expert, "fuse_vae_embedding_in_latents", False))
 
         use_prompt = prompt is not None
@@ -1066,11 +1083,13 @@ class FastWAM(torch.nn.Module):
         seed: Optional[int] = None,
         rand_device: str = "cpu",
         tiled: bool = False,
+        input_image_right: Optional[torch.Tensor] = None,
     ):
         return self.infer_joint(
             prompt=prompt,
             input_image=input_image,
             num_video_frames=num_frames,
+            input_image_right=input_image_right,
             action_horizon=action_horizon,
             action=action,
             proprio=proprio,
@@ -1091,6 +1110,8 @@ class FastWAM(torch.nn.Module):
             "step": step,
             "torch_dtype": str(self.torch_dtype),
         }
+        if getattr(self.vae, "requires_stereo", False):
+            payload["tokenizer"] = self.vae.binding
         if self.proprio_encoder is not None:
             payload["proprio_encoder"] = self.proprio_encoder.state_dict()
         if optimizer is not None:
@@ -1099,6 +1120,8 @@ class FastWAM(torch.nn.Module):
 
     def load_checkpoint(self, path, optimizer=None):
         payload = torch.load(path, map_location="cpu")
+        if payload.get("tokenizer") != getattr(self.vae, "binding", None):
+            raise ValueError("Policy/tokenizer checkpoint binding mismatch")
         if "mot" in payload:
             self.mot.load_state_dict(payload["mot"], strict=False)
         elif "dit" in payload:

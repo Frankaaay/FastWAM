@@ -1,0 +1,20 @@
+# @package _global_
+defaults:
+  - robotwin_uncond_3cam_384_1e-4
+  - override /data: robotwin_stereo
+  - _self_
+
+num_epochs: 1
+resume: null
+model:
+  stereotok_checkpoint: ${oc.env:STEREOTOK_STUDENT_CKPT}
+
+stereo:
+  enabled: true
+  head_baseline_m: 0.06
+  left_wrist_baseline_m: 0.02
+  right_wrist_baseline_m: 0.02
+
+wandb:
+  enabled: true
+  mode: online

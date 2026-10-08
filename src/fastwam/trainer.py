@@ -363,7 +363,7 @@ class Wan22Trainer:
                     f"`context/context_mask` must be [B,L,D]/[B,L], got {tuple(context.shape)} and {tuple(context_mask.shape)}"
                 )
 
-        return {
+        result = {
             "video": video,
             "prompt": prompt,
             "action": action,
@@ -372,6 +372,14 @@ class Wan22Trainer:
             "context_mask": context_mask,
             "action_horizon": action_horizon,
         }
+        if "video_right" in sample:
+            right = sample["video_right"]
+            if right.ndim == 4:
+                right = right.unsqueeze(0)
+            if right.shape != video.shape:
+                raise ValueError("Evaluation stereo video shape mismatch")
+            result["video_right"] = right
+        return result
 
     @torch.no_grad()
     def evaluate(self):
@@ -412,6 +420,8 @@ class Wan22Trainer:
             "seed": 42,
             "tiled": False,
         }
+        if "video_right" in sample:
+            infer_kwargs["input_image_right"] = sample["video_right"][0, :, 0].unsqueeze(0)
         if sample["context"] is not None:
             infer_kwargs["prompt"] = None
             infer_kwargs["context"] = sample["context"][0]
@@ -494,8 +504,9 @@ class Wan22Trainer:
             action_l2 = action_diff.pow(2).mean().item()
 
         # 4. VAE reconstruction metrics against GT video
-        gt_video_batch = video0.unsqueeze(0).to(device=model.device, dtype=model.torch_dtype)
-        vae_latents = model._encode_video_latents(gt_video_batch, tiled=False)
+        codec_dtype = torch.float32 if "video_right" in sample else model.torch_dtype
+        gt_video_batch = video0.unsqueeze(0).to(device=model.device, dtype=codec_dtype)
+        vae_latents = model._encode_video_latents(gt_video_batch, tiled=False, right_video=sample.get("video_right"))
         vae_recon_video = model._decode_latents(vae_latents, tiled=False)
         vae_video_tensor = pil_frames_to_video_tensor(vae_recon_video)
 

@@ -124,6 +124,9 @@ def main(usr_args):
     args['task_name'] = task_name
     args["task_config"] = task_config
     args["ckpt_setting"] = ckpt_setting
+    if parse_bool(usr_args.get("stereo_enabled", False)):
+        args["stereo"] = dict(enabled=True, **{key: float(usr_args[key]) for key in
+                             ("head_baseline_m", "left_wrist_baseline_m", "right_wrist_baseline_m")})
 
     embodiment_type = args.get("embodiment")
     embodiment_config_path = os.path.join(CONFIGS_PATH, "_embodiment_config.yml")

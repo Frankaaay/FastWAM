@@ -90,6 +90,7 @@ def create_fastwam(
     redirect_common_files: bool = True,
     model_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
+    stereotok_checkpoint: str | None = None,
 ):
     from .models.wan22.fastwam import FastWAM
 
@@ -155,6 +156,7 @@ def create_fastwam(
         action_num_train_timesteps=int(action_scheduler["num_train_timesteps"]),
         loss_lambda_video=float(loss.get("lambda_video", 1.0)),
         loss_lambda_action=float(loss.get("lambda_action", 1.0)),
+        stereotok_checkpoint=stereotok_checkpoint,
     )
 
 

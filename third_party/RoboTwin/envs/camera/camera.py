@@ -57,6 +57,15 @@ class Camera:
 
         self.collect_head_camera = kwags["camera"].get("collect_head_camera", True)
         self.collect_wrist_camera = kwags["camera"].get("collect_wrist_camera", True)
+        self.stereo = kwags.get("stereo", {})
+        self.stereo_pairs = []
+        if self.stereo.get("enabled", False):
+            if not self.collect_head_camera or not self.collect_wrist_camera:
+                raise ValueError("Three-rig stereo requires head and both wrist cameras")
+            for key in ("head_baseline_m", "left_wrist_baseline_m", "right_wrist_baseline_m"):
+                value = self.stereo.get(key, 0.06 if key == "head_baseline_m" else 0.02)
+                if not np.isfinite(value) or value <= 0:
+                    raise ValueError(f"Invalid stereo baseline: {key}={value}")
 
         # embodiment = kwags.get('embodiment')
         # embodiment_config_path = os.path.join(CONFIGS_PATH, '_embodiment_config.yml')
@@ -270,6 +279,27 @@ class Camera:
         world_cam_mat44[:3, 3] = world_cam_pos
         self.world_camera2.entity.set_pose(sapien.Pose(world_cam_mat44))
 
+        if self.stereo.get("enabled", False):
+            if "head_camera" not in self.static_camera_name:
+                raise ValueError("Embodiment has no head_camera")
+            head = self.static_camera_list[self.static_camera_name.index("head_camera")]
+            rigs = (("head_camera", head, self.head_camera_type, "head_baseline_m", 0.06),
+                    ("left_camera", self.left_camera, self.wrist_camera_type, "left_wrist_baseline_m", 0.02),
+                    ("right_camera", self.right_camera, self.wrist_camera_type, "right_wrist_baseline_m", 0.02))
+            for name, left, camera_type, key, default in rigs:
+                config = camera_args[camera_type]
+                right = scene.add_camera(name=name + "_right", width=config["w"], height=config["h"],
+                                         fovy=np.deg2rad(config["fovy"]), near=near, far=far)
+                self.stereo_pairs.append((name + "_right", left, right, self.stereo.get(key, default)))
+            self._update_stereo_poses()
+
+    def _update_stereo_poses(self):
+        for _, left, right, baseline in self.stereo_pairs:
+            matrix = left.entity.get_pose().to_transformation_matrix().copy()
+            # SAPIEN local axes: forward +X, left +Y, up +Z. CV right is -Y.
+            matrix[:3, 3] -= baseline * matrix[:3, 1]
+            right.entity.set_pose(sapien.Pose(matrix))
+
     def update_picture(self):
         # camera
         if self.collect_wrist_camera:
@@ -278,6 +308,8 @@ class Camera:
 
         for camera in self.static_camera_list:
             camera.take_picture()
+        for _, _, right, _ in self.stereo_pairs:
+            right.take_picture()
 
         # ================================= sensor camera =================================
         # self.head_sensor.take_picture()
@@ -291,6 +323,7 @@ class Camera:
         if self.collect_wrist_camera:
             self.left_camera.entity.set_pose(left_pose)
             self.right_camera.entity.set_pose(right_pose)
+        self._update_stereo_poses()
 
     def get_config(self) -> dict:
         res = {}
@@ -318,6 +351,9 @@ class Camera:
         # ================================= sensor camera =================================
         # res['head_sensor'] = res['head_camera']
         # print(res)
+        for name, _, right, baseline in self.stereo_pairs:
+            res[name] = _get_config(right)
+            res[name]["baseline_m"] = baseline
         return res
 
     def get_rgb(self) -> dict:
@@ -360,7 +396,8 @@ class Camera:
                 res[camera_name]["rgba"] = _get_rgba(camera)
         # ================================= sensor camera =================================
         # res['head_sensor']['rgb'] = _get_sensor_rgba(self.head_sensor)
-
+        for name, _, right, _ in self.stereo_pairs:
+            res[name] = {"rgba": _get_rgba(right)}
         return res
 
     def get_observer_rgb(self) -> dict:

@@ -200,6 +200,10 @@ def main(cfg: DictConfig):
     overrides: list[str] = []
     _append_override(overrides, "task_name", cfg.EVALUATION.task_name)
     _append_override(overrides, "task_config", cfg.EVALUATION.task_config)
+    if cfg.get("stereo", {}).get("enabled", False):
+        _append_override(overrides, "stereo_enabled", True)
+        for key in ("head_baseline_m", "left_wrist_baseline_m", "right_wrist_baseline_m"):
+            _append_override(overrides, key, cfg.stereo[key])
     _append_override(overrides, "ckpt_setting", str(ckpt_path))
     _append_override(overrides, "seed", cfg.seed)
     _append_override(overrides, "policy_name", cfg.EVALUATION.policy_name)

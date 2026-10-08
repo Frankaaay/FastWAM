@@ -148,6 +148,7 @@ def load_wan22_ti2v_5b_components(
     dit_config: dict[str, Any] | None = None,
     skip_dit_load_from_pretrain: bool = False,
     load_text_encoder: bool = True,
+    stereotok_checkpoint: str | None = None,
 ):
     logger.info("Loading Wan2.2-TI2V-5B components...")
     start = time.time()
@@ -162,7 +163,8 @@ def load_wan22_ti2v_5b_components(
         redirect_common_files=redirect_common_files,
     )
 
-    vae_config.download_if_necessary()
+    if stereotok_checkpoint is None:
+        vae_config.download_if_necessary()
     if load_text_encoder:
         text_config.download_if_necessary()
         tokenizer_config.download_if_necessary()
@@ -207,7 +209,11 @@ def load_wan22_ti2v_5b_components(
             "Skipping pretrained text encoder/tokenizer load (`load_text_encoder=False`); "
             "training must provide cached `context/context_mask`."
         )
-    vae: WanVideoVAE38 = _load_registered_model(vae_config.path, "wan_video_vae", torch_dtype=torch_dtype, device=device)
+    if stereotok_checkpoint is None:
+        vae = _load_registered_model(vae_config.path, "wan_video_vae", torch_dtype=torch_dtype, device=device)
+    else:
+        from ..stereotok_vae import StereoTokVAE
+        vae = StereoTokVAE(stereotok_checkpoint, device)
     logger.info("Finished loading Wan2.2-TI2V-5B components in %.2f seconds.", time.time() - start)
     return Wan22LoadedComponents(
         dit=dit,
@@ -215,7 +221,7 @@ def load_wan22_ti2v_5b_components(
         text_encoder=text_encoder,
         tokenizer=tokenizer,
         dit_path=dit_path,
-        vae_path=str(vae_config.path),
+        vae_path=str(vae_config.path) if stereotok_checkpoint is None else str(stereotok_checkpoint),
         text_encoder_path=text_encoder_path,
         tokenizer_path=tokenizer_path,
     )

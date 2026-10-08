@@ -33,12 +33,14 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
 
         # sampling
         global_sample_stride: int = 1,
+        strict_images: bool = False,
     ):
         assert len(dataset_dirs) > 0, "At least one dataset directory is required"
         assert past_action_size == 0
         assert past_obs_size == 0
         assert action_size == obs_size - 1, "In this dataset, action_size should be obs_size - 1"
         
+        self.strict_images = strict_images
         self.dataset_dirs = dataset_dirs
         self.shape_meta = shape_meta
         self.action_size = action_size
@@ -190,6 +192,8 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
                 lerobot_sample = self._split_lerobot_sample(lerobot_sample)
                 break
             except Exception as err:
+                if self.strict_images:
+                    raise
                 attempt += 1
                 last_exception = err
                 logger.warning(
@@ -225,6 +229,10 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         sample["action_is_pad"] = lerobot_sample[f"{self.action_meta[0]['lerobot_key']}_is_pad"]
         sample["state_is_pad"] = lerobot_sample[f"{self.state_meta[0]['lerobot_key']}_is_pad"]
         sample["image_is_pad"] = lerobot_sample[f"{self.image_meta[0]['lerobot_key']}_is_pad"]
+        if self.strict_images:
+            for meta in self.image_meta[1:]:
+                if not torch.equal(sample["image_is_pad"], lerobot_sample[f"{meta['lerobot_key']}_is_pad"]):
+                    raise ValueError("Stereo camera time/padding mismatch")
 
         sample = self._get_additional_data(sample, lerobot_sample)
 

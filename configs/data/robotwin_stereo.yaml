@@ -1,0 +1,28 @@
+defaults:
+  - robotwin
+  - _self_
+
+train:
+  dataset_dirs: ["${oc.env:ROBOTWIN_STEREO_LEROBOT_ROOT}"]
+  shape_meta:
+    images:
+      - {key: cam_high, raw_shape: [3, 480, 640], shape: [3, 240, 320]}
+      - {key: cam_left_wrist, raw_shape: [3, 480, 640], shape: [3, 240, 320]}
+      - {key: cam_right_wrist, raw_shape: [3, 480, 640], shape: [3, 240, 320]}
+      - {key: cam_high_right, raw_shape: [3, 480, 640], shape: [3, 240, 320]}
+      - {key: cam_left_wrist_right, raw_shape: [3, 480, 640], shape: [3, 240, 320]}
+      - {key: cam_right_wrist_right, raw_shape: [3, 480, 640], shape: [3, 240, 320]}
+  pretrained_norm_stats: ${oc.env:ROBOTWIN_NORM_STATS}
+  concat_multi_camera: robotwin_stereo
+  processor:
+    num_output_cameras: 6
+  text_embedding_cache_dir: ${oc.env:ROBOTWIN_TEXT_CACHE}
+
+val:
+  dataset_dirs: ${data.train.dataset_dirs}
+  shape_meta: ${data.train.shape_meta}
+  pretrained_norm_stats: ${data.train.pretrained_norm_stats}
+  concat_multi_camera: robotwin_stereo
+  processor:
+    num_output_cameras: 6
+  text_embedding_cache_dir: ${data.train.text_embedding_cache_dir}

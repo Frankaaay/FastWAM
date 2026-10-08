@@ -43,6 +43,14 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         concat_multi_camera: str = "horizontal", # "horizontal", "vertical", "robotwin", or None
         override_instruction: Optional[str] = None, # whether to hardcode a specific instruction for all samples, for debugging
     ):
+        if concat_multi_camera == "robotwin_stereo":
+            from ..robotwin_stereo import LEROBOT_LEFT, LEROBOT_RIGHT
+            keys = [meta["key"] for meta in shape_meta["images"]]
+            if keys != list(LEROBOT_LEFT + LEROBOT_RIGHT):
+                raise ValueError("Stereo camera order must be head/left-wrist/right-wrist for each eye")
+            for directory in dataset_dirs:
+                if not os.path.isfile(os.path.join(directory, "meta", "stereo_provenance.json")):
+                    raise FileNotFoundError(f"Stereo augmentation is incomplete: {directory}")
         self.lerobot_dataset = BaseLerobotDataset(
             dataset_dirs=dataset_dirs,
             shape_meta=OmegaConf.to_container(shape_meta, resolve=True),
@@ -51,6 +59,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             val_set_proportion=val_set_proportion,
             is_training_set=is_training_set,
             global_sample_stride=global_sample_stride,
+            strict_images=(concat_multi_camera == "robotwin_stereo"),
         )
     
         self.num_frames = num_frames
@@ -151,7 +160,14 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         image_is_pad = image_is_pad[self.video_sample_indices]
 
         video = video.view(num_cameras, T_video, C, H, W)  # [num_cameras, T_video, C, H, W]
-        if self.concat_multi_camera == "robotwin":
+        video_right = None
+        if self.concat_multi_camera == "robotwin_stereo":
+            from ..robotwin_stereo import compose_mosaic
+            if num_cameras != 6 or self.video_size != [384, 320]:
+                raise ValueError("Stereo RoboTwin requires six cameras and a 384x320 canvas")
+            video_right = compose_mosaic(video[3:])
+            video = compose_mosaic(video[:3]).permute(1, 0, 2, 3)
+        elif self.concat_multi_camera == "robotwin":
             if num_cameras != 3:
                 raise ValueError(
                     f"`concat_multi_camera='robotwin'` requires exactly 3 cameras, got {num_cameras}"
@@ -190,9 +206,10 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             video = video.squeeze(0)  # [T_video, C, H, W]
 
         # final resize and normalization
-        video = self.resize_transform(video)
-        video = self.crop_transform(video)
-        video = self.normalize_transform(video)  # [T_video, C, H, W]
+        if self.concat_multi_camera != "robotwin_stereo":
+            video = self.resize_transform(video)
+            video = self.crop_transform(video)
+            video = self.normalize_transform(video)  # [T_video, C, H, W]
 
         video = video.permute(1, 0, 2, 3) # [C, T_video, H, W], range [-1, 1]
 
@@ -231,6 +248,8 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             "action_is_pad": sample["action_is_pad"],
             "proprio_is_pad": sample["proprio_is_pad"],
         }
+        if video_right is not None:
+            data["video_right"] = video_right
         return data
 
     def _get_cached_text_context(self, prompt: str):
@@ -268,6 +287,8 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         return context, context_mask
 
     def __getitem__(self, idx):
+        if self.concat_multi_camera == "robotwin_stereo":
+            return self._get(idx)
         try:
             data = self._get(idx)
         except Exception as e:

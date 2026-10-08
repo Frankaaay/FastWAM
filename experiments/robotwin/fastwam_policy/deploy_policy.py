@@ -234,7 +234,12 @@ class WorldActionRobotWinPolicy:
         return image_tensor
 
     def _infer_action_chunk(self, observation: Dict[str, Any], instruction: str) -> np.ndarray:
-        image_tensor = self._build_robotwin_image_tensor(observation)
+        image_right = None
+        if getattr(self.model.vae, "requires_stereo", False):
+            from fastwam.datasets.robotwin_stereo import observation_mosaics
+            image_tensor, image_right = observation_mosaics(observation)
+        else:
+            image_tensor = self._build_robotwin_image_tensor(observation)
         state_vector = np.asarray(observation["joint_action"]["vector"], dtype=np.float32)
         proprio = self._normalize_state(state_vector)
 
@@ -254,6 +259,8 @@ class WorldActionRobotWinPolicy:
         }
         if "num_video_frames" in inspect.signature(self.model.infer_action).parameters:
             infer_kwargs["num_video_frames"] = int(self._num_video_frames)
+        if image_right is not None:
+            infer_kwargs["input_image_right"] = image_right
         infer_t0 = time.perf_counter() if self.timing_enabled else 0.0
         with torch.no_grad():
             pred = self.model.infer_action(**infer_kwargs)
