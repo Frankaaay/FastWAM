@@ -38,7 +38,9 @@ def prepare(args):
     assets.mkdir()
     extracted = []
     for archive, prefix in (('embodiments.zip', 'embodiments/aloha-agilex/'),
-                            ('objects.zip', 'objects/001_bottle/')):
+                            ('objects.zip', 'objects/001_bottle/'),
+                            ('objects.zip', 'objects/objaverse/list.json'),
+                            ('objects.zip', 'objects/same.json')):
         archive_path = args.archives.resolve(strict=True) / archive
         with zipfile.ZipFile(archive_path) as z:
             selected = [info for info in z.infolist() if info.filename.startswith(prefix)]
