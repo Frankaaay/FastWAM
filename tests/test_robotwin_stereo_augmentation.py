@@ -107,8 +107,8 @@ class TestTerminalObservation(unittest.TestCase):
                 rgb = np.full((8, 8, 3), [32, 80, 160], np.uint8)
                 _, jpeg_rgb = cv2.imencode(".jpg", rgb)
                 _, jpeg_bgr = cv2.imencode(".jpg", rgb[..., ::-1])
-                target[f"observation/{left}/rgb"][:] = np.array([jpeg_rgb.tobytes()] * 4)
-                target[f"observation/{right}/rgb"][:] = np.array([jpeg_rgb.tobytes()] * 4)
+                target[f"observation/{left}/rgb"][:] = np.array([jpeg_rgb.tobytes()] * 4, dtype="S8192")
+                target[f"observation/{right}/rgb"][:] = np.array([jpeg_rgb.tobytes()] * 4, dtype="S8192")
                 source.create_dataset(f"vision/{camera}/colors", data=np.array([jpeg_bgr.tobytes()] * 3))
                 for name in (left, right):
                     target.create_dataset(f"observation/{name}/intrinsic_cv", data=np.tile(np.eye(3), (4, 1, 1)))
