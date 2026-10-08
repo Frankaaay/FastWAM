@@ -7,6 +7,8 @@ left videos are copied unchanged. No trajectory conversion or action shifting.
 import argparse
 import copy
 import json
+import os
+from concurrent.futures import ProcessPoolExecutor
 import io
 import zipfile
 from contextlib import ExitStack
@@ -33,6 +35,7 @@ def encode_right(images, destination, fps):
     with av.open(str(destination), "w") as container:
         stream = container.add_stream("libx264", rate=Fraction(str(fps)))
         stream.pix_fmt = "yuv444p"
+        stream.thread_count = 1
         stream.options = {"crf": "0", "preset": "fast"}
         shape = None
         for index, jpeg in enumerate(images):
@@ -99,9 +102,80 @@ def verify_left_video(video, images, mae_limit, canonical_bgr=False):
     return maximum
 
 
-def augment(source, destination, episode_map, left_video_mae_limit=3.0):
+def _augment_episode(job):
     import h5py
     import pyarrow.parquet as pq
+    source, destination, info, episode, statistics, folder, marker, left_video_mae_limit = job
+    index = episode["episode_index"]
+    chunk = index // info["chunks_size"]
+    raw = folder / "data" / f"episode{marker['episode']}.hdf5"
+    table = pq.read_table(source / info["data_path"].format(episode_chunk=chunk, episode_index=index), use_threads=False)
+    state = np.array(table["observation.state"].to_pylist(), dtype=np.float32)
+    action = np.array(table["action"].to_pylist(), dtype=np.float32)
+    timestamp = np.array(table["timestamp"].to_pylist(), dtype=np.float64)
+    np.testing.assert_allclose(timestamp, np.arange(episode["length"]) / info["fps"], atol=1e-4, rtol=0)
+    with ExitStack() as stack:
+        data = stack.enter_context(h5py.File(raw, "r"))
+        canonical = None
+        if "canonical_reference" in marker:
+            reference = marker["canonical_reference"]
+            if not marker.get("canonical_source") or marker["pixel_mae_limit"] > 1.0:
+                raise ValueError(f"Missing strict canonical replay verification: {index}")
+            archive = stack.enter_context(zipfile.ZipFile(reference["archive"]))
+            canonical = stack.enter_context(h5py.File(io.BytesIO(archive.read(reference["member"])), "r"))
+            keys = ("left_arm_joint_states", "left_ee_joint_states", "right_arm_joint_states", "right_ee_joint_states")
+            np.testing.assert_allclose(state, np.concatenate([canonical[f"state/{key}"][:] for key in keys], 1), atol=1e-5, rtol=0)
+            np.testing.assert_allclose(action, np.concatenate([canonical[f"action/{key}"][:] for key in keys], 1), atol=1e-5, rtol=0)
+        qpos = data["joint_action/vector"][:]
+        frames = episode["length"]
+        if qpos.shape != (marker["frames"], 14) or state.shape != (frames, 14) or action.shape != state.shape:
+            raise ValueError(f"Official/replayed state shape mismatch: {index}")
+        if not np.isfinite(state).all() or not np.isfinite(action).all() or not np.isfinite(qpos).all():
+            raise ValueError(f"Nonfinite official/replayed states: {index}")
+        np.testing.assert_allclose(state, qpos[:frames], atol=marker["joint_atol"], rtol=0)
+        # LeRobot stores observation q[t] and its target q[t+1]. Raw
+        # RoboTwin includes that terminal observation; it is not a new
+        # training sample. Equal-length recordings replicate the last target.
+        targets = qpos[1:frames + 1]
+        if len(targets) == frames - 1:
+            targets = np.concatenate((targets, qpos[-1:]))
+        np.testing.assert_allclose(action, targets, atol=marker["joint_atol"], rtol=0)
+        marker["official_frames"] = frames
+        marker["terminal_observation_omitted"] = len(qpos) == frames + 1
+        marker["official_left_video_max_mae"] = {}
+        for left, right in RIGS:
+            original_camera = right.removesuffix("_right")
+            original_key = f"observation.images.{left}"
+            original_video = source / info["video_path"].format(
+                episode_chunk=chunk, episode_index=index, video_key=original_key)
+            images = data[f"observation/{original_camera}/rgb"][:frames]
+            if canonical is not None:
+                camera = {"cam_high": "cam_head", "cam_left_wrist": "cam_left_wrist", "cam_right_wrist": "cam_right_wrist"}[left]
+                images = canonical[f"vision/{camera}/colors"][:]
+                if len(images) != frames:
+                    raise ValueError(f"Canonical image count mismatch: {index}/{left}")
+            marker["official_left_video_max_mae"][left] = verify_left_video(
+                original_video, images, left_video_mae_limit, canonical_bgr=canonical is not None)
+            key = f"observation.images.{left}_right"
+            video = destination / info["video_path"].format(episode_chunk=chunk, episode_index=index, video_key=key)
+            if video.exists():
+                raise FileExistsError(video)
+            stats, shape = encode_right(data[f"observation/{right}/rgb"][:frames], video, info["fps"])
+            statistics["stats"][key] = stats
+            if key not in info["features"]:
+                feature = copy.deepcopy(info["features"][f"observation.images.{left}"])
+                if tuple(feature["shape"]) != shape:
+                    raise ValueError(f"Official/replayed image shape mismatch: {key}")
+                feature["info"] = {"video.fps": info["fps"], "video.height": shape[0],
+                                   "video.width": shape[1], "video.channels": 3, "video.codec": "h264",
+                                   "video.pix_fmt": "yuv444p", "video.is_depth_map": False, "has_audio": False}
+                info["features"][key] = feature
+    features = {f"observation.images.{left}_right": info["features"][f"observation.images.{left}_right"]
+                for left, _ in RIGS}
+    return index, statistics, marker, features
+
+
+def augment(source, destination, episode_map, left_video_mae_limit=3.0):
     source, destination = Path(source).resolve(strict=True), Path(destination).resolve()
     if source == destination or source in destination.parents or destination in source.parents:
         raise ValueError("Source and destination must be disjoint")
@@ -144,73 +218,18 @@ def augment(source, destination, episode_map, left_video_mae_limit=3.0):
         shutil.copytree(source / name, destination / name)
     if (source / "annotations").is_dir():
         shutil.copytree(source / "annotations", destination / "annotations")
-    for episode in episodes:
-        index = episode["episode_index"]
-        chunk = index // info["chunks_size"]
-        folder, marker = resolved[index]
-        raw = folder / "data" / f"episode{marker['episode']}.hdf5"
-        table = pq.read_table(source / info["data_path"].format(episode_chunk=chunk, episode_index=index))
-        state = np.array(table["observation.state"].to_pylist(), dtype=np.float32)
-        action = np.array(table["action"].to_pylist(), dtype=np.float32)
-        timestamp = np.array(table["timestamp"].to_pylist(), dtype=np.float64)
-        np.testing.assert_allclose(timestamp, np.arange(episode["length"]) / info["fps"], atol=1e-4, rtol=0)
-        with ExitStack() as stack:
-            data = stack.enter_context(h5py.File(raw, "r"))
-            canonical = None
-            if "canonical_reference" in marker:
-                reference = marker["canonical_reference"]
-                if not marker.get("canonical_source") or marker["pixel_mae_limit"] > 1.0:
-                    raise ValueError(f"Missing strict canonical replay verification: {index}")
-                archive = stack.enter_context(zipfile.ZipFile(reference["archive"]))
-                canonical = stack.enter_context(h5py.File(io.BytesIO(archive.read(reference["member"])), "r"))
-                keys = ("left_arm_joint_states", "left_ee_joint_states", "right_arm_joint_states", "right_ee_joint_states")
-                np.testing.assert_allclose(state, np.concatenate([canonical[f"state/{key}"][:] for key in keys], 1), atol=1e-5, rtol=0)
-                np.testing.assert_allclose(action, np.concatenate([canonical[f"action/{key}"][:] for key in keys], 1), atol=1e-5, rtol=0)
-            qpos = data["joint_action/vector"][:]
-            frames = episode["length"]
-            if qpos.shape != (marker["frames"], 14) or state.shape != (frames, 14) or action.shape != state.shape:
-                raise ValueError(f"Official/replayed state shape mismatch: {index}")
-            if not np.isfinite(state).all() or not np.isfinite(action).all() or not np.isfinite(qpos).all():
-                raise ValueError(f"Nonfinite official/replayed states: {index}")
-            np.testing.assert_allclose(state, qpos[:frames], atol=marker["joint_atol"], rtol=0)
-            # LeRobot stores observation q[t] and its target q[t+1]. Raw
-            # RoboTwin includes that terminal observation; it is not a new
-            # training sample. Equal-length recordings replicate the last target.
-            targets = qpos[1:frames + 1]
-            if len(targets) == frames - 1:
-                targets = np.concatenate((targets, qpos[-1:]))
-            np.testing.assert_allclose(action, targets, atol=marker["joint_atol"], rtol=0)
-            marker["official_frames"] = frames
-            marker["terminal_observation_omitted"] = len(qpos) == frames + 1
-            marker["official_left_video_max_mae"] = {}
-            for left, right in RIGS:
-                original_camera = right.removesuffix("_right")
-                original_key = f"observation.images.{left}"
-                original_video = source / info["video_path"].format(
-                    episode_chunk=chunk, episode_index=index, video_key=original_key)
-                images = data[f"observation/{original_camera}/rgb"][:frames]
-                if canonical is not None:
-                    camera = {"cam_high": "cam_head", "cam_left_wrist": "cam_left_wrist", "cam_right_wrist": "cam_right_wrist"}[left]
-                    images = canonical[f"vision/{camera}/colors"][:]
-                    if len(images) != frames:
-                        raise ValueError(f"Canonical image count mismatch: {index}/{left}")
-                marker["official_left_video_max_mae"][left] = verify_left_video(
-                    original_video, images, left_video_mae_limit, canonical_bgr=canonical is not None)
-                key = f"observation.images.{left}_right"
-                video = destination / info["video_path"].format(episode_chunk=chunk, episode_index=index, video_key=key)
-                if video.exists():
-                    raise FileExistsError(video)
-                stats, shape = encode_right(data[f"observation/{right}/rgb"][:frames], video, info["fps"])
-                stats_by_episode[index]["stats"][key] = stats
-                if key not in info["features"]:
-                    feature = copy.deepcopy(info["features"][f"observation.images.{left}"])
-                    if tuple(feature["shape"]) != shape:
-                        raise ValueError(f"Official/replayed image shape mismatch: {key}")
-                    feature["info"] = {"video.fps": info["fps"], "video.height": shape[0],
-                                       "video.width": shape[1], "video.channels": 3, "video.codec": "h264",
-                                       "video.pix_fmt": "yuv444p", "video.is_depth_map": False, "has_audio": False}
-                    info["features"][key] = feature
-        print(f"Augmented official episode {index}/{len(episodes)}", flush=True)
+    worker_info = copy.deepcopy(info)
+    jobs = [(source, destination, worker_info, episode, stats_by_episode[episode["episode_index"]],
+             *resolved[episode["episode_index"]], left_video_mae_limit) for episode in episodes]
+    executor = ProcessPoolExecutor(max_workers=min(8, os.cpu_count() or 1, len(episodes)))
+    try:
+        for index, statistics, marker, features in executor.map(_augment_episode, jobs):
+            stats_by_episode[index] = statistics
+            resolved[index] = resolved[index][0], marker
+            info["features"].update(features)
+            print(f"Augmented official episode {index}/{len(episodes)}", flush=True)
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
     info["total_videos"] += 3 * len(episodes)
     (destination / "meta/info.json").write_text(json.dumps(info, indent=2))
     (destination / "meta/episodes_stats.jsonl").write_text(

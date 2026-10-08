@@ -4,6 +4,8 @@ Small test outputs remain in the configured personal TMPDIR for inspection.
 """
 import importlib.util
 import json
+import shutil
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -16,6 +18,7 @@ import pyarrow.parquet as pq
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("augmentation", ROOT / "scripts/augment_robotwin_lerobot_stereo.py")
 augmentation = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = augmentation
 spec.loader.exec_module(augmentation)
 spec = importlib.util.spec_from_file_location("renderer", ROOT / "scripts/render_robotwin_stereo.py")
 renderer = importlib.util.module_from_spec(spec)
@@ -79,6 +82,39 @@ class TestTerminalObservation(unittest.TestCase):
     def test_equal_length_terminal_action_replication(self):
         source, output, mapping = self.run_case(3)
         augmentation.augment(source, output, mapping)
+
+    def test_parallel_episodes_preserve_each_left_and_publish_all_rights(self):
+        source, output, mapping = self.run_case(4)
+        other_source, _, other_mapping = self.run_case(4)
+        entries = json.loads(mapping.read_text())
+        entries["1"] = json.loads(other_mapping.read_text())["0"]
+        mapping.write_text(json.dumps(entries))
+        info = json.loads((source / "meta/info.json").read_text())
+        info.update(total_episodes=2, total_videos=6)
+        (source / "meta/info.json").write_text(json.dumps(info))
+        (source / "meta/episodes.jsonl").write_text("".join(
+            json.dumps(dict(episode_index=i, length=3)) + "\n" for i in range(2)))
+        (source / "meta/episodes_stats.jsonl").write_text("".join(
+            json.dumps(dict(episode_index=i, stats={})) + "\n" for i in range(2)))
+        shutil.copyfile(other_source / "data/episode_000000.parquet",
+                        source / "data/episode_000001.parquet")
+        for left, _ in augmentation.RIGS:
+            folder = f"videos/observation.images.{left}"
+            shutil.copyfile(other_source / folder / "episode_000000.mp4",
+                            source / folder / "episode_000001.mp4")
+        augmentation.augment(source, output, mapping)
+        self.assertEqual(json.loads((output / "meta/info.json").read_text())["total_videos"], 12)
+        stats = [json.loads(row) for row in (output / "meta/episodes_stats.jsonl").read_text().splitlines()]
+        self.assertEqual([row["episode_index"] for row in stats], [0, 1])
+        for index in range(2):
+            filename = f"episode_{index:06d}"
+            self.assertEqual((source / f"data/{filename}.parquet").read_bytes(),
+                             (output / f"data/{filename}.parquet").read_bytes())
+            for left, _ in augmentation.RIGS:
+                video = f"videos/observation.images.{left}/{filename}.mp4"
+                self.assertEqual((source / video).read_bytes(), (output / video).read_bytes())
+                self.assertTrue((output / f"videos/observation.images.{left}_right/{filename}.mp4").is_file())
+                self.assertEqual(stats[index]["stats"][f"observation.images.{left}_right"]["count"], [3])
 
     def test_wrong_action_is_rejected(self):
         source, output, mapping = self.run_case(4, wrong_action=True)
