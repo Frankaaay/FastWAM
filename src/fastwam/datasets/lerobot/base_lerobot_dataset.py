@@ -1,4 +1,5 @@
 import torch
+import json
 import numpy as np
 from pathlib import Path
 from typing import List, Literal, Dict, Optional, Any, DefaultDict
@@ -93,15 +94,22 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
                 episodes.update({meta.repo_id: list(range(meta.total_episodes))})
         else:
             for meta in metas:
-                split_idx = int(meta.total_episodes * (1 - val_set_proportion))
+                source_indices = list(range(meta.total_episodes))
+                source_total = meta.total_episodes
+                if self.strict_images:
+                    provenance = json.loads((meta.root / "meta/stereo_provenance.json").read_text())
+                    source_indices = provenance["source_episode_indices"]
+                    source_total = provenance["source_total_episodes"]
+                    if len(source_indices) != meta.total_episodes or len(set(source_indices)) != len(source_indices) or any(i < 0 or i >= source_total for i in source_indices):
+                        raise ValueError("Invalid original stereo episode IDs")
+                split_idx = int(source_total * (1 - val_set_proportion))
                 # random shuffle episode indices before splitting
-                episode_indices = list(range(meta.total_episodes))
+                episode_indices = list(range(source_total))
                 rng = np.random.default_rng(seed)
                 rng.shuffle(episode_indices)
-                if self.is_training_set:
-                    episodes.update({meta.repo_id: [episode_indices[i] for i in range(split_idx)]})
-                else:
-                    episodes.update({meta.repo_id: [episode_indices[i] for i in range(split_idx, meta.total_episodes)]})
+                selected = episode_indices[:split_idx] if self.is_training_set else episode_indices[split_idx:]
+                local_indices = {source_index: i for i, source_index in enumerate(source_indices)}
+                episodes.update({meta.repo_id: [local_indices[i] for i in selected if i in local_indices]})
 
         self.multi_dataset = MultiLeRobotDataset(
             dataset_dirs=self.dataset_dirs,

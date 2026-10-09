@@ -40,6 +40,7 @@ class TestTerminalObservation(unittest.TestCase):
         (source / "meta/info.json").write_text(json.dumps(info))
         (source / "meta/episodes.jsonl").write_text(json.dumps(dict(episode_index=0, length=3)) + "\n")
         (source / "meta/episodes_stats.jsonl").write_text(json.dumps(dict(episode_index=0, stats={})) + "\n")
+        (source / "meta/tasks.jsonl").write_text(json.dumps(dict(task_index=0, task="fixture")) + "\n")
         qpos = np.arange(raw_frames * 14, dtype=np.float32).reshape(raw_frames, 14) / 100
         targets = qpos[1:4]
         if len(targets) == 2:
@@ -48,7 +49,8 @@ class TestTerminalObservation(unittest.TestCase):
             targets = targets.copy()
             targets[0, 0] += 0.1
         table = pa.table({"observation.state": qpos[:3].tolist(), "action": targets.tolist(),
-                          "timestamp": (np.arange(3) / 15).tolist()})
+                          "timestamp": (np.arange(3) / 15).tolist(), "episode_index": [0]*3,
+                          "index": list(range(3)), "frame_index": list(range(3)), "task_index": [0]*3})
         pq.write_table(table, source / "data/episode_000000.parquet")
         image = np.full((8, 8, 3), [32, 80, 160], np.uint8)
         ok, jpeg = cv2.imencode(".jpg", image)
@@ -56,11 +58,18 @@ class TestTerminalObservation(unittest.TestCase):
         images = np.array([jpeg.tobytes()] * raw_frames, dtype="S8192")
         with h5py.File(replay / "data/episode0.hdf5", "w") as f:
             f.create_dataset("joint_action/vector", data=qpos)
-            for left, right in augmentation.RIGS:
+            for (left, right), baseline in zip(augmentation.RIGS, (0.06, 0.02, 0.02)):
                 f.create_dataset(f"observation/{right.removesuffix('_right')}/rgb", data=images)
                 f.create_dataset(f"observation/{right}/rgb", data=images)
+                for camera in (right.removesuffix('_right'), right):
+                    f.create_dataset(f"observation/{camera}/intrinsic_cv", data=np.tile(np.eye(3), (raw_frames, 1, 1)))
+                    extrinsic = np.tile(np.eye(4)[:3], (raw_frames, 1, 1))
+                    if camera == right:
+                        extrinsic[:, 0, 3] = -baseline
+                    f.create_dataset(f"observation/{camera}/extrinsic_cv", data=extrinsic)
                 augmentation.encode_right(images[:3], source / f"videos/observation.images.{left}/episode_000000.mp4", 15)
-        marker = dict(frames=raw_frames, episode=0, baselines={"head_baseline_m": 0.06}, joint_atol=1e-5)
+        marker = dict(frames=raw_frames, episode=0, baselines=dict(head_baseline_m=0.06,
+                      left_wrist_baseline_m=0.02, right_wrist_baseline_m=0.02), joint_atol=1e-5)
         (replay / "verified.json").write_text(json.dumps(marker))
         mapping = root / "mapping.json"
         mapping.write_text(json.dumps({"0": str(replay)}))
@@ -69,10 +78,12 @@ class TestTerminalObservation(unittest.TestCase):
     def test_terminal_frame_is_omitted_without_shifting_left_or_actions(self):
         source, output, mapping = self.run_case(4)
         augmentation.augment(source, output, mapping)
-        self.assertEqual((source / "data/episode_000000.parquet").read_bytes(),
-                         (output / "data/episode_000000.parquet").read_bytes())
+        self.assertTrue(pq.read_table(source / "data/episode_000000.parquet").equals(
+                        pq.read_table(output / "data/episode_000000.parquet")))
         provenance = json.loads((output / "meta/stereo_provenance.json").read_text())
         self.assertTrue(provenance["replay_verification"]["0"]["terminal_observation_omitted"])
+        self.assertEqual(provenance["pairing"], "fresh-left+fresh-right")
+        self.assertEqual(provenance["source_episode_indices"], [0])
         for left, _ in augmentation.RIGS:
             path = f"videos/observation.images.{left}/episode_000000.mp4"
             self.assertEqual((source / path).read_bytes(), (output / path).read_bytes())
@@ -108,8 +119,11 @@ class TestTerminalObservation(unittest.TestCase):
         self.assertEqual([row["episode_index"] for row in stats], [0, 1])
         for index in range(2):
             filename = f"episode_{index:06d}"
-            self.assertEqual((source / f"data/{filename}.parquet").read_bytes(),
-                             (output / f"data/{filename}.parquet").read_bytes())
+            original = pq.read_table(source / f"data/{filename}.parquet")
+            actual = pq.read_table(output / f"data/{filename}.parquet")
+            for key in ("action", "observation.state", "timestamp", "frame_index", "task_index"):
+                self.assertEqual(original[key].to_pylist(), actual[key].to_pylist())
+            self.assertEqual(actual["episode_index"].to_pylist(), [index]*3)
             for left, _ in augmentation.RIGS:
                 video = f"videos/observation.images.{left}/{filename}.mp4"
                 self.assertEqual((source / video).read_bytes(), (output / video).read_bytes())
@@ -121,45 +135,42 @@ class TestTerminalObservation(unittest.TestCase):
         with self.assertRaises(AssertionError):
             augmentation.augment(source, output, mapping)
 
-    def canonical_case(self, wrong_state=False):
+    def test_fresh_left_pixels_replace_official_without_comparison(self):
         import cv2
-        import zipfile
         source, output, mapping = self.run_case(4)
-        folder = Path(json.loads(mapping.read_text())["0"])
-        marker = json.loads((folder / "verified.json").read_text())
-        canonical = folder / "canonical.hdf5"
-        with h5py.File(folder / "data/episode0.hdf5") as replay, h5py.File(canonical, "w") as f:
-            qpos = replay["joint_action/vector"][:]
-            if wrong_state:
-                qpos = qpos.copy()
-                qpos[0, 0] += 1
-            for key, section in zip(("left_arm_joint_states", "left_ee_joint_states", "right_arm_joint_states", "right_ee_joint_states"),
-                                    (slice(0, 6), slice(6, 7), slice(7, 13), slice(13, 14))):
-                f.create_dataset(f"state/{key}", data=qpos[:-1, section])
-                f.create_dataset(f"action/{key}", data=qpos[1:, section])
-            rgb = np.full((8, 8, 3), [32, 80, 160], np.uint8)
-            _, jpeg = cv2.imencode(".jpg", rgb[..., ::-1])
-            for camera in ("cam_head", "cam_left_wrist", "cam_right_wrist"):
-                f.create_dataset(f"vision/{camera}/colors", data=np.array([jpeg.tobytes()] * 3, dtype="S8192"))
-        archive = folder / "canonical.zip"
-        with zipfile.ZipFile(archive, "w") as f:
-            f.write(canonical, "data/episode_0000000.hdf5")
-        marker.update(canonical_source=True, pixel_mae_limit=1.0,
-                      canonical_reference={"archive": str(archive), "member": "data/episode_0000000.hdf5"})
-        (folder / "verified.json").write_text(json.dumps(marker))
-        return source, output, mapping
-
-    def test_canonical_zip_reference_checks_colors_and_preserves_original_video(self):
-        source, output, mapping = self.canonical_case()
+        replay = Path(json.loads(mapping.read_text())["0"]) / "data/episode0.hdf5"
+        _, jpeg = cv2.imencode(".jpg", np.full((8, 8, 3), [200, 120, 40], np.uint8))
+        with h5py.File(replay, "r+") as f:
+            for _, right in augmentation.RIGS:
+                f[f"observation/{right.removesuffix('_right')}/rgb"][:] = np.array([jpeg.tobytes()]*4, dtype="S8192")
         augmentation.augment(source, output, mapping)
-        for left, _ in augmentation.RIGS:
-            path = f"videos/observation.images.{left}/episode_000000.mp4"
-            self.assertEqual((source / path).read_bytes(), (output / path).read_bytes())
+        self.assertNotEqual((source / "videos/observation.images.cam_high/episode_000000.mp4").read_bytes(),
+                            (output / "videos/observation.images.cam_high/episode_000000.mp4").read_bytes())
 
-    def test_canonical_zip_state_mismatch_is_rejected(self):
-        source, output, mapping = self.canonical_case(wrong_state=True)
+    def test_invalid_calibration_is_rejected(self):
+        source, output, mapping = self.run_case(4)
+        replay = Path(json.loads(mapping.read_text())["0"]) / "data/episode0.hdf5"
+        with h5py.File(replay, "r+") as f:
+            f["observation/head_camera_right/extrinsic_cv"][0, 0, 3] = -0.2
         with self.assertRaises(AssertionError):
             augmentation.augment(source, output, mapping)
+
+    def test_subset_keeps_source_id_and_reindexes_only_dataset_columns(self):
+        source, output, mapping = self.run_case(4)
+        info = json.loads((source / "meta/info.json").read_text())
+        info["total_episodes"] = 2
+        (source / "meta/info.json").write_text(json.dumps(info))
+        (source / "meta/episodes.jsonl").write_text("".join(json.dumps(dict(episode_index=i, length=3)) + "\n" for i in range(2)))
+        (source / "meta/episodes_stats.jsonl").write_text("".join(json.dumps(dict(episode_index=i, stats={})) + "\n" for i in range(2)))
+        shutil.copyfile(source / "data/episode_000000.parquet", source / "data/episode_000001.parquet")
+        folder = json.loads(mapping.read_text())["0"]
+        mapping.write_text(json.dumps({"1": folder}))
+        augmentation.augment(source, output, mapping)
+        provenance = json.loads((output / "meta/stereo_provenance.json").read_text())
+        self.assertEqual(provenance["source_episode_indices"], [1])
+        self.assertEqual(provenance["source_total_episodes"], 2)
+        self.assertTrue(pq.read_table(source / "data/episode_000001.parquet").equals(
+                        pq.read_table(output / "data/episode_000000.parquet")))
 
     def test_more_than_one_extra_frame_is_rejected(self):
         source, output, mapping = self.run_case(5)
@@ -187,11 +198,10 @@ class TestTerminalObservation(unittest.TestCase):
                 target[f"observation/{right}/rgb"][:] = np.array([jpeg_rgb.tobytes()] * 4, dtype="S8192")
                 source.create_dataset(f"vision/{camera}/colors", data=np.array([jpeg_bgr.tobytes()] * 3))
                 for name in (left, right):
-                    target.create_dataset(f"observation/{name}/intrinsic_cv", data=np.tile(np.eye(3), (4, 1, 1)))
                     extrinsic = np.tile(np.eye(4)[:3], (4, 1, 1))
                     if name == right:
                         extrinsic[:, 0, 3] = -baselines[key]
-                    target.create_dataset(f"observation/{name}/extrinsic_cv", data=extrinsic)
+                    target[f"observation/{name}/extrinsic_cv"][:] = extrinsic
         import pickle
         cache = replay.parent / "cache"
         cache.mkdir()
