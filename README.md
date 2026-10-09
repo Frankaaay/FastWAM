@@ -53,12 +53,15 @@ FastWAM/
 ## Environment Setup
 
 ```bash
-conda create -n fastwam python=3.10 -y
-conda activate fastwam
-pip install -U pip
-pip install torch==2.7.1+cu128 torchvision==0.22.1+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
-pip install -e .
+uv sync --python 3.12
+source .venv/bin/activate
+uv pip check
+python -c "import torch, torchvision, torchcodec, deepspeed, timm, h5py, cv2, yaml; import fastwam.runtime; import fastwam.models.wan22.stereotok.checkpoints; print('FastWAM imports OK:', torch.__version__, 'CUDA:', torch.cuda.is_available())"
 ```
+
+Run this from the repository root with uv installed. `pyproject.toml` declares the training and stereo conversion dependencies, the CUDA 12.8 PyTorch index, and PyTorch as a DeepSpeed build dependency. `uv pip list` shows the installed environment; use `uv sync` after updating this branch to install its declared dependencies. Use this environment's `python` and `accelerate` when launching jobs.
+
+The GPU training target is Linux with a compatible NVIDIA driver and FFmpeg libraries available to TorchCodec. Python 3.12 is the validated training runtime. RoboTwin simulation/rendering has a separate environment described in its server guide; it is not installed by this training command.
 
 ## Model Preparation
 

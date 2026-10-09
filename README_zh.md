@@ -53,12 +53,15 @@ FastWAM/
 ## 环境安装
 
 ```bash
-conda create -n fastwam python=3.10 -y
-conda activate fastwam
-pip install -U pip
-pip install torch==2.7.1+cu128 torchvision==0.22.1+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
-pip install -e .
+uv sync --python 3.12
+source .venv/bin/activate
+uv pip check
+python -c "import torch, torchvision, torchcodec, deepspeed, timm, h5py, cv2, yaml; import fastwam.runtime; import fastwam.models.wan22.stereotok.checkpoints; print('FastWAM imports OK:', torch.__version__, 'CUDA:', torch.cuda.is_available())"
 ```
+
+先安装 uv，在仓库根目录执行。`pyproject.toml` 声明训练与双目转换所需依赖、CUDA 12.8 的 PyTorch 源，以及 DeepSpeed 构建时需要的 PyTorch。`uv pip list` 展示当前环境实际安装的包；更新本分支后执行 `uv sync` 才会安装清单中的依赖。启动作业时使用该环境的 `python` 和 `accelerate`。
+
+GPU 训练环境为 Linux，需要兼容的 NVIDIA 驱动，以及 TorchCodec 可加载的 FFmpeg 库。Python 3.12 是已验证的训练运行时。RoboTwin 仿真/回放使用服务器指南中的独立环境，不包含在这条训练安装命令中。
 
 ## 模型准备
 
