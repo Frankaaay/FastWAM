@@ -1,6 +1,7 @@
-"""Resume the authorized accepted-only RoboTwin rendering with eight shards."""
+"""Render remaining RoboTwin episodes in forty isolated single-GPU workers."""
 import argparse
 import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,19 +14,16 @@ RENDER_SHA = 'a8810a04caf7bbc9347b1751b96305cc16c4b945'
 
 
 def selected_rows(manifest, worker):
-    if not 0 <= worker < 8:
-        raise ValueError('Expected worker 0..7')
+    if not 0 <= worker < 40:
+        raise ValueError('Expected worker 0..39')
     pending = manifest['pending']
-    indices = [row['canonical_episode'] for row in pending]
-    excluded = {row['canonical_episode'] for row in manifest['excluded']}
-    accepted = {row['canonical_episode'] for row in manifest['accepted']}
-    if len(set(indices)) != len(indices) or set(indices) & (excluded | accepted):
-        raise ValueError('Pending episodes overlap completed or excluded episodes')
-    if accepted & excluded or len(set(indices) | accepted | excluded) != 2500:
+    indices = [row['canonical_episode'] for name in ('pending', 'accepted', 'candidates', 'excluded')
+               for row in manifest[name]]
+    if len(indices) != 2500 or set(indices) != set(range(2500)):
         raise ValueError('Migration manifest must account for all 2500 source episodes')
     if any(row['replan'] for row in pending):
         raise ValueError('Missing trajectories were excluded by the user')
-    return [row for row in pending if row['canonical_episode'] % 8 == worker]
+    return [row for row in pending if row['canonical_episode'] % 40 == worker]
 
 
 def publish(path, data):
@@ -58,7 +56,7 @@ def main(args):
     token = os.environ.get('DLC_JOB_ID', args.instance_id)
     if not token or not token.startswith(('dlc', 'dsw-')):
         raise ValueError('An exact personal job or instance ID is required')
-    temporary = Path('/tmp/frank-fastwam-render8') / token / f'worker-{args.worker}'
+    temporary = Path('/tmp/frank-fastwam-render40') / token / f'worker-{args.worker}'
     temporary.mkdir(parents=True, mode=0o700, exist_ok=False)
     libs = BASE / 'envs/system-libs'
     env = dict(os.environ, LD_LIBRARY_PATH=json.loads((prep / 'system-libs-prepared.json').read_text())['ld_library_path'],
@@ -76,7 +74,8 @@ def main(args):
     assert len(devices) == 1, devices
     publish(worker_dir / 'provenance.json', dict(worker=args.worker, resource_id=token,
         launcher_sha=launcher_sha, render_sha=RENDER_SHA, devices=devices, selected=len(rows),
-        manifest=args.manifest, strict_pixel_mae=1, joint_atol=1e-5,
+        manifest=args.manifest, manifest_sha256=hashlib.sha256(Path(args.manifest).read_bytes()).hexdigest(),
+        strict_pixel_mae=1, joint_atol=1e-5, pixel_candidates_retained=True,
         started=datetime.datetime.now(datetime.timezone.utc).isoformat()))
     records = []
     start = time.time()
@@ -98,14 +97,16 @@ def main(args):
             exit_code=code, verified=code == 0 and (target / 'verified.json').exists(), output=str(target))
         if not record['verified']:
             record['exception_tail'] = '\n'.join(log_path.read_text().replace('\r', '\n').splitlines()[-18:])
+        record['candidate'] = not record['verified'] and code == 1 and 'pixel MAE=' in record.get('exception_tail', '')
         records.append(record)
         progress = dict(worker=args.worker, resource_id=token, selected=len(rows), processed=len(records),
             verified=sum(item['verified'] for item in records), records=records,
+            candidates=sum(item['candidate'] for item in records),
             failed=[item for item in records if not item['verified']], seconds=time.time() - start)
         publish(worker_dir / 'progress.json', progress)
         print(json.dumps({key: value for key, value in record.items() if key != 'exception_tail'}), flush=True)
     publish(worker_dir / 'completed.json', dict(worker=args.worker, records=records, seconds=time.time() - start))
-    print('Rendering finished; only strict verified episodes are eligible for the authorized subset.', flush=True)
+    print('Rendering finished; pixel-rejected candidates are retained pending the pairing decision.', flush=True)
 
 
 if __name__ == '__main__':
