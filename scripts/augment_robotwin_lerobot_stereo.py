@@ -136,7 +136,7 @@ def _augment_episode(job):
                 stats, shape = encode_right(images[:frames], video, info["fps"])
                 statistics["stats"][key] = stats
                 feature = copy.deepcopy(info["features"][f"observation.images.{left}"])
-                if tuple(feature["shape"]) != shape:
+                if tuple(feature["shape"]) != (shape[2], shape[0], shape[1]):
                     raise ValueError(f"Official/replayed image shape mismatch: {key}")
                 feature["info"] = {"video.fps": info["fps"], "video.height": shape[0],
                                    "video.width": shape[1], "video.channels": 3, "video.codec": "h264",

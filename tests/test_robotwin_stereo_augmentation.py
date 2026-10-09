@@ -32,7 +32,7 @@ class TestTerminalObservation(unittest.TestCase):
         source, replay = root / "official", root / "replay"
         for path in (source / "meta", source / "data", source / "videos", replay / "data"):
             path.mkdir(parents=True)
-        features = {f"observation.images.{left}": dict(dtype="video", shape=[8, 8, 3])
+        features = {f"observation.images.{left}": dict(dtype="video", shape=[3, 8, 8], names=["channels", "height", "width"])
                     for left, _ in augmentation.RIGS}
         info = dict(total_episodes=1, chunks_size=1000, fps=15, total_videos=3,
                     features=features, data_path="data/episode_{episode_index:06d}.parquet",
