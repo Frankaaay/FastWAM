@@ -13,6 +13,7 @@ from omegaconf import OmegaConf
 
 from .trainer import Wan22Trainer
 from .utils.logging_config import get_logger, setup_logging
+from .utils.pytorch_utils import set_global_seed
 from .utils.video_io import save_mp4
 from .utils import misc
 
@@ -371,6 +372,8 @@ def run_training(cfg: DictConfig):
     model_device = _resolve_train_device()
     mixed_precision = _normalize_mixed_precision(cfg.mixed_precision)
     model_dtype = _mixed_precision_to_model_dtype(mixed_precision)
+    # Seed model initialization before the trainer reseeds its training stream.
+    set_global_seed(int(cfg.seed))
     model = instantiate(cfg.model, model_dtype=model_dtype, device=model_device)
     train_ds, val_ds = build_datasets(cfg.data)
 

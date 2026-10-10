@@ -1,5 +1,9 @@
 """CPU contracts; no model downloads, checkpoints or simulation assets."""
 import ast
+import logging
+import os
+import random
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -21,6 +25,56 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class TestStereoContracts(unittest.TestCase):
+    def test_training_seed_controls_initialization_before_trainer(self):
+        seed_scope = {}
+        exec(compile((ROOT / "src/fastwam/utils/pytorch_utils.py").read_text(),
+                     "pytorch_utils.py", "exec"), seed_scope)
+        seed = seed_scope["set_global_seed"]
+        tree = ast.parse((ROOT / "src/fastwam/runtime.py").read_text())
+        functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                     and node.name in ("run_training", "_normalize_mixed_precision",
+                                       "_mixed_precision_to_model_dtype")]
+        captured = []
+
+        def instantiate(*args, **kwargs):
+            model = nn.Module()
+            model.action_encoder = nn.Linear(14, 32)
+            model.head = nn.Linear(32, 14)
+            model.proprio_encoder = nn.Linear(14, 64)
+            captured.append(({name: value.detach().clone()
+                              for name, value in model.state_dict().items()},
+                             random.random(), np.random.random()))
+            return model
+
+        class Trainer:
+            def __init__(self, **kwargs):
+                # Preserve the existing later reseeding, which previously hid the bug.
+                seed(int(kwargs["cfg"].seed), get_worker_init_fn=True)
+            def train(self):
+                pass
+
+        scope = dict(torch=torch, logging=logging, Path=Path, DictConfig=object,
+                     set_global_seed=seed, instantiate=instantiate, Wan22Trainer=Trainer,
+                     setup_logging=lambda **kwargs: None,
+                     misc=types.SimpleNamespace(register_work_dir=lambda path: None),
+                     OmegaConf=types.SimpleNamespace(to_container=lambda *args, **kwargs: {},
+                                                     save=lambda *args: None),
+                     _resolve_train_device=lambda: "cpu",
+                     build_datasets=lambda cfg: (object(), None))
+        exec(compile(ast.Module(body=functions, type_ignores=[]), "runtime.py", "exec"), scope)
+        with tempfile.TemporaryDirectory() as output, patch.dict(os.environ, {"RANK": "0"}):
+            cfg = types.SimpleNamespace(seed=42, output_dir=output, mixed_precision="bf16",
+                                        model=object(), data=object())
+            for ambient_seed, training_seed in ((1, 42), (123, 42), (123, 43)):
+                seed(ambient_seed)
+                cfg.seed = training_seed
+                scope["run_training"](cfg)
+        for name in captured[0][0]:
+            torch.testing.assert_close(captured[0][0][name], captured[1][0][name], rtol=0, atol=0)
+            self.assertFalse(torch.equal(captured[0][0][name], captured[2][0][name]), name)
+        self.assertEqual(captured[0][1:], captured[1][1:])
+        self.assertNotEqual(captured[0][1:], captured[2][1:])
+
     def test_mosaic_training_rollout_parity(self):
         rng = np.random.default_rng(2)
         raw = [rng.integers(0, 256, (64, 96, 3), dtype=np.uint8) for _ in range(6)]
