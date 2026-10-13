@@ -79,6 +79,12 @@ def main():
     torch.cuda.empty_cache()
 
     stereo = StereoTokVAE(base/'checkpoints/stereotok/student-u8000.pt', 'cuda')
+    legacy_source = subprocess.check_output(['git', '-C', str(repo), 'show',
+        'f7d384da674878d99577223c4d65dc89a0b6efb5:src/fastwam/models/wan22/stereotok/tokenizer_inference.py'], text=True)
+    legacy_scope = {'__name__': 'fastwam.models.wan22.stereotok.tokenizer_inference',
+                    '__package__': 'fastwam.models.wan22.stereotok'}
+    exec(compile(legacy_source, '<original-runtime>', 'exec'), legacy_scope)
+    stereo.model._frozen_inference = legacy_scope['FrozenTokenizerInference'](stereo.model)
     # Execute the exact pre-optimization method on the same frozen model/inputs.
     source = subprocess.check_output(['git', '-C', str(repo), 'show',
         'f7d384da674878d99577223c4d65dc89a0b6efb5:src/fastwam/models/wan22/stereotok_vae.py'], text=True)
@@ -89,6 +95,10 @@ def main():
     old = lambda left, right: scope['encode'](stereo, left, 'cuda', right_videos=right)
     measure('stereo_b1_loop', old)
     references = [old(left, right).cpu() for left, right in batches]
+    stereo.model._frozen_inference = None
+    gc.collect()
+    torch.cuda.empty_cache()
+    measure('stereo_cudnn_b1_loop', old)
     candidate = lambda left, right: stereo.encode(left, 'cuda', right_videos=right)
     measure('stereo_b8', candidate)
     parity = []

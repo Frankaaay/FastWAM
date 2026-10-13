@@ -109,7 +109,7 @@ class FrozenTokenizerInference:
             torch.backends.cuda.matmul.allow_tf32 = False
             torch.backends.cudnn.benchmark_limit = 0
             with config.patch(**dict(zip(keys, (64, 256)))), torch.backends.cudnn.flags(
-                    benchmark=True, deterministic=False, allow_tf32=True), \
+                    enabled=True, benchmark=True, deterministic=False, allow_tf32=True), \
                     torch.autocast("cuda", enabled=False):
                 return self.model._encode_posterior(
                     x.float(), None if right is None else right.float(), content_mask,
