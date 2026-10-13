@@ -31,3 +31,19 @@ H100四卡GPU-only 256MiB all-reduce：5次预热20次计时、最慢rank平均1
 15486的6个更新均完成，step2..6间隔89.1440/89.5859/89.3631/89.6860/89.3907秒，中位89.3907秒，全局256对应2.8638样本/s。四rank丢弃前16个microbatch后：backward/DeepSpeed step中位10.8446至10.8512秒，forward_total0.2858至0.2869秒，其中VAE0.1631至0.1633秒、denoise0.1210至0.1218秒；数据next等待0.224至0.265毫秒。反向阶段约占每microbatch总时长97%，尚未分离梯度计算、ZeRO和细粒度通信。ruhu八卡GA4中位2.6982秒/更新，相当于0.6746秒/microbatch；本次四卡GA8约11.1738秒/microbatch，归一化仍约16.56倍。诊断同步有扰动，不能把归一化当实测八卡吞吐。H100复现慢速，H800独有硬件/CPFS不足以解释共同现象；H100当前数据等待可排除为主耗时，H800读取仍未直接计时。
 
 作业最终FAILED/exit1：诊断包装save_checkpoint返回None，父trainer在第6步完成后读取weights_path时报TypeError。4rank phase文件均已在finally写出，计时有效，但completed.json缺失，不称成功退出。定向修复仅测试包装返回显式SKIPPED_DIAGNOSTIC路径标签，不伪造checkpoint文件；增加第17次反向的rank0 CPU/CUDA operator profile，以分离慢反向具体原因。正式训练代码、数据和优化器参数不改，下一次只跑3更新取一个已预热反向样本。AST及diff检查通过。
+
+追加Job15506（4GPU/48CPU/512Gi/45分钟上限/3更新），clean发布源码b77a7ba，H100 fetch/ff及bash/test-only通过；沿用已编译cache、独立wan-backward-profile输出，日志/gpfs/jiuquyun/home/Frank/logs/c2r-wan-4gpu-backward-15506.out。反向operator表尚未产出，不提前断言具体慢算子。
+
+按用户要求直接对照ruhu run：trainer.py、wan_video_dit.py、action_dit.py、mot.py、pytorch_utils.py文本完全一致；FastWAM差异是Stereo分支和绑定，Wan仍走原路径。参考run已保存trainability为video4,999,787,712/action1,020,912,660/proprio86,016，VAE冻结；DS相同ZeRO2、无offload、200M buckets、不overlap、不contiguous。W&B差异仅scalar log，无watch/梯度hook注册。
+
+使用ruhu同一manifest/data/text_cache，原reader与当前Wan reader分别在固定Python/NumPy/Torch seed42下读取index0/12345/549786：所有字段（含video/action/proprio/context/mask）逐tensor完全相等。单样本video[3,9,384,320]float32、action[32,20]float32、proprio[1,20]float32、context[512,4096]bf16及bool masks相同。这是三样本证据，不冒充全量扫描；同时本次H100慢速使用的就是该原始数据，不是H800 fresh数据。
+
+发现实质运行环境差异：自己的extras Accelerate1.12.0/DeepSpeed0.18.5；ruhu授权root内runtime/overlays/openwam/site-packages为1.15.0/0.18.9。prepare_private_runtime.py及报告表明其从train8.sbatch使用的runtime27及两个overlay复制并逐文件验证（这是训练后保存的副本，不能绝对排除源环境此前变化）。两个版本accelerate/utils/deepspeed.py文本相同；DS stage_1_and_2.py存在关键差异：0.18.5每个参数grad_handling_hook均调用count_used_parameters_in_backward(all_params_requiring_grad)，helper遍历全部参数并查询autograd节点；0.18.9通过should_refresh_expected_hook_count判定，复用_max_expected_hooks_seen，避免每hook重复全参数遍历。此为与慢反向高度吻合的候选根因，尚需profile或隔离版本A/B确认，不称已修复；未修改正在正式训练的环境。
+
+用户明确要求使用ruhu环境进行对照，授权只读执行/gpfs/jiuquyun/projects/ruhu/fastwam-c2r-20261011/runtime/model27/bin/python。实际元数据确认Accelerate1.15.0/DeepSpeed0.18.9/Transformers4.53.2/einops0.8.2/h5py3.16.0/W&B0.30.0/Hydra1.3.6，完整profile入口导入成功。使用自己的同一clean源码b77a7ba、同一ruhu数据/manifest/cache/初始化、4卡BS8/GA8/全局256；单独train-ruhu-env.json、输出wan-ruhu-env与个人inductor/triton/extensions缓存，不写ruhu环境。
+
+15506旧环境算子profile在第2更新后、第17次反向阶段长时间未产出operator表，按替换环境诊断目标停止并保留已有日志（sacct CANCELLED），不把该段停留当成训练崩溃。提交新Job15516：4GPU/48CPU/512Gi、6更新、45分钟上限，脚本ruhu-env.sbatch，日志/gpfs/jiuquyun/home/Frank/logs/c2r-wan-4gpu-ruhu-env-15516.out。bash和sbatch --test-only通过，预检估计21:59:40在0057启动，预测非保证。未修改H800正式训练或其运行环境。
+
+用户要求继续分析差异，先H100复现ruhu速度，再回H800继续训练。执行顺序固定为：15516验证整体环境差异；若恢复速度，再隔离必要依赖差异而不直接归因单一包；H800保持fresh2500正式数据/8卡/BS8/GA4/global256/W&B/5epoch合同，使用验证后的独立环境先短测再切正式任务。四卡只能按microbatch和阶段耗时对照ruhu八卡，不能宣称已直接复现八卡2.698秒。
+
+再次逐字段对比参考configs/train.yaml与train-ruhu-env.json：除输出目录、W&B online、GA4→8外一致；实际入口另将max_steps限制6、save_every改epoch间隔，诊断跳过checkpoint写入。这些差异不修改模型、监督或数据reader。H800两任务GetJob均Running，最新日志Wan step63/10725（约40秒/更新）、Stereo step52/10725（约43秒/更新），loss有限；15516仍PENDING(Resources)。首个正式保存点2145尚未到达，切换前必须实读完整checkpoint，不能把已有smoke权重当正式恢复点或静默丢弃正式进度。
