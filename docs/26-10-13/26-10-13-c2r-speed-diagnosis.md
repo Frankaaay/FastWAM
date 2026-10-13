@@ -1,5 +1,7 @@
 # Wan 训练速度与通信诊断
 
+最新用户约束：在H800得出结论前保留H100排队，不取消。15516在纠正消息到达前已取消，已原样重提为15518（同clean b77a7ba、ruhu-env.sbatch、4GPU/6更新）。H800持续调查已交给新任务01a13571-e6f2-7900-8f50-0a27053506a8；H10015518与H800调查并行保留，本条覆盖下文早期撤销H100的计划。
+
 用户授权调查 H800/L20Y 的卡间通信、挂载盘读取和计算耗时，并在 H100 上用相同 Wan 代码短测；不涉及停止或热改正在启动的正式训练。
 
 基线：已完成 Wan DLC dlc594fm3bvfmi8x，连续稳态间隔中位40.681秒；Stereo dlc1miyh3f363oyc为44.032秒。ruhu H100参考2.698秒。读取原Wan日志确认通信通道via P2P/CUMEM，单节点8GPU、NVLS支持；不能从这些初始化日志推断实际通信带宽，也不能仅按卡名归因15倍差距。
@@ -45,5 +47,11 @@ H100四卡GPU-only 256MiB all-reduce：5次预热20次计时、最慢rank平均1
 15506旧环境算子profile在第2更新后、第17次反向阶段长时间未产出operator表，按替换环境诊断目标停止并保留已有日志（sacct CANCELLED），不把该段停留当成训练崩溃。提交新Job15516：4GPU/48CPU/512Gi、6更新、45分钟上限，脚本ruhu-env.sbatch，日志/gpfs/jiuquyun/home/Frank/logs/c2r-wan-4gpu-ruhu-env-15516.out。bash和sbatch --test-only通过，预检估计21:59:40在0057启动，预测非保证。未修改H800正式训练或其运行环境。
 
 用户要求继续分析差异，先H100复现ruhu速度，再回H800继续训练。执行顺序固定为：15516验证整体环境差异；若恢复速度，再隔离必要依赖差异而不直接归因单一包；H800保持fresh2500正式数据/8卡/BS8/GA4/global256/W&B/5epoch合同，使用验证后的独立环境先短测再切正式任务。四卡只能按microbatch和阶段耗时对照ruhu八卡，不能宣称已直接复现八卡2.698秒。
+
+## 独立调查任务：H800 DeepSpeed 隔离 A/B
+
+用户授权交接后在 H800 用最多四卡继续因果诊断，保持 BS8/GA8/global256，不再申请 H100 GPU。本地 HEAD827906f 与 fetch 后 origin 一致；原有正式训练记录 dirty 保留。RAM frank/205455090823393499、research 角色、training quota Ready、DLC 优先级4已实时复核。正式 Wan/Stereo 作业仍 Running，不修改其源码和环境。复用个人准备 DSW，仅为同步及独立 overlay 准备。
+
+诊断 test 的 operator profiler 改为仅在显式 C2R_PROFILE_OPERATORS=1 时开启，默认保留同步阶段计时，避免旧 DS 的海量 profiler 事件扰动 A/B。仅修改测试包装，不改训练实现。计划独立 target 安装 DS0.18.9，其他依赖维持原样，用相同 H800 fresh2500 数据、配置、初始化比较旧/新 DS；当前仍为候选机制，尚无因果验收。
 
 再次逐字段对比参考configs/train.yaml与train-ruhu-env.json：除输出目录、W&B online、GA4→8外一致；实际入口另将max_steps限制6、save_every改epoch间隔，诊断跳过checkpoint写入。这些差异不修改模型、监督或数据reader。H800两任务GetJob均Running，最新日志Wan step63/10725（约40秒/更新）、Stereo step52/10725（约43秒/更新），loss有限；15516仍PENDING(Resources)。首个正式保存点2145尚未到达，切换前必须实读完整checkpoint，不能把已有smoke权重当正式恢复点或静默丢弃正式进度。

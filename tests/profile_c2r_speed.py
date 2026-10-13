@@ -41,7 +41,8 @@ def main():
             start = time.perf_counter()
             if label == 'backward_and_deepspeed_step':
                 backward_calls += 1
-            if label == 'backward_and_deepspeed_step' and backward_calls == 17 and rank == 0:
+            if (label == 'backward_and_deepspeed_step' and backward_calls == 17
+                    and rank == 0 and os.environ.get('C2R_PROFILE_OPERATORS') == '1'):
                 with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
                                                        torch.profiler.ProfilerActivity.CUDA]) as profile:
                     result = original(*args, **kwargs)
