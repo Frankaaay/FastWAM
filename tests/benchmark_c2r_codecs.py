@@ -94,16 +94,19 @@ def main():
     exec(compile(ast.Module(body=[method], type_ignores=[]), '<original-encode>', 'exec'), scope)
     old = lambda left, right: scope['encode'](stereo, left, 'cuda', right_videos=right)
     measure('stereo_b1_loop', old)
-    references = [old(left, right).cpu() for left, right in batches]
+    parity_batches = [*batches, (batches[0][0][:6], batches[0][1][:6])]
+    references = [old(left, right).cpu() for left, right in parity_batches]
     stereo.model._frozen_inference = None
     torch._dynamo.reset()
+    # Torch 2.7's fake dispatch cache does not key on cudnn.enabled.
+    torch._subclasses.fake_tensor.FakeTensorMode.cache_clear()
     gc.collect()
     torch.cuda.empty_cache()
     measure('stereo_cudnn_b1_loop', old)
     candidate = lambda left, right: stereo.encode(left, 'cuda', right_videos=right)
     measure('stereo_b8', candidate)
     parity = []
-    for (left, right), reference in zip(batches, references):
+    for (left, right), reference in zip(parity_batches, references):
         result = candidate(left, right).cpu()
         error = (result-reference).double()
         relative = (error.norm()/reference.double().norm().clamp_min(1e-12)).item()
