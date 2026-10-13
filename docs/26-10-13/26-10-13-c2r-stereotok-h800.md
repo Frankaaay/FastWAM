@@ -109,3 +109,19 @@ DSW隔离诊断：BF16 [2880,3072]@[3072,14336]，5次预热20次CUDA Event计�
 用户明确要求直接开始两组各8卡正式训练，稳定后复测速率。将launch_h800的steps改为可选：省略时使用prepared的10725更新并输出train目录，显式steps仍为smoke；不传resume，从原预训练和已验收共同初始化v2开始。2500条、全局256、5epoch、每2145更新保存，全部保留5份。AST及formal/smoke入口断言、git diff --check通过。两份10步任务均Succeeded，正式任务不继承它们的训练权重。
 
 正式入口716ab39ed125e09fa5ef91f91412ba2fac48d9c0已推送，但服务器两次有界fetch均超时，curl连接github.com:443也在10秒超时；命令均已到远端。远端开始检查HEAD8377fc7且clean，未完成ff，不提交正式DLC。按AGENTS保留现场，停止空闲准备DSW。最新10步Wan/Stereo均exit0并completed10/10；连续间隔中位数分别40.68104649s（6个间隔）、44.03175974s（7个间隔），约ruhu15.08/16.32倍；10725更新粗估121.2/131.1小时，不含启动及保存。两份正式DLC请求已保存在本机私有请求目录，8GPU各一组、10725步、7天时限、无resume，尚未提交。
+
+## bundle 同步与正式两组训练
+
+用户授权再次直连失败后用git bundle。直连fetch达到lowSpeedTime后失败；仅缺失提交8377fc7..f8e563f打包，通过scp -O传到个人runs/c2r-prep-2500-20261013（默认SFTP连接关闭，无文件落地后改传统SCP）。本机/远端bundle SHA256一致：9de3b45294744ba39171c76ab792dcd1692a9974adf363f6308f1ea15400ffe9；git bundle verify通过，fetch bundle并merge --ff-only到f8e563f600dfb3a4c8c79eade65db29e0320c1e8，工作区clean。origin保持Frankaaay/FastWAM，远端tracking因公网失败仍旧，不伪造tracking更新。
+
+身份frank/205455090823393499、research角色、quota1bybv9m0ixu Ready及DLC权限/优先级4实时核验通过。复核prepared=2500/50任务/549034窗口/2145每epoch/10725总更新、text_cache=passed159480，W&B认证yichx14读取既有run成功。
+
+正式任务均使用clean源码f8e563f，无--steps和--resume。Wan dlc1xq5u3hveuc4w，Request01A13542-935D-5AC2-A9F1-446072E7E4BA；StereoTok dlc3lnq4rrwptiap，Request01A13542-AD39-5AB1-86F3-FF68D800E84A。各单节点8GPU/96CPU/1024Gi/64Gi共享内存、priority4、禁止超售、7天时限。每2145更新保存，共5份，不删除。请求保存在本机AliyunCLI/h800-requests/frank-c2r-stereotok-20261013/wan-2500-train.json及stereotok-2500-train.json，SHA256分别1c984b34b58e0d1b79e61065bdfe519e8dd1bbff1fd1a21770e14b1fd8dfcd45、ee2b91d0a385843fde6ad4bfc44353e29867ec478df67b7c9c2609efa8487335。
+
+输出分别/mnt/workdir/frank/runs/fastwam-c2r-wan-train-20261013-dlc1xq5u3hveuc4w与fastwam-c2r-stereotok-train-20261013-dlc3lnq4rrwptiap；training.log/metrics.jsonl/run.json在各自目录。两任务已调度EnvPreparing，输出目录已创建，实际在线初始化和首loss待健康检查。
+
+按用户要求创建本线程30分钟后速度复测heartbeat（wan-stereotok）：至少30个连续非编译/非保存更新，比较median/P90/samples/s和ruhu2.6982207298s基线；一次有效报告后暂停，不改动训练。
+
+在线初始化已确认：Wan zo6gdamo，StereoTok dj36vjxi（entity yichx14-uc-irvine/project StereoTok）；两组run.json均world8/global256/stop10725/save2145/vae_frozen。Wan前两更新loss1.7408690453/1.9814741611、grad有限；Stereo首步正在Inductor编译。Stereo所有8 rank构造后共同初始化contract/fingerprints均等于Wan rank0；Wan构造阶段各rank随机头因rank seed不同，不声称所有rank构造阶段指纹相同，DeepSpeed engine.py 1439-1440初始化会广播模型（该记录在accelerator.prepare之前生成）。
+
+启动健康检查最终通过：Wan本地step8 loss1.8298163414 grad26.0571213 peak52.6919GiB，W&B API running/step7/loss1.8098253；Stereo本地step2 loss2.0045547485 grad23.8848972 peak56.5976GiB，W&B API running/step1/loss1.7733705。在线指标比本地略滞后一更新，确实已上传。两组均有限loss/grad且engine_steps一致；此为启动验证，不是全程训练完成。停止准备DSW释放1GPU，两个正式DLC继续。训练主体粗估5至5.5天、checkpoint保存额外耗时尚未单独量化，待30分钟稳态复测修正。
