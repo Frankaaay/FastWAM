@@ -15,6 +15,7 @@ import time
 
 import torch
 import torch.distributed as dist
+import deepspeed.runtime.zero.stage_1_and_2 as zero2
 from accelerate import Accelerator
 from torch.utils.data.dataloader import _BaseDataLoaderIter
 from fastwam.models.wan22.fastwam import FastWAM
@@ -28,6 +29,18 @@ def main():
     events = []
     active = False
     backward_calls = 0
+    hook_scan = {'calls': 0, 'seconds': 0.0}
+    original_count = zero2.count_used_parameters_in_backward
+
+    def measured_count(*args, **kwargs):
+        start = time.perf_counter()
+        result = original_count(*args, **kwargs)
+        if active:
+            hook_scan['calls'] += 1
+            hook_scan['seconds'] += time.perf_counter() - start
+        return result
+
+    zero2.count_used_parameters_in_backward = measured_count
 
     def wrap(cls, name, label):
         original = getattr(cls, name)
@@ -115,6 +128,7 @@ def main():
                                  statistics.median(steady) if steady else None}
             (output / f'phase-rank{rank}.json').write_text(json.dumps({
                 'synchronized_diagnostic': True, 'checkpoint_writes_skipped': True,
+                'backward_parameter_scan': hook_scan,
                 'summary': report, 'events': events}, indent=2))
 
     C2RTrainer.train = measured_train

@@ -55,3 +55,5 @@ H100四卡GPU-only 256MiB all-reduce：5次预热20次计时、最慢rank平均1
 诊断 test 的 operator profiler 改为仅在显式 C2R_PROFILE_OPERATORS=1 时开启，默认保留同步阶段计时，避免旧 DS 的海量 profiler 事件扰动 A/B。仅修改测试包装，不改训练实现。计划独立 target 安装 DS0.18.9，其他依赖维持原样，用相同 H800 fresh2500 数据、配置、初始化比较旧/新 DS；当前仍为候选机制，尚无因果验收。
 
 再次逐字段对比参考configs/train.yaml与train-ruhu-env.json：除输出目录、W&B online、GA4→8外一致；实际入口另将max_steps限制6、save_every改epoch间隔，诊断跳过checkpoint写入。这些差异不修改模型、监督或数据reader。H800两任务GetJob均Running，最新日志Wan step63/10725（约40秒/更新）、Stereo step52/10725（约43秒/更新），loss有限；15516仍PENDING(Resources)。首个正式保存点2145尚未到达，切换前必须实读完整checkpoint，不能把已有smoke权重当正式恢复点或静默丢弃正式进度。
+
+追加低开销 helper 调用次数及累计 wall time 计数，仅在测试包装中包裹 count_used_parameters_in_backward；用直接时间占比检验候选机制，不采集海量算子事件。H800 独立 clone 已直连同步 clean74eda61，独立 no-deps DS0.18.9 wheel 安装成功，原依赖未覆盖。正式 Wan75/Stereo64，尚无完整正式 checkpoint。
