@@ -9,3 +9,9 @@
 H100 own clone：/gpfs/jiuquyun/projects/Frank/FastWAM-C2R-20261013，初始clean f8e563f，已fetch/pull成功。复用自己的Torch2.7.1+cu126运行时，独立extras补齐Accelerate1.12/DeepSpeed0.18.5/Transformers4.49等依赖，不改原环境。H800是Torch2.7.1+cu128，因此短测不是完全相同软件环境；H100用现有原始RoboTwin和ruhu授权只读root内的manifest/text cache/模型，H800是fresh2500，数据差异也须保留。两处均BS8/GA4/8GPU、原模型/精度/训练核心。
 
 本地AST和git diff检查通过；实际8卡诊断尚待提交与验证。现有正式训练DLC dlc1xq5u3hveuc4w和dlc3lnq4rrwptiap由其他并行操作提交，本任务不变更其源代码或生命周期。
+
+已发布诊断SHA 07f8cdd924455b46d185ea873026ca01ea62bc9e；H100自己的clean clone fetch/pull通过。独立extras导入C2RTrainer/FastWAM/DeepSpeed0.18.5成功；原runtime没有pip，改用既有uv向独立target安装，无原环境改动。W&B既有netrc条目存在，实际在线初始化仍由运行入口验证。
+
+H100 Slurm Job15479：8GPU/96CPU/1TiB、debug QoS、45分钟上限、6更新。bash -n和sbatch --test-only通过，后者估计23:03:43可启动；实际提交后单次健康查询为PENDING(Resources)、START_TIME N/A，预测不是保证。脚本/配置/prepared与输出在/gpfs/jiuquyun/projects/Frank/fastwam-stereotok-tests/c2r-speed-20261013，日志/gpfs/jiuquyun/home/Frank/logs/c2r-wan-profile-15479.out；尚无模型执行、带宽或phase结果。
+
+H800独立诊断clone尝试已到远端，但有界90秒命令未成功，退出1且无profile脚本落地。没有修改正式训练clone，也没有在该失败同步基础上运行新诊断。因此H800实测通信带宽仍缺失，P2P/CUMEM日志仅证明该次训练采用直接GPU通信路径，不能据此排除NVLink带宽或通信参数问题。
