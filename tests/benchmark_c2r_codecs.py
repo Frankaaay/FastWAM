@@ -107,6 +107,33 @@ def main():
     report['passed'] = True
     save()
     print('PASSED', report, flush=True)
+    runtime = stereo.model._frozen_inference.model
+    phases = {}
+    def instrument(module, name, label):
+        original = getattr(module, name)
+        def measured(*args, **kwargs):
+            torch.cuda.synchronize()
+            start = time.perf_counter()
+            result = original(*args, **kwargs)
+            torch.cuda.synchronize()
+            phases.setdefault(label, []).append(time.perf_counter()-start)
+            return result
+        setattr(module, name, measured)
+    instrument(runtime.fusion, 'prepare', 'las_and_probabilities')
+    instrument(runtime.encoder, 'forward', 'encoder_with_fusion')
+    for left, right in batches:
+        candidate(left, right)
+    report['inclusive_phase_seconds'] = phases
+    save()
+    print('PHASES', phases, flush=True)
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
+                                           torch.profiler.ProfilerActivity.CUDA]) as profile:
+        candidate(*batches[0])
+        torch.cuda.synchronize()
+    for key in ('self_cpu_time_total', 'self_device_time_total'):
+        table = profile.key_averages().table(sort_by=key, row_limit=30)
+        (output/f'{key}.txt').write_text(table)
+        print(key, table, flush=True)
 
 
 if __name__ == '__main__':
