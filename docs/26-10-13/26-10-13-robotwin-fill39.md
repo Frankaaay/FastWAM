@@ -48,8 +48,11 @@
 
 ## 用户授权继续后的准备
 
-- 用户确认“如果还有空间就继续”。原实例重新启动，实时 64 MiB 随机块写入/fsync/完整SHA256读回通过，散列 `017002374f974e6a4dc701ddded429e5e304dc3e181ca971c30b7c8d0`（完整命令输出为准）；仅删除本次明确探测文件。更正：完整散列为 `017002374f974e6a4dc701ddded429e5e304dc03099d63c181ca971c30b7c8d0`。可继续小规模真实写入，不能据此声称剩余容量已知。
+- 用户确认“如果还有空间就继续”。原实例重新启动，实时 64 MiB 随机块写入/fsync/完整SHA256读回通过，完整散列 `017002374f974e6a4dc701ddded429e5e304dc03099d63c181ca971c30b7c8d0`；仅删除本次明确探测文件。可继续小规模真实写入，不能据此声称剩余容量已知。
 - 本地 FastWAM fetch成功，当前原分支与origin仍0/0，原未跟踪内容保留。只新增 `scripts/collect_robotwin_missing.py`、`tests/test_collect_robotwin_missing.py` 和本任务文档。
 - 入口复用冻结 RoboTwin runtime 的规划、模拟、六路观察、HDF5合并和官方指令生成；规划并采集在同一次模拟，成功后保留dense trajectory、原HDF5、逐帧索引/时间、下一帧qpos动作、初始/最终actor pose及指令来源。每缺口最多12个新seed，每次900秒；每次独立目录且无覆盖/缓存删除，异常基础设施错误停止，不盲换seed。
 - 8个固定不相交worker，每容器1GPU；先worker0的canonical16，再放开其余。32SPP/pathdepth8/OIDN、head0.06m/wrists0.02m、240x320、15fps保持既有合同。新39做完整state/EEF/六路图像/全帧标定校验，不重验旧2461全部图像。
 - 本地4项unittest、AST、git diff --check通过；尚无真实补采成功证据。用户已授权commit/push，下一步自己的clean远端clone按推送精确SHA执行。
+
+- 补采入口 commit `b30fdf84ac576ac22dfc6ce2cbf6f7ff4824597a` 已推送；自己的clean clone `/mnt/workdir/frank/projects/FastWAM-fill39-20261013`，远端4项测试通过。`plan.json` 已发布到独立数据目录，冻结最终39映射和runtime文件hash。单条真实smoke worker0/canonical16在DSW启动，PID4628，日志 `/mnt/workdir/frank/runs/robotwin-fill39-20261013/smoke-launch.log` 与 `smoke-worker0/0016-00.log`；已进入实际GPU模拟并持续保存帧，验收尚未完成。
+- 新增获授权发布脚本 `scripts/publish_robotwin_missing.py`：复用其他chat已经验证的只读2461 EEF20 manifest `/mnt/workdir/frank/runs/c2r-prep-20261013/prepared/manifest.json`（hash `9f277c833fe31d420d8e19eefb387de5865d49023513eb36f82a9ed612eaa8bd`）；仅新增39的完整QA与min/max，旧min/max和新min/max取并集等价全2500统计，rot6d仍固定[-1,1]。原2461只引用路径，不复制/重渲染/修改；按canonical ID构成每任务50条，产出兼容共同C2RDataset的manifest和指令池。未改C2R源码/环境/运行配置，未自动切换训练。发布结果仍须实际Wan/Stereo两reader同左目/action检查。
