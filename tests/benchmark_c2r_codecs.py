@@ -96,6 +96,7 @@ def main():
     measure('stereo_b1_loop', old)
     references = [old(left, right).cpu() for left, right in batches]
     stereo.model._frozen_inference = None
+    torch._dynamo.reset()
     gc.collect()
     torch.cuda.empty_cache()
     measure('stereo_cudnn_b1_loop', old)

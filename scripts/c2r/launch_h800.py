@@ -40,7 +40,7 @@ def main():
         WANDB_CONFIG_DIR=str(base/'envs/wandb-config'),WANDB_DATA_DIR=str(base/'envs/wandb-data'),
         OMP_NUM_THREADS='1',MKL_NUM_THREADS='1',PYTHONDONTWRITEBYTECODE='1',PYTHONUNBUFFERED='1')
     env['WANDB_API_KEY']=(base/'envs/credentials/wandb-api-key').read_text().strip()
-    for key,folder in [('TRITON_CACHE_DIR','triton'),('CUDA_CACHE_PATH','cuda'),('TORCH_EXTENSIONS_DIR','extensions')]:
+    for key,folder in [('TRITON_CACHE_DIR','triton'),('TORCHINDUCTOR_CACHE_DIR','inductor'),('CUDA_CACHE_PATH','cuda'),('TORCH_EXTENSIONS_DIR','extensions')]:
         env[key]=str(base/'envs/c2r-cache-20261013'/job/folder)
     if args.variant=='text':
         cmd=[str(py),'-m','torch.distributed.run','--standalone','--nproc_per_node=8',
