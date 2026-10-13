@@ -85,3 +85,22 @@ Wan服务端W&B API验证176xxbn2=finished，step/engine_steps=2，loss1.9814679
 
 修复0e360ad已push，但远端同步受网络阻塞：首个fetch长时间无输出，确认自身git进程后终止；有界IPv4重试报Failure when receiving data from the peer；GitHub网页curl301可达，最后HTTP/1.1定向fetch仍120秒超时。服务器HEAD保持9950d1e；按Git规则停止依赖新代码的执行，没有启动Wan恢复或Stereo修复后重试。prepared/cache/首次Wan完整checkpoint均保留，未热改或旁路源码。待Git同步成功后续跑Wan恢复和Stereo smoke。
 
+
+## 网络恢复后的实际验证
+
+用户要求重新尝试。远端fetch/ff成功，clean SHA8377fc76b8783f5daa996ded95c15bf2fa0c955a。Wan恢复任务dlc1j6xq8bclwgll：模型/optimizer/scheduler/random/dataloader状态均加载成功，epoch0 batch8 sample_offset512，从step2实际推进到step3，loss2.2558、lr5.63e-7，完整保存后completed=3/3且exit0；W&B uxpn4cxb。
+
+修复后Stereo任务dlc1j6z4sr9lqtdc，W&B rxnl46bh，成功进入训练。所有8 rank共同初始化合同和fingerprints均与Wan rank0相同；proprio/action_encoder/action_head为全tensor哈希，video/action为首参数抽样指纹。配置差异仅tokenizer/right输入、output/wandb.name及本次resume测试的step限制/resume路径。正式配置不引入这些测试差异。
+
+
+## 同口径速度对比
+
+用户要求比较ruhu速度。只读H100授权root内training/fastwam-c2r/metrics.jsonl：10740行，连续步wall_time差中位2.6982207298s、均值2.83408675s、P90 2.70790577s；完整1至10740耗时8.454h。sacct14685确认8GPU/96CPU/1TiB，训练step耗时8:31:01，source trainer.py和mot.py去CRLF后SHA与本仓库相同。
+
+H800 WAN两步wall_time差40.24736643s=6.36066样本/s；Stereo44.81613779s=5.71223样本/s，分别约ruhu稳态14.916x/16.610x。仅一个非首步间隔，非充分稳态测量；不能把日志累计speed当瞬时速度。按这一短样本外推10725步约119.9h/133.5h，非正式ETA。Stereo首步包含首次编译约318s，不用于稳态对比。硬件DSW实测L20Y/SM9.0/132SM/80GiB、torch2.7.1+cu128/cuDNN90701，尚未证明差距根因。DLC GPU metric API返回null不冒充利用率。追加有界Wan恢复至step10作速度测量，Job dlc594fm3bvfmi8x，不启动正式训练。
+
+
+Stereo修复后两步smoke完成：dlc1j6z4sr9lqtdc exit0，c2r_complete=step2/batch8/world8/BS8/GA4，完整checkpoint存在；loss1.7733/2.0047。继续Stereo恢复并测至step10：dlc1miyh3f363oyc，入口SHA8377fc7，共同初始化v2，未修改正式训练配置；启动健康检查已到ZeRO/W&B初始化。Wan速度任务dlc594fm3bvfmi8x已恢复step3并产生step4 loss2.0757，等待后续连续计时。两任务仅最多step10，不是正式10725步训练。预计还需约10至15分钟主体、1至3分钟保存（粗估，编译/存储可延长）。
+
+DSW隔离诊断：BF16 [2880,3072]@[3072,14336]，5次预热20次CUDA Event计时，0.333528ms/760.57TFLOP/s；单进程torch线程1、8个随机Wan完整reader样本0.0826至0.1382s。仅准备实例证据，不能替代训练节点profile，不能认定计算/并发IO/通信瓶颈已排除。未修改生产算子、通信参数或数值精度。准备DSW诊断结束，停止以释放空闲1GPU，两个DLC独立继续。
+
