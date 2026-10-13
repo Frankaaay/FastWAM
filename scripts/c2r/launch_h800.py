@@ -28,7 +28,7 @@ def main():
     env=dict(os.environ)
     libs=json.loads((base/'runs/fastwam-h800-smoke-20261008/system-libs-prepared.json').read_text())
     py=base/'envs/fastwam-original-cu128/bin/python'
-    overlays=[base/'envs/fastwam-c2r-overlay-20261013',base/'envs/fastwam-stereotok-overlay-20261009']
+    overlays=[base/'envs/c2r-ds0189-20261013',base/'envs/fastwam-c2r-overlay-20261013',base/'envs/fastwam-stereotok-overlay-20261009']
     env.update(PYTHONPATH=':'.join(map(str,[repo/'src',*overlays])),
         LD_LIBRARY_PATH=libs['ld_library_path'],PATH=str(py.parent)+':'+env.get('PATH',''),
         C2R_PREP_DIR=str(prep),C2R_OUTPUT_DIR=str(output),C2R_RUN_NAME=output.name,
