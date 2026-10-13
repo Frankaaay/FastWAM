@@ -52,11 +52,13 @@ def main():
 
     def measured_train(trainer):
         nonlocal active
+        world_size = dist.get_world_size()
+        warmup_microbatches = 2 * trainer.gradient_accumulation_steps
         topology = {'torch': torch.__version__, 'cuda': torch.version.cuda,
                     'nccl': torch.cuda.nccl.version(),
                     'device': torch.cuda.get_device_name(),
                     'peer_access': [[torch.cuda.can_device_access_peer(i, j) if i != j else True
-                                     for j in range(8)] for i in range(8)]}
+                                     for j in range(world_size)] for i in range(world_size)]}
         if rank == 0:
             for command in (['nvidia-smi', 'topo', '-m'], ['nvidia-smi', 'nvlink', '-s']):
                 topology[' '.join(command)] = subprocess.run(command, capture_output=True, text=True).stdout
@@ -79,7 +81,8 @@ def main():
         (output / f'collective-rank{rank}.json').write_text(json.dumps({
             'bytes': tensor.numel() * tensor.element_size(), 'seconds': seconds,
             'algorithm_GBps': 268435456 / seconds / 1e9,
-            'bus_GBps': 268435456 / seconds / 1e9 * 2 * 7 / 8}))
+            'world_size': world_size,
+            'bus_GBps': 268435456 / seconds / 1e9 * 2 * (world_size - 1) / world_size}))
         del tensor
         active = True
         try:
@@ -90,8 +93,9 @@ def main():
             report = {}
             for phase in sorted({event['phase'] for event in events}):
                 values = [event['seconds'] for event in events if event['phase'] == phase]
-                steady = values[8:]
-                report[phase] = {'count': len(values), 'median_after_8_microbatches':
+                steady = values[warmup_microbatches:]
+                report[phase] = {'count': len(values), 'warmup_microbatches': warmup_microbatches,
+                                 'median_after_warmup':
                                  statistics.median(steady) if steady else None}
             (output / f'phase-rank{rank}.json').write_text(json.dumps({
                 'synchronized_diagnostic': True, 'checkpoint_writes_skipped': True,

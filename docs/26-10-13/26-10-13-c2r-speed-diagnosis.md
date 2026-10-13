@@ -15,3 +15,5 @@ H100 own clone：/gpfs/jiuquyun/projects/Frank/FastWAM-C2R-20261013，初始clea
 H100 Slurm Job15479：8GPU/96CPU/1TiB、debug QoS、45分钟上限、6更新。bash -n和sbatch --test-only通过，后者估计23:03:43可启动；实际提交后单次健康查询为PENDING(Resources)、START_TIME N/A，预测不是保证。脚本/配置/prepared与输出在/gpfs/jiuquyun/projects/Frank/fastwam-stereotok-tests/c2r-speed-20261013，日志/gpfs/jiuquyun/home/Frank/logs/c2r-wan-profile-15479.out；尚无模型执行、带宽或phase结果。
 
 H800独立诊断clone尝试已到远端，但有界90秒命令未成功，退出1且无profile脚本落地。没有修改正式训练clone，也没有在该失败同步基础上运行新诊断。因此H800实测通信带宽仍缺失，P2P/CUMEM日志仅证明该次训练采用直接GPU通信路径，不能据此排除NVLink带宽或通信参数问题。
+
+用户改为H100四卡诊断。实时确认15479仍PENDING后取消，sacct确认CANCELLED；替换任务保持每卡BS8，GA4改8，全局256不变，仍6更新。入口仅放宽为4或8进程且仍强制全局256，run.json记录实际world size；测试拓扑、bus带宽因子和预热丢弃改用实际进程数/GA。四卡ZeRO2每卡优化器分片增加且累积翻倍，不能直接用其秒/更新与ruhu八卡比较；重点比较每microbatch阶段时间和实测通信带宽。

@@ -98,12 +98,12 @@ def main():
     dataset=C2RDataset(**OmegaConf.to_container(cfg.c2r.dataset,resolve=True))
     if rank==0: OmegaConf.save(cfg,out/'config.yaml',resolve=True)
     trainer=C2RTrainer(model,dataset,None,cfg=cfg)
-    assert trainer.accelerator.num_processes==8
+    assert trainer.accelerator.num_processes in (4,8)
     assert trainer.batch_size*trainer.accelerator.num_processes*trainer.gradient_accumulation_steps==256
     if rank==0:
         if trainer.wandb_run is None or trainer.wandb_run.settings.mode!='online':
             raise RuntimeError('W&B online initialization required')
-        (out/'run.json').write_text(json.dumps(dict(variant=args.variant,world_size=8,global_batch=256,
+        (out/'run.json').write_text(json.dumps(dict(variant=args.variant,world_size=trainer.accelerator.num_processes,global_batch=256,
             total_steps=report['total_steps'],stop_step=cfg.max_steps,save_every=cfg.save_every,
             wandb_id=trainer.wandb_run.id,wandb_url=trainer.wandb_run.url,
             model_paths=model.model_paths,vae_frozen=all(not p.requires_grad for p in model.vae.parameters())),indent=2)+'\n')
