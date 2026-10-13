@@ -80,3 +80,8 @@ H800现有ActionDiT文件与ruhu文件整体SHA不同，但ZIP内data.pkl与820�
 
 Wan2500首次smoke两个更新loss=1.7409/1.9815，W&B online176xxbn2；保存后exit0。Stereo首次dlc1eqvsp7t751xe在训练前正确拒绝初始化不一致：ActionDiT.from_pretrained明确保留action_encoder/head随机权重，原共同初始化只包含proprio遗漏这两部分。定向修复：三部分共同初始化均保存并strict恢复，三部分全tensor hash比对，原video/action backbone仍使用严格相同预训练；独立common-initialization-v2保留旧证据。AST/diff检查通过，下一步Wan从step2恢复到step3验证fullstate并发布完整共同初始化，Stereo重跑。未改BS/LR/数据语义。
 
+
+Wan服务端W&B API验证176xxbn2=finished，step/engine_steps=2，loss1.9814679622650144、action1.42553973197937、video0.5559281706809998、grad_norm29.05506706237793、lr3.76038563015148e-7，peak52.6919GiB。c2r_complete确认world8/BS8/GA4/batch_in_epoch8，completed step2/target2，exit0。
+
+修复0e360ad已push，但远端同步受网络阻塞：首个fetch长时间无输出，确认自身git进程后终止；有界IPv4重试报Failure when receiving data from the peer；GitHub网页curl301可达，最后HTTP/1.1定向fetch仍120秒超时。服务器HEAD保持9950d1e；按Git规则停止依赖新代码的执行，没有启动Wan恢复或Stereo修复后重试。prepared/cache/首次Wan完整checkpoint均保留，未热改或旁路源码。待Git同步成功后续跑Wan恢复和Stereo smoke。
+
