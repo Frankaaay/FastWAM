@@ -50,8 +50,10 @@ class StereoTokVAE(nn.Module):
             raise ValueError("StereoTok mosaic encoding requires tiled=False")
         if right_videos is None:
             raise ValueError("StereoTok requires all three synchronized right eyes")
-        left = torch.stack(list(videos)).to(device=device, dtype=torch.float32)
-        right = torch.stack(list(right_videos)).to(device=device, dtype=torch.float32)
+        left = videos if isinstance(videos, torch.Tensor) else torch.stack(list(videos))
+        right = right_videos if isinstance(right_videos, torch.Tensor) else torch.stack(list(right_videos))
+        left = left.to(device=device, dtype=torch.float32)
+        right = right.to(device=device, dtype=torch.float32)
         if left.shape != right.shape or left.ndim != 5 or left.shape[1] != 3 or left.shape[-2:] != (384, 320):
             raise ValueError("Expected matching [B,3,T,384,320] stereo mosaics")
         if not torch.isfinite(left).all() or not torch.isfinite(right).all():
@@ -62,14 +64,8 @@ class StereoTokVAE(nn.Module):
         regions = torch.zeros(96, 80, dtype=torch.long, device=device)
         regions[64:, :40], regions[64:, 40:] = 1, 2
         with torch.autocast(device_type=left.device.type, enabled=False):
-            # Preserve the validated StereoTok codec's bounded cost volume
-            # without changing the policy batch.
-            means = []
-            for index in range(len(left)):
-                mean, _ = self.model.encode_posterior(left[index:index + 1], right[index:index + 1],
-                    mask[index:index + 1], self.model.fusion.max_disparity, camera_regions=regions)
-                means.append(mean)
-            mean = torch.cat(means)
+            mean, _ = self.model.encode_posterior(left, right, mask,
+                self.model.fusion.max_disparity, camera_regions=regions)
             shift, scale = latent_scale(left.device)
             return (mean.float() - shift.view(1, 48, 1, 1, 1)) * scale.view(1, 48, 1, 1, 1)
 
