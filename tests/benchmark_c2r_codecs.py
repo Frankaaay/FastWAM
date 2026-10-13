@@ -96,6 +96,7 @@ def main():
     measure('stereo_b1_loop', old)
     parity_batches = [*batches, (batches[0][0][:6], batches[0][1][:6])]
     references = [old(left, right).cpu() for left, right in parity_batches]
+    torch.save({'indices': indices, 'references': references}, output/'references.pt')
     stereo.model._frozen_inference = None
     torch._dynamo.reset()
     # Torch 2.7's fake dispatch cache does not key on cudnn.enabled.
@@ -103,24 +104,34 @@ def main():
     gc.collect()
     torch.cuda.empty_cache()
     measure('stereo_cudnn_b1_loop', old)
+    def check_parity(name, fn):
+        parity = []
+        for (left, right), reference in zip(parity_batches, references):
+            result = fn(left, right).cpu()
+            error = (result-reference).double()
+            relative = (error.norm()/reference.double().norm().clamp_min(1e-12)).item()
+            maximum = error.abs().max().item()
+            row = {'shape': list(result.shape), 'finite': bool(torch.isfinite(result).all()),
+                   'relative_l2': relative, 'max_abs': maximum}
+            row['passed'] = (result.shape == reference.shape and row['finite']
+                             and relative <= 5e-4 and maximum <= .01)
+            parity.append(row)
+        report['cases'][name]['parity'] = parity
+        save()
+        print('PARITY', name, parity, flush=True)
+        return all(row['passed'] for row in parity)
+    check_parity('stereo_cudnn_b1_loop', old)
+    for chunk in (2, 4):
+        chunked = lambda left, right: torch.cat([
+            stereo.encode(l, 'cuda', right_videos=r)
+            for l, r in zip(left.split(chunk), right.split(chunk))])
+        measure(f'stereo_chunk{chunk}', chunked)
+        check_parity(f'stereo_chunk{chunk}', chunked)
     candidate = lambda left, right: stereo.encode(left, 'cuda', right_videos=right)
     measure('stereo_b8', candidate)
-    parity = []
-    for (left, right), reference in zip(parity_batches, references):
-        result = candidate(left, right).cpu()
-        error = (result-reference).double()
-        relative = (error.norm()/reference.double().norm().clamp_min(1e-12)).item()
-        maximum = error.abs().max().item()
-        row = {'shape': list(result.shape), 'finite': bool(torch.isfinite(result).all()),
-               'relative_l2': relative, 'max_abs': maximum}
-        parity.append(row)
-        report['parity'] = parity
-        save()
-        assert result.shape == reference.shape and row['finite']
-        assert relative <= 5e-4 and maximum <= .01, row
-    report['passed'] = True
+    report['passed'] = check_parity('stereo_b8', candidate)
     save()
-    print('PASSED', report, flush=True)
+    print('RESULT', report, flush=True)
     runtime = stereo.model._frozen_inference.model
     phases = {}
     def instrument(module, name, label):
