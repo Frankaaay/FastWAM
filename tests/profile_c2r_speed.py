@@ -27,17 +27,32 @@ def main():
     rank = int(os.environ['RANK'])
     events = []
     active = False
+    backward_calls = 0
 
     def wrap(cls, name, label):
         original = getattr(cls, name)
 
         @functools.wraps(original)
         def measured(*args, **kwargs):
+            nonlocal backward_calls
             if not active:
                 return original(*args, **kwargs)
             torch.cuda.synchronize()
             start = time.perf_counter()
-            result = original(*args, **kwargs)
+            if label == 'backward_and_deepspeed_step':
+                backward_calls += 1
+            if label == 'backward_and_deepspeed_step' and backward_calls == 17 and rank == 0:
+                with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
+                                                       torch.profiler.ProfilerActivity.CUDA]) as profile:
+                    result = original(*args, **kwargs)
+                    torch.cuda.synchronize()
+                averages = profile.key_averages()
+                (output / 'backward-operators-cpu.txt').write_text(averages.table(
+                    sort_by='self_cpu_time_total', row_limit=40))
+                (output / 'backward-operators-cuda.txt').write_text(averages.table(
+                    sort_by='self_device_time_total', row_limit=40))
+            else:
+                result = original(*args, **kwargs)
             torch.cuda.synchronize()
             events.append({'phase': label, 'seconds': time.perf_counter() - start})
             return result
@@ -102,7 +117,8 @@ def main():
                 'summary': report, 'events': events}, indent=2))
 
     C2RTrainer.train = measured_train
-    C2RTrainer.save_checkpoint = lambda self: None
+    C2RTrainer.save_checkpoint = lambda self: {'weights_path': 'SKIPPED_DIAGNOSTIC',
+                                             'state_path': 'SKIPPED_DIAGNOSTIC'}
     runpy.run_path(str(Path(__file__).resolve().parents[1] / 'scripts/c2r/run_training.py'),
                    run_name='__main__')
 
