@@ -67,3 +67,10 @@ H800现有ActionDiT文件与ruhu文件整体SHA不同，但ZIP内data.pkl与820�
 
 当前DSW实时df -B1 /mnt/workdir：总10995116277760、已用10995116277760、可用0字节；inode使用25%，为容量满。无可靠日志/完整checkpoint空间，已请求停止本轮Wan smoke和准备DSW，不提交Stereo smoke，不删除任何文件。需用户释放共享盘空间或指定另一个持久输出位置后继续。此前1至2小时ETA失效。
 
+
+## 切换完整2500数据
+
+用户明确指定2500条用于smoke与正式训练。已读取published/ready.json：2500条/50任务各50条，551534帧、549034窗口；补采39新增8481帧/8442窗口，为新示范而非原39轨迹恢复。manifest SHA256 ea55afb8f616b860633d97185fc2eb390d82bbbfdb458bfeefa4cc2fb22ee90e，84个reader窗口验收通过。复用已发布归一化统计、manifest与prompts，不重复扫描旧数据；prepare_data入口改为published-root，独立prep目录c2r-prep-2500-20261013，复用文本缓存仅补缺。全局256，每epoch2145更新，5epoch10725；保存2145/4290/6435/8580/10725。AST与diff检查通过。
+
+纠正前轮存储判断：df/statvfs的0不能据此断言CPFS无法写入；用户提供实际fsync/readback成功证据，按授权继续写入并以实际训练checkpoint结果验收，不清理数据。
+

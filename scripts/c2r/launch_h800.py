@@ -22,7 +22,7 @@ def main():
     job=os.environ['DLC_JOB_ID']
     output=base/'runs'/f'fastwam-c2r-{args.variant}-smoke-20261013-{job}'
     output.mkdir(parents=True,exist_ok=False)
-    prep=base/'runs/c2r-prep-20261013/prepared'
+    prep=base/'runs/c2r-prep-2500-20261013/prepared'
     shared=base/'checkpoints/fastwam-c2r-shared-20261013'
     env=dict(os.environ)
     libs=json.loads((base/'runs/fastwam-h800-smoke-20261008/system-libs-prepared.json').read_text())
