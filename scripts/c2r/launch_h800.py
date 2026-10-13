@@ -1,4 +1,4 @@
-"""Single-node, eight-GPU DLC entry for C2R text preparation or matched smoke."""
+"""Single-node, eight-GPU DLC entry for C2R preparation and matched training."""
 import argparse
 import json
 import os
@@ -11,7 +11,7 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--variant',choices=['text','wan','stereotok'],required=True)
     parser.add_argument('--source-sha',required=True)
-    parser.add_argument('--steps',type=int,default=2)
+    parser.add_argument('--steps',type=int)
     parser.add_argument('--resume')
     args=parser.parse_args()
     repo=Path(__file__).resolve().parents[2]
@@ -20,7 +20,8 @@ def main():
         raise RuntimeError('Expected the published clean source SHA')
     base=Path('/mnt/workdir/frank')
     job=os.environ['DLC_JOB_ID']
-    output=base/'runs'/f'fastwam-c2r-{args.variant}-smoke-20261013-{job}'
+    mode='smoke' if args.steps is not None or args.variant=='text' else 'train'
+    output=base/'runs'/f'fastwam-c2r-{args.variant}-{mode}-20261013-{job}'
     output.mkdir(parents=True,exist_ok=False)
     prep=base/'runs/c2r-prep-2500-20261013/prepared'
     shared=base/'checkpoints/fastwam-c2r-shared-20261013'
@@ -48,7 +49,8 @@ def main():
         cmd=[str(py),'-m','accelerate.commands.launch','--config_file',str(repo/'scripts/accelerate_configs/accelerate_zero2_ds.yaml'),
             '--deepspeed_config_file',str(repo/'configs/c2r/ds_zero2.json'),'--num_machines','1','--num_processes','8',
             str(repo/'scripts/c2r/run_training.py'),'--config',str(repo/'configs/c2r/train.yaml'),
-            '--variant',args.variant,'--initialization',str(prep/'common-initialization-v2.pt'),'--steps',str(args.steps)]
+            '--variant',args.variant,'--initialization',str(prep/'common-initialization-v2.pt')]
+        if args.steps is not None:cmd+=['--steps',str(args.steps)]
         if args.resume:cmd+=['--resume',args.resume]
     (output/'launch.json').write_text(json.dumps(dict(source_sha=actual,command=cmd,variant=args.variant),indent=2)+'\n')
     with (output/'training.log').open('x') as log:

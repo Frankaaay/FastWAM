@@ -104,3 +104,6 @@ Stereo修复后两步smoke完成：dlc1j6z4sr9lqtdc exit0，c2r_complete=step2/b
 
 DSW隔离诊断：BF16 [2880,3072]@[3072,14336]，5次预热20次CUDA Event计时，0.333528ms/760.57TFLOP/s；单进程torch线程1、8个随机Wan完整reader样本0.0826至0.1382s。仅准备实例证据，不能替代训练节点profile，不能认定计算/并发IO/通信瓶颈已排除。未修改生产算子、通信参数或数值精度。准备DSW诊断结束，停止以释放空闲1GPU，两个DLC独立继续。
 
+
+## 正式训练授权与入口
+用户明确要求直接开始两组各8卡正式训练，稳定后复测速率。将launch_h800的steps改为可选：省略时使用prepared的10725更新并输出train目录，显式steps仍为smoke；不传resume，从原预训练和已验收共同初始化v2开始。2500条、全局256、5epoch、每2145更新保存，全部保留5份。AST及formal/smoke入口断言、git diff --check通过。两份10步任务均Succeeded，正式任务不继承它们的训练权重。
