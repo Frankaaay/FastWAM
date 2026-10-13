@@ -65,3 +65,10 @@
 - 所有请求/回执保存于本地 `frank-robotwin-fill39-20261013`，launcher日志 `/mnt/workdir/frank/runs/robotwin-fill39-20261013/launcher-N.log`，逐条日志/exit记录 `worker-N/`；成功输出 `stereo-fill39-20261013/canonical-NNNN/attempt-NN/accepted.json`，既有16不再采集。
 - 发布器追加有界6小时等待，只有39条全部成功才发布2500；任何worker traceback停止发布。独立reader clone固定C2R SHA `633981aaa4d5b9e697774887b7cba4bc3289ea89`，逐新episode首尾及旧首中尾检查Mono/Stereo的左图、动作、proprio、prompt完全相同、右图有效。仅CPU数据reader，不加载模型或训练；文本缓存未生成，ready不能冒充训练启动门禁。
 - 单条实测给出主体20–45分钟的粗估（含并行启动和少量规划重试；复杂任务可能延长），发布QA/reader另预估5–10分钟；最终以成功清单计数为准。
+
+## 用户要求增加GPU加速后的逐条分发
+
+- 用户明确要求再增加GPU。旧固定8分片无法不修改活跃源码直接动态分工，故仅停止本任务7个DLC（均实核Stopped）及DSW自己的进程组8056（核cmdline/pgid后SIGTERM），保留所有产物；没有删除、覆盖、重采成功数据或停止其他作业。
+- 停止后的最终冻结成功集 `[16,267,288,300,657]`，共5条；尚缺34条。以用户新授权按每缺口1GPU分发，总34GPU（DSW1+单条DLC33），低于宣告最多38GPU上限。旧7已停止后才申请，避免新旧并发额度叠加。中断的非成功尝试保留，从下一个从未用过的新seed开始，不复用旧失败seed。
+- 新单条请求与回执位于本地回执根 `canonical-ID.json` / `canonical-ID-receipt.json`，精确34清单 `expansion-snapshot.json`。云端新日志 `/mnt/workdir/frank/runs/robotwin-fill39-20261013/singles/launcher-ID.log` 与 `singles/canonical-ID/`。producer仍为b30fdf8，使用既有 `--only` 精确单条执行，无需热改采集代码。
+- 独立发布clone `/mnt/workdir/frank/projects/FastWAM-fill39-publish-20261013`；独立只读reader clone `/mnt/workdir/frank/projects/FastWAM-fill39-reader-20261013`，固定SHA633981aaa4d5b9e697774887b7cba4bc3289ea89。不会修改或执行父chat的活跃源码目录。

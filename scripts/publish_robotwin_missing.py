@@ -29,14 +29,12 @@ def wait_for_collection(plan, run, deadline):
             return
         if any(len(paths) > 1 for paths in ready):
             raise ValueError('Ambiguous accepted replacement')
-        for worker in range(8):
-            log = Path(run) / f'launcher-{worker}.log'
-            if log.exists():
-                with log.open('rb') as stream:
-                    stream.seek(max(0, log.stat().st_size-8000))
-                    tail = stream.read().decode(errors='replace')
-                if 'Traceback (most recent call last)' in tail:
-                    raise RuntimeError(f'Worker {worker} stopped with an exception; retain all outputs')
+        for log in Path(run).glob('launcher-*.log'):
+            with log.open('rb') as stream:
+                stream.seek(max(0, log.stat().st_size-8000))
+                tail = stream.read().decode(errors='replace')
+            if 'Traceback (most recent call last)' in tail:
+                raise RuntimeError(f'{log.name} stopped with an exception; retain all outputs')
         if time.monotonic() >= until:
             raise TimeoutError('Collection deadline reached; incomplete version is not published')
         time.sleep(30)
