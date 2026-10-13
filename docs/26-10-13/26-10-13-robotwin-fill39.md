@@ -72,3 +72,11 @@
 - 停止后的最终冻结成功集 `[16,267,288,300,657]`，共5条；尚缺34条。以用户新授权按每缺口1GPU分发，总34GPU（DSW1+单条DLC33），低于宣告最多38GPU上限。旧7已停止后才申请，避免新旧并发额度叠加。中断的非成功尝试保留，从下一个从未用过的新seed开始，不复用旧失败seed。
 - 新单条请求与回执位于本地回执根 `canonical-ID.json` / `canonical-ID-receipt.json`，精确34清单 `expansion-snapshot.json`。云端新日志 `/mnt/workdir/frank/runs/robotwin-fill39-20261013/singles/launcher-ID.log` 与 `singles/canonical-ID/`。producer仍为b30fdf8，使用既有 `--only` 精确单条执行，无需热改采集代码。
 - 独立发布clone `/mnt/workdir/frank/projects/FastWAM-fill39-publish-20261013`；独立只读reader clone `/mnt/workdir/frank/projects/FastWAM-fill39-reader-20261013`，固定SHA633981aaa4d5b9e697774887b7cba4bc3289ea89。不会修改或执行父chat的活跃源码目录。
+
+### 扩容后一次启动健康检查
+
+- 33个新单条DLC全部API Running；33份逐canonical provenance及DSW79的provenance均已落盘，单卡数量检查通过；launcher异常集合为空。完整ID映射为本地 `canonical-ID-receipt.json`，启动回执 `single-startup-health.json`。这一刻仍为5条accepted，不能把Running当39条完成。
+- DSW单条79 PID13023。独立发布器使用clean `fc0ca8c966b9fa25565406c7b7679fdeffccee22`，PID13695，日志 `/mnt/workdir/frank/runs/robotwin-fill39-20261013/publisher.log`，启动健康检查alive且无异常；最多等待6小时，只有39条均成功才构造2500，不循环向用户报进度。
+- 本地及远端7项单测均通过。独立C2R reader已真实读取新canonical16的首尾窗口：Mono/Stereo左图/action/prompt完全一致，video `[3,9,384,320]`、action `[32,20]`、右图非复制且所有张量finite。日志 `reader-preflight.log`，exit0；这仅是第一条新样本reader检查，完整2500发布验收待自动后处理。
+- 自动后处理目标 `/mnt/workdir/frank/datasets/RoboTwin2.0/stereo-fill39-20261013/published/`，需最终 `ready.json`、`reader-accepted.json` 和绑定hash的 `manifest.json` 三者成立才交付；`published.json` 单独存在不算完成。新prompt清单会生成，T5编码/正式训练/替父chat切数据均未执行。
+- 新34路并行后顺利情况下主体粗估10–20分钟，完整QA/reader另约5–10分钟；失败重试和调度可能延长，非完成承诺。已完成5条合计690模拟帧/685窗口。
