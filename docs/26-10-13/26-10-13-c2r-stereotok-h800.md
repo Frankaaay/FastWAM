@@ -58,3 +58,12 @@ H800现有ActionDiT文件与ruhu文件整体SHA不同，但ZIP内data.pkl与820�
 
 启动健康检查：DLC于2026-10-13 09:53:54 UTC进入Running，master-0 Running，挂载准备成功，训练日志文件已创建但尚无文本编码进度；不能视为模型smoke通过。文本缓存157332条的主体ETA尚无吞吐依据，4小时为作业时限而非预计耗时。后续Wan/Stereo各8卡smoke和save/resume尚未提交，须等待缓存成功。DSW仅用于Git同步与CPU验证，已请求停止以释放1卡；DLC独立继续。
 
+
+## 文本完成与训练smoke存储阻塞
+
+文本DLC dlc1v3jymjmf2j86 Succeeded，master退出0，2026-10-13 10:25:48 UTC完成；text_cache.json实读status=passed、157332 prompts、context_len512，exit.json=0。
+
+随后提交Wan单节点8卡smoke dlcn9or9nk2ipnsj（Request01A134CE-9080-523B-AA51-7052D6F1EAD9），BS8/GA4/2更新/1024Gi主存/90分钟上限，拟运行633981a；容器Running但尚无训练输出，远端HEAD仍475e770，不宣称已同步或进入训练。
+
+当前DSW实时df -B1 /mnt/workdir：总10995116277760、已用10995116277760、可用0字节；inode使用25%，为容量满。无可靠日志/完整checkpoint空间，已请求停止本轮Wan smoke和准备DSW，不提交Stereo smoke，不删除任何文件。需用户释放共享盘空间或指定另一个持久输出位置后继续。此前1至2小时ETA失效。
+
