@@ -98,7 +98,8 @@ class FrozenTokenizerInference:
     @torch.inference_mode(False)
     @torch.no_grad()
     def encode(self, x, right, content_mask, disparity, match_probabilities, frame_chunk, camera_regions=None):
-        # Match the accepted TF32/autotune boundary locally. CUDA Graph capture
+        # Keep FP32 operations full precision; only explicit half operands round.
+        # Restore the autotune boundary locally. CUDA Graph capture
         # uses ordinary tensors even when a downstream caller uses inference_mode.
         matmul_tf32 = torch.backends.cuda.matmul.allow_tf32
         benchmark_limit = torch.backends.cudnn.benchmark_limit
@@ -109,7 +110,7 @@ class FrozenTokenizerInference:
             torch.backends.cuda.matmul.allow_tf32 = False
             torch.backends.cudnn.benchmark_limit = 0
             with config.patch(**dict(zip(keys, (64, 256)))), torch.backends.cudnn.flags(
-                    enabled=True, benchmark=True, deterministic=False, allow_tf32=True), \
+                    enabled=True, benchmark=True, deterministic=False, allow_tf32=False), \
                     torch.autocast("cuda", enabled=False):
                 return self.model._encode_posterior(
                     x.float(), None if right is None else right.float(), content_mask,
