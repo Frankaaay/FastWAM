@@ -55,3 +55,6 @@ H800现有ActionDiT文件与ruhu文件整体SHA不同，但ZIP内data.pkl与820�
 
 文本缓存DLC dlc1v3jymjmf2j86，Request01A134AD-D37D-5140-AD0C-C8C01F9BD3D4；单节点8GPU/96CPU/512Gi/64Gi共享内存、优先级4、training quota1bybv9m0ixu、ForbiddenQuotaOverSold、240分钟上限、不自动重启。请求文件本机frank-c2r-stereotok-20261013/text-r1.json。状态EnvPreparing，尚无模型执行结果。运行入口对应475e770；本条记录更新不改变运行源码。
 
+
+启动健康检查：DLC于2026-10-13 09:53:54 UTC进入Running，master-0 Running，挂载准备成功，训练日志文件已创建但尚无文本编码进度；不能视为模型smoke通过。文本缓存157332条的主体ETA尚无吞吐依据，4小时为作业时限而非预计耗时。后续Wan/Stereo各8卡smoke和save/resume尚未提交，须等待缓存成功。DSW仅用于Git同步与CPU验证，已请求停止以释放1卡；DLC独立继续。
+
