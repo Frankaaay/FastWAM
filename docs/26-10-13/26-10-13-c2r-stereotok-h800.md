@@ -74,3 +74,9 @@ H800现有ActionDiT文件与ruhu文件整体SHA不同，但ZIP内data.pkl与820�
 
 纠正前轮存储判断：df/statvfs的0不能据此断言CPFS无法写入；用户提供实际fsync/readback成功证据，按授权继续写入并以实际训练checkpoint结果验收，不清理数据。
 
+
+2500准备在9950d1e执行成功，manifest符号链接到补采published目录，LR与prepared写入独立prep成功；159480 prompts中仅2148缺失。服务器4项CPU测试再次通过（0.481s）。增量文本8GPU任务dlc11pc2krvfo0pw输出text_cache.json=passed/159480/512，exit.json=0。Wan2500 smoke dlc1kam9sbs1ygeh已提交（Request01A134EB-B87D-5328-B3C8-D8C24FB76CA4），8GPU/96CPU/1024Gi/64Gi shared/90min/priority4，源码9950d1e，2次更新；GPU训练结果待验。
+
+
+Wan2500首次smoke两个更新loss=1.7409/1.9815，W&B online176xxbn2；保存后exit0。Stereo首次dlc1eqvsp7t751xe在训练前正确拒绝初始化不一致：ActionDiT.from_pretrained明确保留action_encoder/head随机权重，原共同初始化只包含proprio遗漏这两部分。定向修复：三部分共同初始化均保存并strict恢复，三部分全tensor hash比对，原video/action backbone仍使用严格相同预训练；独立common-initialization-v2保留旧证据。AST/diff检查通过，下一步Wan从step2恢复到step3验证fullstate并发布完整共同初始化，Stereo重跑。未改BS/LR/数据语义。
+

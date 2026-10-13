@@ -48,7 +48,7 @@ def main():
         cmd=[str(py),'-m','accelerate.commands.launch','--config_file',str(repo/'scripts/accelerate_configs/accelerate_zero2_ds.yaml'),
             '--deepspeed_config_file',str(repo/'configs/c2r/ds_zero2.json'),'--num_machines','1','--num_processes','8',
             str(repo/'scripts/c2r/run_training.py'),'--config',str(repo/'configs/c2r/train.yaml'),
-            '--variant',args.variant,'--initialization',str(prep/'common-initialization.pt'),'--steps',str(args.steps)]
+            '--variant',args.variant,'--initialization',str(prep/'common-initialization-v2.pt'),'--steps',str(args.steps)]
         if args.resume:cmd+=['--resume',args.resume]
     (output/'launch.json').write_text(json.dumps(dict(source_sha=actual,command=cmd,variant=args.variant),indent=2)+'\n')
     with (output/'training.log').open('x') as log:

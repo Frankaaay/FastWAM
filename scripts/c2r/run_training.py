@@ -64,17 +64,27 @@ def main():
     contract={'seed':int(cfg.seed),'manifest_sha256':report['manifest_sha256'],
               'action_init':str(cfg.model.action_dit_pretrained_path)}
     # Codec constructors consume different RNG streams. Keep Wan's original
-    # initialization and share its only new random head with StereoTok.
+    # initialization and share every randomly initialized head with StereoTok.
+    heads = {'proprio': model.proprio_encoder,
+             'action_encoder': model.action_expert.action_encoder,
+             'action_head': model.action_expert.head}
     if args.variant=='stereotok':
         payload=torch.load(reference,map_location='cpu',weights_only=True)
         if payload['contract']!=contract: raise ValueError('Initialization contract mismatch')
-        model.proprio_encoder.load_state_dict(payload['proprio'],strict=True)
+        for name, module in heads.items():
+            module.load_state_dict(payload['heads'][name], strict=True)
     fingerprints={}
     for name,module in [('video',model.video_expert),('action',model.action_expert),('proprio',model.proprio_encoder)]:
         first=next(module.parameters()).detach().contiguous().cpu()
         fingerprints[name]=hashlib.sha256(first.view(torch.uint8).numpy().tobytes()).hexdigest()
+    for name,module in heads.items():
+        digest=hashlib.sha256()
+        for key,value in module.state_dict().items():
+            digest.update(key.encode())
+            digest.update(value.detach().contiguous().cpu().view(torch.uint8).numpy().tobytes())
+        fingerprints[name]=digest.hexdigest()
     if args.variant=='wan' and rank==0:
-        payload={'contract':contract,'proprio':{k:v.detach().cpu() for k,v in model.proprio_encoder.state_dict().items()},'fingerprints':fingerprints}
+        payload={'contract':contract,'heads':{name:{k:v.detach().cpu() for k,v in module.state_dict().items()} for name,module in heads.items()},'fingerprints':fingerprints}
         if reference.exists():
             saved=torch.load(reference,map_location='cpu',weights_only=True)
             if saved['contract']!=contract or saved['fingerprints']!=fingerprints:
