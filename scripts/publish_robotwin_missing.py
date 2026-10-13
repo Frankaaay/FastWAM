@@ -9,10 +9,79 @@ from collections import Counter
 import copy
 import json
 from pathlib import Path
+import random
+import subprocess
+import sys
+import time
 
 import numpy as np
 
 from collect_robotwin_missing import DATA, digest, verify_raw, write_json
+
+
+def wait_for_collection(plan, run, deadline):
+    """Bounded batch finalizer, not an additional GPU job."""
+    until = time.monotonic() + deadline
+    while True:
+        ready = [list((Path(plan['output'])/f"canonical-{r['canonical_episode']:04d}").glob('attempt-*/accepted.json'))
+                 for r in plan['rows']]
+        if all(len(paths) == 1 for paths in ready):
+            return
+        if any(len(paths) > 1 for paths in ready):
+            raise ValueError('Ambiguous accepted replacement')
+        for worker in range(8):
+            log = Path(run) / f'launcher-{worker}.log'
+            if log.exists():
+                with log.open('rb') as stream:
+                    stream.seek(max(0, log.stat().st_size-8000))
+                    tail = stream.read().decode(errors='replace')
+                if 'Traceback (most recent call last)' in tail:
+                    raise RuntimeError(f'Worker {worker} stopped with an exception; retain all outputs')
+        if time.monotonic() >= until:
+            raise TimeoutError('Collection deadline reached; incomplete version is not published')
+        time.sleep(30)
+
+
+def validate_readers(output, manifest, reader_root):
+    import torch
+    torch.set_num_threads(2)
+    reader_root = Path(reader_root).resolve(strict=True)
+    sha = subprocess.check_output(['git', '-C', str(reader_root), 'rev-parse', 'HEAD'], text=True).strip()
+    if sha != '633981aaa4d5b9e697774887b7cba4bc3289ea89':
+        raise ValueError('Reader revision differs from the reviewed C2R reader')
+    if subprocess.check_output(['git', '-C', str(reader_root), 'status', '--porcelain'], text=True).strip():
+        raise ValueError('Reader clone is dirty')
+    sys.path.insert(0, str(reader_root/'src'))
+    from fastwam_c2r.data import C2RDataset
+    from fastwam_c2r.vendor.openwam.multiview import format_prompt_for_inference
+    mono = C2RDataset(DATA, output/'manifest.json', augment=False, require_context=False, stereo=False)
+    stereo = C2RDataset(DATA, output/'manifest.json', augment=False, require_context=False, stereo=True)
+    selected = set()
+    for index, ep in enumerate(manifest['episodes']):
+        if ep['recovery_kind'] == 'new_demonstration' or index in (0, 1250, 2499):
+            selected.update((mono.cumulative[index], mono.cumulative[index+1]-1))
+    for index in sorted(selected):
+        random.seed(42); a = mono[index]
+        random.seed(42); b = stereo[index]
+        for key in ('video', 'action', 'proprio', 'action_is_pad', 'image_is_pad'):
+            if not torch.equal(a[key], b[key]):
+                raise ValueError(f'Matched reader mismatch at {index}/{key}')
+        if a['prompt'] != b['prompt']:
+            raise ValueError('Matched reader prompt mismatch')
+        if b['video'].shape != (3,9,384,320) or b['video_right'].shape != b['video'].shape or b['action'].shape != (32,20):
+            raise ValueError('Reader tensor ABI mismatch')
+        for key in ('video','video_right','action','proprio'):
+            if not torch.isfinite(b[key]).all():
+                raise ValueError(f'Nonfinite reader output: {key}')
+        if torch.equal(b['video'], b['video_right']):
+            raise ValueError('Reader returned duplicate eyes')
+    prompts = sorted({format_prompt_for_inference(s) for ep in manifest['episodes'] for s in ep['seen_instructions']})
+    write_json(output/'prompts.json', prompts)
+    report = dict(passed=True,reader_sha=sha,manifest_sha256=digest(output/'manifest.json'),
+        windows=len(mono),samples=len(selected),new_episode_first_and_last=True,
+        left_action_proprio_prompt_exact_match=True,context_cache_checked=False,training_started=False)
+    write_json(output/'reader-accepted.json', report)
+    return report
 
 
 def merge_manifest(existing, replacements):
@@ -43,6 +112,8 @@ def main(args):
     import h5py
     plan_path, old_path = Path(args.plan), Path(args.existing_manifest)
     plan = json.loads(plan_path.read_text())
+    if args.wait_run:
+        wait_for_collection(plan, args.wait_run, 6*3600)
     existing = json.loads(old_path.read_text())
     if existing['representation'] != 'absolute_xyz_rot6d_columns_gripper20' or existing['native_quaternion'] != 'wxyz':
         raise ValueError('Unexpected EEF ABI')
@@ -103,6 +174,9 @@ def main(args):
         new_frames=sum(e['length'] for e in replacements), new_windows=sum(e['length']-1 for e in replacements),
         normalization_bound_to_manifest=True, training_started=False, reader_validation_pending=True)
     write_json(output/'published.json', summary)
+    report = validate_readers(output, manifest, args.reader_root)
+    summary['reader_validation_pending'] = False
+    write_json(output/'ready.json', dict(**summary, reader_validation=report))
     print(json.dumps(summary))
 
 
@@ -111,4 +185,6 @@ if __name__ == '__main__':
     p.add_argument('--plan', required=True)
     p.add_argument('--existing-manifest', required=True)
     p.add_argument('--output', required=True)
+    p.add_argument('--reader-root', required=True)
+    p.add_argument('--wait-run')
     main(p.parse_args())

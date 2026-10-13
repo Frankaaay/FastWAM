@@ -56,3 +56,12 @@
 
 - 补采入口 commit `b30fdf84ac576ac22dfc6ce2cbf6f7ff4824597a` 已推送；自己的clean clone `/mnt/workdir/frank/projects/FastWAM-fill39-20261013`，远端4项测试通过。`plan.json` 已发布到独立数据目录，冻结最终39映射和runtime文件hash。单条真实smoke worker0/canonical16在DSW启动，PID4628，日志 `/mnt/workdir/frank/runs/robotwin-fill39-20261013/smoke-launch.log` 与 `smoke-worker0/0016-00.log`；已进入实际GPU模拟并持续保存帧，验收尚未完成。
 - 新增获授权发布脚本 `scripts/publish_robotwin_missing.py`：复用其他chat已经验证的只读2461 EEF20 manifest `/mnt/workdir/frank/runs/c2r-prep-20261013/prepared/manifest.json`（hash `9f277c833fe31d420d8e19eefb387de5865d49023513eb36f82a9ed612eaa8bd`）；仅新增39的完整QA与min/max，旧min/max和新min/max取并集等价全2500统计，rot6d仍固定[-1,1]。原2461只引用路径，不复制/重渲染/修改；按canonical ID构成每任务50条，产出兼容共同C2RDataset的manifest和指令池。未改C2R源码/环境/运行配置，未自动切换训练。发布结果仍须实际Wan/Stereo两reader同左目/action检查。
+
+## 单条验收通过与8GPU并行启动
+
+- canonical16/adjust_bottle，新seed1512，第一次补采exit0，141.832秒，144帧/143窗口；task success、EEF/qpos、六目全帧解码和标定通过。raw SHA256 `cf978900b0de4c55ebfabc7599d250e7370cf36059fb2bb68248234faa3cd398`；dense轨迹SHA256 `eee982600da5aa4a6f48352820a5c865839faf9feec988cd927bc65520cedb83`。左臂5段含position/velocity，右臂未运动列表为空（正常单臂任务）。新数据是替代示范，不是原轨迹恢复。
+- 冻结 plan SHA256 `bdff0e19ba52ef7294f665d94d16e7338c0541704d4788645acb9aed19b2af74`；补采producer仍为b30fdf8，不热更新正在运行的clone。发布逻辑另用新clean clone。
+- worker0在本任务DSW运行，PID8056，timeout21600秒；其余7个DLC各1GPU/16CPU/64GiB/shared16GiB/6小时/priority4/ForceQuotaOverSold：worker1 `dlc1eggr2jb1cygz`，2 `dlc1f0fxu3zdlykq`，3 `dlc1fafj7vl0n79b`，4 `dlc1fkf4ln5k3xqo`，5 `dlc1fuepzfhnd8wc`，6 `dlc1g4ebd7cnvt0r`，7 `dlc1gedwqzvr9tv6`。全局上限8GPU，未动其他作业。
+- 所有请求/回执保存于本地 `frank-robotwin-fill39-20261013`，launcher日志 `/mnt/workdir/frank/runs/robotwin-fill39-20261013/launcher-N.log`，逐条日志/exit记录 `worker-N/`；成功输出 `stereo-fill39-20261013/canonical-NNNN/attempt-NN/accepted.json`，既有16不再采集。
+- 发布器追加有界6小时等待，只有39条全部成功才发布2500；任何worker traceback停止发布。独立reader clone固定C2R SHA `633981aaa4d5b9e697774887b7cba4bc3289ea89`，逐新episode首尾及旧首中尾检查Mono/Stereo的左图、动作、proprio、prompt完全相同、右图有效。仅CPU数据reader，不加载模型或训练；文本缓存未生成，ready不能冒充训练启动门禁。
+- 单条实测给出主体20–45分钟的粗估（含并行启动和少量规划重试；复杂任务可能延长），发布QA/reader另预估5–10分钟；最终以成功清单计数为准。
