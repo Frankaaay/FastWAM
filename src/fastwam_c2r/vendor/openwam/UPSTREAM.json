@@ -1,0 +1,15 @@
+{
+  "repository": "https://github.com/OpenWAM-Official/OpenWAM",
+  "commit": "4d7f642b841913ea3c176010b692b1de3d5ef180",
+  "license": "Apache-2.0",
+  "modifications": "Only runtime imports of transforms.base and utils.normalization changed to local relative paths.",
+  "files": {
+    "base.py": "openwam/dataloader/transforms/base.py",
+    "video.py": "openwam/dataloader/transforms/video.py",
+    "multiview.py": "openwam/dataloader/transforms/multiview.py",
+    "normalize.py": "openwam/dataloader/transforms/normalize.py",
+    "normalization_utils.py": "openwam/dataloader/utils/normalization.py",
+    "mask_utils.py": "openwam/model/architectures/utils/common.py",
+    "training_utils.py": "openwam/train/utils/training_utils.py"
+  }
+}

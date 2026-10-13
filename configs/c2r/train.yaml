@@ -1,0 +1,103 @@
+output_dir: ${oc.env:C2R_OUTPUT_DIR}
+batch_size: 8
+num_workers: 8
+lr_scheduler_type: cosine
+learning_rate: 0.0001
+num_epochs: 5
+max_steps: null
+log_every: 1
+save_every: 0
+eval_every: 0
+eval_num_inference_steps: 10
+gradient_accumulation_steps: 4
+mixed_precision: bf16
+seed: 42
+max_grad_norm: 1
+weight_decay: 0.01
+resume: null
+wandb:
+  enabled: true
+  mode: online
+  workspace: yichx14-uc-irvine
+  project: StereoTok
+  name: ${oc.env:C2R_RUN_NAME}
+  group: fastwam-c2r-fresh2461-20261013
+model:
+  _target_: fastwam.runtime.create_fastwam
+  model_id: Wan-AI/Wan2.2-TI2V-5B
+  tokenizer_model_id: Wan-AI/Wan2.2-TI2V-5B
+  tokenizer_max_len: 512
+  load_text_encoder: false
+  proprio_dim: 20
+  redirect_common_files: true
+  mot_checkpoint_mixed_attn: false
+  compile_training_denoise: false
+  action_dit_pretrained_path: ${oc.env:C2R_ACTION_INIT}
+  skip_dit_load_from_pretrain: false
+  video_dit_config:
+    has_image_input: false
+    patch_size:
+    - 1
+    - 2
+    - 2
+    in_dim: 48
+    hidden_dim: 3072
+    ffn_dim: 14336
+    freq_dim: 256
+    text_dim: 4096
+    out_dim: 48
+    num_heads: 24
+    attn_head_dim: 128
+    num_layers: 30
+    eps: 1e-06
+    seperated_timestep: true
+    require_clip_embedding: false
+    require_vae_embedding: false
+    fuse_vae_embedding_in_latents: true
+    use_gradient_checkpointing: false
+    video_attention_mask_mode: first_frame_causal
+    action_conditioned: false
+    action_dim: 20
+    action_group_causal_mask_mode: group_diagonal
+  action_dit_config:
+    action_dim: 20
+    hidden_dim: 1024
+    ffn_dim: 4096
+    num_heads: 24
+    attn_head_dim: 128
+    num_layers: 30
+    text_dim: 4096
+    freq_dim: 256
+    eps: 1e-06
+    use_gradient_checkpointing: false
+  video_scheduler:
+    train_shift: 5
+    infer_shift: 5
+    num_train_timesteps: 1000
+  action_scheduler:
+    train_shift: 5
+    infer_shift: 5
+    num_train_timesteps: 1000
+  loss:
+    lambda_video: 1
+    lambda_action: 1
+c2r:
+  assets_root: ${oc.env:DIFFSYNTH_MODEL_BASE_PATH}
+  lr_table: ${oc.env:C2R_PREP_DIR}/lr.json
+  dataset:
+    root: /mnt/workdir/frank/datasets/RoboTwin2.0
+    manifest: ${oc.env:C2R_PREP_DIR}/manifest.json
+    text_cache: ${oc.env:C2R_TEXT_CACHE}
+    augment: true
+    require_context: true
+  evaluation:
+    action_type: ee
+    action_horizon: 32
+    replan_steps: 32
+    num_inference_steps: 10
+    sigma_shift: 5
+    text_cfg_scale: 1
+    episodes_per_task: 100
+    instruction_type: unseen
+    seed: 0
+  total_steps: null
