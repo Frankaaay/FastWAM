@@ -50,3 +50,8 @@ H800现有ActionDiT文件与ruhu文件整体SHA不同，但ZIP内data.pkl与820�
 
 用户明确批准将本地适配作为自己的repo分支并commit + push，然后到服务器测试。当前分支frank/c2r-stereotok-2461，origin已改为https://github.com/Frankaaay/FastWAM.git；fetch成功，远端尚无同名分支。保留ruhu精确7faa711基线，不合入用户fork的其他main改动。准备提交必要源码、配置、CPU测试与本记录，服务器只运行发布后的clean SHA。
 
+
+已发布475e770f5d35855746875ed8c8e029f4b601417c到Frankaaay/FastWAM的frank/c2r-stereotok-2461。H800个人clone已fetch、切换该分支、pull --ff-only，HEAD一致且clean。真实运行环境torch2.7.1+cu128、einops0.8.1、CUDA可用，C2RTrainer/StereoTokVAE导入通过；该已发布源码的CPU测试4/4通过（0.441s）。暂存检查发现原导入文件尾部空行，保留来源格式；排除blank-at-eof后的git diff --cached --check通过。
+
+文本缓存DLC dlc1v3jymjmf2j86，Request01A134AD-D37D-5140-AD0C-C8C01F9BD3D4；单节点8GPU/96CPU/512Gi/64Gi共享内存、优先级4、training quota1bybv9m0ixu、ForbiddenQuotaOverSold、240分钟上限、不自动重启。请求文件本机frank-c2r-stereotok-20261013/text-r1.json。状态EnvPreparing，尚无模型执行结果。运行入口对应475e770；本条记录更新不改变运行源码。
+
