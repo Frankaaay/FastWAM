@@ -234,3 +234,13 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 - OpenWAM论文https://arxiv.org/pdf/2609.07398的附录B/Table9/Table10明示OpenWAM-alpha预训练/SFT，不能用它们填充FastWAM复现参数；表内FastWAM成绩引用也不能独立证明重训方法。FastWAM RoboDojo/RoboTwin复现配置来源仍需核实，已有OpenWAM-reader FastWAM结果只保留为适配实验。
 
 本轮RAM重新核验frank/205455090823393499；DSW dsw-t7b951pdehd9to9kgb Running，SSH实际到达120.77.254.228:1020。持续目标保持active，未启动正式训练或StereoTok。
+## 14:36 原版 LIBERO 门禁恢复与后续队列
+
+- 远端Git重试成功，clean clone ff-only到f1f385c。真实Hydra解析wan_init_smoke_libero验证原生RobotVideoDataset、video224x448、context/tokenizer128、action7/proprio8、10epochs、mot_checkpoint_mixed_attn=false；日志fastwam-native-libero-config-check.log。数据四套metadata为原生LeRobot v2.1、20fps，分别434/457/433/388episodes，53229/67309/52895/104280frames；不是OpenWAM的数据版本。
+- 原版FastWAM LIBERO链215003等待Isaac诊断链213730退出后执行官方precompute_text_embeds及accelerate ZeRO2双卡2步训练。新缓存cache/five-baselines-20261014/fastwam-native-libero-text；输出runs/five-baselines-20261014/fastwam/libero-native；链日志fastwam-native-libero-chain.log。仅tokenizer本地文件定位使用Wan2.2同源UMT5目录，不变更128文本合同。链内固定f1f385c且要求clean，不在任务运行中同步新源码。尚未开始GPU训练，不能算通过。
+- Isaac诊断链213730等待RoboTwin208717退出；仅开启Python faulthandler、显式Kit日志路径并关闭崩溃报告器，保留原渲染和驱动设置，收集真实根因；日志robodojo-isaac-diagnostic-chain.log、robodojo-isaac-startup-diagnostic.log。
+- OpenWAM RoboTwin clean完成400/400 policy steps且client exit0，success0/1（两步训练smoke不要求任务成功）；randomized已运行29/400。链208717仍活跃，完整两模式验收仍待终态和动作审计。
+- LingBot后续requirements链215946等待torch链184552退出后验证torch2.9/cu126，再按官方requirements安装其它依赖、单独构建flash_attn、pip check及版本断言；日志lingbot-va-official-requirements.log。没有在torch安装过程中并发改同一env。
+- LingBot官方LIBERO发布数据为LIBERO-Long，来源robbyant/libero-long-lerobot revision8c0313b1c7cd9fa3798798479cbf59b11af8979d，API usedStorage4693296349bytes。启动完整原生data/meta/videos/latents下载PID220180到datasets/LingBot-LIBERO-Long-8c0313b，日志lingbot-va-libero-native-download.log，2507目标文件；不以FastWAM/OpenWAM数据加工替代。官方dataset缺empty_emb.pt，后续须按其T5 encoder生成，不使用其它模型缓存；尚未验证reader。
+
+本轮实现进展和已核验活跃等待均有PID依据；八组目标未完成，持续目标保持active，无正式训练。
