@@ -7,3 +7,7 @@
 - 旧H100渲染13646已保存140帧，但后处理因ffmpeg缺失失败，非渲染成功验收。现有SAPIEN3.0.0b1/render-extras及本人train runtime可复用，首先通过Slurm验证明确分配设备上的RT与Position/Segmentation缓冲。
 - 尚未启动全量；计划动态逐条领取、长轨迹优先，避免固定分片长尾。GT必须六目同帧数值标签，不能用旧三目深度或着色分割图冒充。
 - RT探针16078在4秒内退出1：Position含背景非有限值，原探针错误要求所有像素有效。定向修正为要求可见几何存在有限正Z，背景无效值由mask表达；Color/Segmentation仍要求全部有限。未改渲染参数。
+- 修正后Job16081在3秒完成，batch和srun退出0。明确cuda:0设备RT32SPP/path8/OIDN，Color/Segmentation全部有限，Position有限元素比例0.8594；存在正深度。
+- 最小实现scripts/h100_robotwin_gt.py：只读导出H800冻结manifest的轨迹/种子/场景/qpos/指令；H100同轨迹回放，逐帧qpos atol1e-5。流式保存六目无损libx264/yuv444p/15Hz视频与压缩数值GT，避免逐帧pickle缓存和二次merge。动态逐条flock领取、长轨迹优先、单条30分钟有界时限，任一失败停止并保留现场。
+- 六目GT：float32米制Z、有效mask、float32 fx*b/Z视差、原始uint32 mesh/actor ID；遮挡是nearest-pixel对目深度检验，容差max(2mm,0.5%Z)，视野外单独标记，不冒充精确光线级可见性。保持RGB渲染与相机合同。
+- _base_task.py仅增加显式render_device scene创建，避免SAPIEN旧wrapper忽略选卡。其他调用保留原行为。
