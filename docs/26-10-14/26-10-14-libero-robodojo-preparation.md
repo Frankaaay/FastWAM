@@ -6,13 +6,13 @@
 - OpenWAM三组保持其官方配置。LingBot-VA的LIBERO/RoboTwin采用原作者配置与官方lingbot-va-base初始化；RoboDojo采用RoboDojo团队XPolicyLab适配，不能称为原作者官方实验。不套用FastWAM初始化或数据表示。包括FastWAM历史RoboTwin配置复核在内，总范围为九项。
 - 全部只做训练smoke、checkpoint与真实仿真闭环；无正式训练、无StereoTok接入。历史段落保留当时操作事实，冲突之处以本节为准。
 
-### 当前验收快照（2026-10-14 16:33）
+### 当前验收快照（2026-10-14 17:00）
 
 | 模型 | LIBERO | RoboDojo | RoboTwin |
 | --- | --- | --- | --- |
 | FastWAM | 原版四套训练/权重/短闭环通过 | 旧适配不计；OpenWAM对应FastWAM复现配置来源待核实 | 历史完成；clean-only对应复现配置来源待核实 |
 | OpenWAM | 四套短闭环通过 | 训练/权重/8个真实动作通过 | clean及randomized动作闭环通过 |
-| LingBot-VA | 官方Long训练/权重/8个真实动作通过 | RoboDojo团队适配训练/权重/8个真实动作通过 | 官方clean+aug任务子集下载中，独立环境恢复中，训练排队 |
+| LingBot-VA | 官方Long训练/权重/8个真实动作通过 | RoboDojo团队适配训练/权重/8个真实动作通过 | 独立环境及发布文件下载完成；官方缺两份latent，完整性检查阻断训练，待确认原生过滤行为 |
 
 完整通过6/9。LingBot RoboDojo保留上游训练8动作/latent与推理12动作/frame的已知差异，证明发布适配代码跑通，不宣称时序一致或论文分数复现。每项证据路径与具体覆盖范围见下面的运行记录；不得把历史适配结果加入当前计数。
 
@@ -389,3 +389,31 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 ## 16:33 RoboTwin reader 和客户端导入前置核验
 - 实际安装的 LeRobot get_episodes_file_paths 同时要求 Parquet 和各 camera video 存在，不能仅凭 latent 下载完就提前通过原生reader；保持3858文件完整性要求，继续原下载303771。
 - 独立环境恢复395956仍活跃并下载源环境精确Conda包；原生客户端导入检查排队PID397665，等待恢复明确成功后执行，仅绑定作者安装路径、验证import，不启动额外仿真/GPU。日志 lingbot-robotwin-native-client-import.log。
+
+## 16:37 LingBot RoboTwin 环境安装完成与闭环队列
+- 精确Conda包恢复和客户端依赖安装完成；首次Sapien import因未传已有EGL/Vulkan路径失败，未修改驱动，使用私有LD_LIBRARY_PATH/VK_ICD_FILENAMES/__EGL_VENDOR_LIBRARY_FILENAMES后，原生客户端import通过。渲染检查PID400803，日志lingbot-robotwin-native-client-import-v2.log，检查真实Sapien scene.step，不等同策略闭环。
+- 训练后checkpoint审计与原生闭环队列PID401897，日志lingbot-robotwin-closed-loop-v1.log，等待训练391559 exit0及原生import/render标记后，逐键/形状/有限值审计step3，再用原作者robotwin配置部署并运行原生客户端；固定runner8eefc5b，独立输出lingbot/robotwin-native-closed-loop-v1。仍未计验收通过。
+
+## 16:37 实时等待与未公开配置来源
+- 当前下载303771、训练队列391559、闭环队列401897均live；RoboTwin已完成约2251/3858个文件，网络失败按原脚本重试，未替换数据或减少任务覆盖。RoboDojo全资产270126仍live，优先任务资产已满足两项闭环，全量约10706/15365文件，网络退避中。
+- 实核DSW仍Running，关机DueTime09:34:17Z（17:34:17+08），剩余约57分钟；本轮未续期。
+- FastWAM两项需要OpenWAM实际复现recipe来源；公开通用训练配置、榜单数值和RoboDojo团队默认脚本不足以证明该来源。请求用户提供来源或明确变更为独立有据的工程baseline前，不擅自替代配置。其他已授权LingBot RoboTwin工作继续。
+
+## 16:39 精确清单视频预取加速
+- 原下载303771确认仍live，进度2301/3858。2251之后清单约1.43GB，其中视频约0.992GB、latent约0.435GB；无数据范围变更。
+- 新增运行期预取PID404373，仅固定595d4acc revision、既有manifest的aug视频1500文件，4线程hf_hub_download到同一授权数据目录；使用Hub自带文件锁/原子落盘，每文件校验发布size，保留原串行下载和最终全3858文件门禁。不自行替换缺失视频、跳过样本或提前启动训练。日志lingbot-robotwin-video-prefetch.log。
+
+- 预取首轮遗漏原下载环境HF_ENDPOINT，huggingface.co网络不可达；读取303771环境确认其使用hf-mirror.com及HF_HUB_DISABLE_XET=1。停止仅此错误入口预取404373，以相同精确revision/manifest恢复镜像入口（v2日志），原下载未中断。已有文件保留且仍做size校验。
+
+## 16:47 下载限流与退避
+- 原RoboTwin下载已进入最后cam_right_wrist视频（约episode217），服务返回HTTP429，提示共享resolver五分钟配额。停止额外预取406225；非关键全量RoboDojo资产270126暂SIGSTOP，恢复进程412221将在6分钟退避后SIGCONT（asset-rate-backoff.log）。原RoboTwin下载303771保留其重试退避，不换身份/绕过限制、不跳过文件。训练391559和闭环401897继续等待真实完成。
+
+### 16:59 LingBot RoboTwin 发布 latent 完整性阻断
+- 实时确认 DSW 仍 Running，RAM frank；训练链与闭环链均已退出，GPU 空闲。
+- 官方所选 clean+aug 清单 3858 个文件已全部下载并通过文件大小检查。但 episode metadata 要求的两份 latent 不在发布清单中：aug episode 000003 左腕（0–149）、episode 000498 右腕（0–133）。其余相机及原始视频存在。此为发布数据缺项，不是下载未完成。
+- 原版 `wan_va/dataset/lerobot_latent_dataset.py::_check_meta/parse_meta` 会过滤缺少任何相机 latent 的窗口；因此原版实际会读 clean 50 + aug 498。本任务严格检查在训练前报错，保留了此差异，未放宽检查、未删样本、未自行重编码。
+- 日志：`/mnt/workdir/frank/runs/five-baselines-20261014/lingbot-robotwin-native-train-v1.log`，首个根因是左腕 latent 缺失；train exit 1。closed-loop-v1 正确因无 train exit 0 而拒绝继续。
+- 待确认：是否采用原版 reader 的过滤行为并显式记录 548/550 窗口，或要求重新生成缺失 latent（原作者当前源码未提供相应离线预处理入口，需额外核对处理合同）。当前通过仍 6/9。
+- RoboDojo 全量资产下载也已因 HF mirror HTTP 429 退出；优先 smoke 所需资产已齐备，已通过验收不受影响。完整资产不得标记完成。DSW 原自动关机时间仍为 17:34，未延长。
+
+- 17:00 在确认原下载 PID270126 已终止后，以相同 RoboDojo revision、Assets/** 范围、原目标和单 worker 恢复 snapshot_download，PID424133，日志 robodojo-assets-resume-v2.log；复用缓存，无覆盖原资产、无删除。LingBot RoboTwin 仍等待数据过滤确认，未重启训练。
