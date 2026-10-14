@@ -21,3 +21,19 @@
 延迟渲染GPU对照通过：clean/randomized各一个固定episode，pixels/actions/EEF states全部相等。扣除首次模型编译后仅小幅阶段加速，不能用78→47秒宣称40%渲染加速。阶段计时揭示本轮入口每episode clear_cache=True导致反复加载资产；恢复官方(ordinal+2)%clear_cache_freq清理节奏。专家筛选最终按官方对expert/第二次setup的Exception拒绝候选并记录全trace，rollout异常绝不跳过；最多10000候选后失败，不减少100有效episode目标。
 
 并行对照：2GPU×1进程 dlc5r9lvvdp7t6c4；2GPU×2进程 dlc6b8snff1a60ww；共同4个task-condition×2episode。峰值/完成时间后续补齐。改进调度为pipeline：每worker完成已领取专家plan后立即消费其他已发布plan的小批rollout，不设全局准备屏障；全量每chunk10回合，持久模型复用。聚合校验ordinal/seed/instruction及覆盖，文件锁避免多job聚合覆盖，新CPU ready-case测试覆盖首个慢plan不阻塞已完成plan。
+
+## 优化验收及正式启动（北京时间2026-10-14）
+
+- CPU定向测试3/3通过；真实GPU缓存动作bitwise一致、渲染clean/randomized像素/动作/EEF状态逐元素一致。双进程与单进程闭环步数存在小幅波动，不宣称跨并发/调度逐步确定性；固定计划和成功判定保持一致。
+- 并发实测：单进程每卡峰值35220MiB、8回合572.0597s；双进程每卡峰值70076MiB、8回合502.1072s，端到端缩短12.23%，两组均exit0、6/8成功（pilot，不是正式成功率）。包含首次模型加载/编译及当时每回合清缓存，不将此时长当优化后全量稳态。
+- 最终pipeline单卡双进程smoke：/mnt/workdir/frank/runs/c2r-eval-pipeline-smoke-20261014，PID41402已结束，exit全0、summary complete、4/4回合，无错误；进程总260.5357秒。后续回合setup .26396s，分别22.16/16.66s；首次setup23-24秒和首次编译49秒另列。修复清缓存频率后不再每回合重载场景资源。
+- 正式代码固定d91d45b67b4759f27cdc4e0bd31bc3004cd34a36。独立clean clone /mnt/workdir/frank/projects/FastWAM-C2R-eval-final-20261014，第一次直连clone低速超时后原路径确认不存在，第二次直连成功；未绕过同步门禁。原pilot clone未热改。直接读取最终weights payload step=10725。
+- 正式结果根 /mnt/workdir/frank/runs/c2r-stereotok-eval-full-20261014。manifest.json固定50任务×clean/randomized×100=10000回合，按长step_limit优先；最终chunk_size从候选10缩小到5（只影响调度，种子/指令/回合数不变），持久模型、准备和rollout流水执行。渲染仍rt/32spp/depth8/oidn；无录视频，不降采样或缩短episode。
+- 10:53起提交36个2GPU/48CPU/256Gi/64Gi共享内存的DLC，priority4/ForbiddenQuotaOverSold/360分钟上限，无训练操作；10:55:27一次健康快照24 Running=48GPU、12 Queuing。再提交3个1GPU/24CPU/128Gi分组填零散空位，总上限75GPU/150worker。单卡补位Job dlc4xhukrnm9x6ns、dlc57hfyja7jqvub Running，dlc5hh1cbcjbtr1x Queuing；合计当时50GPU已运行。不能把75提交卡数当75运行卡数。
+- 完整39个Job ID/RequestId/资源请求在本机 C:/Users/Frank/AppData/Local/AliyunCLI/h800-requests/frank-c2r-eval-20261014/full-jobs.json，同时复制到正式结果根jobs.json。首组dlcbv6akram9k2jy；原36组最后dlckgtpfvzno2oip。全部CreateJob回执均有JobId，未重复提交未知回执。
+- 有界实际日志检查：100个prepare claims/100个任务日志已建立，98组已产生有效seed进度，示例open_microwave clean ordinal9/seed100013、click_alarmclock clean ordinal99/seed100115；其余刚启动。errors目录无已发布失败。准备成功不代表全量rollout完成，尚无正式最终成功率。
+- 粗估主体2.5–4小时，另5–10分钟验收汇总；基于短/中任务及上游620平均step_limit、实际约50卡起跑、后续排队补位，不承诺固定完工时间。不会沿用旧44卡6h31m当本轮实测时长。
+- 自动跟进stereotok已ACTIVE，每10分钟有界检查；用户已授权离开期间继续推进，只在失败、需用户决策或最终完成通知。冻结计划、完整覆盖、去重和错误门禁都通过后再发布正式SR，随后暂停跟进，不恢复旧训练automation。
+- 本人单卡准备DSW最后GPU无进程、无其他/mnt/workdir/frank任务，已请求StopInstance；正式DLC独立运行，不依赖DSW或本机聊天保持在线。后续需要检查产物可临时启动该DSW再停止。
+
+复核入口：既有Python环境运行 scripts/c2r/evaluate.py summary --root /mnt/workdir/frank/runs/c2r-stereotok-eval-full-20261014；需等待完整10000结果，summary对seed/instruction/ordinal与plan匹配、重复episode和缺失覆盖均严格校验。每个DLC的workers/<job>/exit.json保存source与各worker退出码；plans保留候选拒绝原因和有效场景RNG，results/logs保留逐回合耗时和成功标记。下一步由跟进任务实时验收并交付逐任务clean/randomized结果。
