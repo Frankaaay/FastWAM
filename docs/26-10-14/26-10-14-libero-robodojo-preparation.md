@@ -472,3 +472,5 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 - FastWAM v2首次更新不再OOM，但step1 loss1.9980(action1.4836/video0.5143)之后step2、3均NaN。该结果不计通过；保存仍在进行，后处理必须经过全finite审计。下一步定位首次backward/Adam更新前后非有限值来源，而非缩为一步规避失败；当前仍8/9。
 
 - tests/run_fastwam_robodojo_smoke.py增加仅测试使用的AdamW更新前参数/梯度、更新后参数finite检查，按1048576元素分块避免大布尔临时张量；finally恢复原方法。不更改上游算法、模型或训练配置。AST验证通过，待前轮进程退出后同步精确SHA重试定位。
+
+- v3定位：rank1首次AdamW更新前参数与梯度均finite，更新后group0 param0非finite；rank0该次更新检查通过。继续在测试入口记录实际dtype/grad_dtype/eps/lr/foreach，确定优化器数值根因，未改学习率或数据合同。

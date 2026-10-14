@@ -96,6 +96,10 @@ def main():
                 check_tensor(param, f"before AdamW parameter: {label}")
                 if param.grad is not None:
                     check_tensor(param.grad, f"before AdamW gradient: {label}")
+                print("ADAMW_BOUNDARY", label, "dtype", param.dtype,
+                      "grad_dtype", None if param.grad is None else param.grad.dtype,
+                      "eps", group.get("eps"), "lr", group.get("lr"),
+                      "foreach", group.get("foreach"), flush=True)
         result = original_step(optimizer, *step_args, **step_kwargs)
         for group_index, group in enumerate(optimizer.param_groups):
             for index, param in enumerate(group["params"]):
