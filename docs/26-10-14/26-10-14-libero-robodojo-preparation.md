@@ -1,10 +1,20 @@
-# 五组 Wan 初始化 baseline 准备与验证记录
+# 三模型九项 baseline 准备与验证记录
 
 ## 当前有效合同（用户最新纠正）
 
 - FastWAM LIBERO必须继承官方`libero_uncond_2cam224_1e-4`：原生reader、224x448双相机横拼、action7/proprio8、文本128；只有FastWAM RoboTwin clean-only和RoboDojo对齐OpenWAM对应实验。此前OpenWAM-reader LIBERO smoke是适配实验，撤销其“原版baseline通过”的计数，保留日志溯源并重跑原版。
-- OpenWAM三组保持其官方配置。新增LingBot-VA三组采用LingBot-VA官方初始化和配置（允许官方lingbot-va-base），不套用FastWAM初始化或数据表示。当前待验收总范围为八组。
+- OpenWAM三组保持其官方配置。LingBot-VA的LIBERO/RoboTwin采用原作者配置与官方lingbot-va-base初始化；RoboDojo采用RoboDojo团队XPolicyLab适配，不能称为原作者官方实验。不套用FastWAM初始化或数据表示。包括FastWAM历史RoboTwin配置复核在内，总范围为九项。
 - 全部只做训练smoke、checkpoint与真实仿真闭环；无正式训练、无StereoTok接入。历史段落保留当时操作事实，冲突之处以本节为准。
+
+### 当前验收快照（2026-10-14 16:33）
+
+| 模型 | LIBERO | RoboDojo | RoboTwin |
+| --- | --- | --- | --- |
+| FastWAM | 原版四套训练/权重/短闭环通过 | 旧适配不计；OpenWAM对应FastWAM复现配置来源待核实 | 历史完成；clean-only对应复现配置来源待核实 |
+| OpenWAM | 四套短闭环通过 | 训练/权重/8个真实动作通过 | clean及randomized动作闭环通过 |
+| LingBot-VA | 官方Long训练/权重/8个真实动作通过 | RoboDojo团队适配训练/权重/8个真实动作通过 | 官方clean+aug任务子集下载中，独立环境恢复中，训练排队 |
+
+完整通过6/9。LingBot RoboDojo保留上游训练8动作/latent与推理12动作/frame的已知差异，证明发布适配代码跑通，不宣称时序一致或论文分数复现。每项证据路径与具体覆盖范围见下面的运行记录；不得把历史适配结果加入当前计数。
 
 日期：2026-10-14，Asia/Shanghai。目标：先在阿里云 H800 平台跑通原版 FastWAM 的两个仿真，再开展 StereoTok 对照。本轮尚未安装、下载数据、启动实例或训练。
 
@@ -365,3 +375,17 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 - 外层最后成功打印未出现导致 AssertionError：上游 main 最后 simulation_app.close() 可直接终止进程，包装器返回后的打印不会执行。独立核验动作、原生完成标记和退出码后生成 openwam/robodojo-closed-loop-v8/smoke-acceptance.json，保留原始错误日志，不修改证据。
 - 测试包装将成功动作标记放到实际 take_action_batch 返回且计数达标后输出，防止关闭阶段吞掉标记；无动作仍不通过。不为此重跑已充分验证的 OpenWAM。
 - 当前完整通过：OpenWAM LIBERO/RoboTwin/RoboDojo、FastWAM原版LIBERO、LingBot原版LIBERO-Long。LingBot RoboDojo仅训练+checkpoint通过。闭环队列PID387816，日志 lingbot-robodojo-closed-loop-v1.log，输出 lingbot/robodojo-closed-loop-v1；固定RoboDojo适配与joint动作，组装训练step2权重，推理独立config副本attn_mode=torch不修改训练checkpoint。
+
+## 16:29 LingBot RoboDojo 闭环重启及 RoboTwin 训练队列
+- LingBot闭环v1在git fetch阶段120秒超时退出，未启动模型。只读确认进程已结束后，单次重试fetch成功，clean clone fast-forward到8eefc5b5637e84541f286a5f42e78ecdc7c94f37。v2在新输出目录启动PID390828，后端390831、转发391396；保留v1现场。
+- RoboTwin训练链PID391559，日志 lingbot-robotwin-native-train-v1.log，等待数据下载303771完成且LingBot闭环390828释放GPU，要求下载完成标记和manifest所有3858文件大小一致、clean runner严格8eefc5b；之后才执行官方robotwin_train短训练，不将排队视为通过。
+- 环境复制PID378821仍有磁盘I/O，已写约5.9GB；未因日志安静擅自重启。
+
+## 16:30 当前验收 6/9：LingBot RoboDojo 完整通过
+- v2真实执行8个策略动作，原生仿真exit0，外层REAL_POLICY_ACTION_EVIDENCE_PRESENT8，simulator.log无异常回溯；训练exit0、839键全有限审计以及实际assembly权重指向均验证。证据 lingbot/robodojo-closed-loop-v2/smoke-acceptance.json。服务的SIGTERM来自链finally正常清理，不是推理崩溃。上游train8/infer12时序差异仍如实记录，本项仅证明已发布适配代码链路，不宣称论文成绩或时序一致。
+- RoboTwin conda clone offline已在拷贝untracked文件后、安装Conda包阶段失败，缺包需访问repo.anaconda.com。检查conda clone_env源码确认执行阶段；目标尚无conda-meta。使用源环境PrefixData/PrefixGraph精确URL列表继续explicit安装阶段，避免重复复制约5.9GB或删除不完整目录。恢复PID395956，日志lingbot-robotwin-sim-env-resume.log，仍需完成后import检查。
+- 再次搜索固定OpenWAM仓库完整tracked源码及官方训练文档，仍无明确FastWAM clean-only/RoboDojo复现实验recipe，不能用OpenWAM模型训练配置代替。该来源门禁未通过。
+
+## 16:33 RoboTwin reader 和客户端导入前置核验
+- 实际安装的 LeRobot get_episodes_file_paths 同时要求 Parquet 和各 camera video 存在，不能仅凭 latent 下载完就提前通过原生reader；保持3858文件完整性要求，继续原下载303771。
+- 独立环境恢复395956仍活跃并下载源环境精确Conda包；原生客户端导入检查排队PID397665，等待恢复明确成功后执行，仅绑定作者安装路径、验证import，不启动额外仿真/GPU。日志 lingbot-robotwin-native-client-import.log。
