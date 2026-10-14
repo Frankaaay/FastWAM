@@ -255,3 +255,14 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 - Isaac诊断213730已exit0，完成启动和10次update；新增显式日志/关闭crash reporter后不再首秒崩溃，不能据此证明根因或相机正确。明确缺libGLU.so.1导致材质库无法加载；229786已将libglu1-mesa9.0.2/libopengl0包解到独立envs/robodojo-system-libs-20261014，下一次渲染将显式加此LD_LIBRARY_PATH，未更换驱动或渲染配置。
 - LingBot官方torch栈已完成。官方requirements因LeRobot0.3.3声明torch<2.8/torchvision<0.23而与LingBot显式2.9/.24冲突，安装器确切报错已保留。新链239461用仅torch2.9/torchvision.24的显式resolver overrides保留LingBot原版版本，继续其余官方依赖；记录metadata冲突，pip check不声称全绿，后续须真实reader/训练验收。日志lingbot-va-official-requirements-v2.log。
 原版LIBERO短闭环首轮在import阶段因CUDA_VISIBLE_DEVICES只含0而EGL指定1被robosuite拒绝，未执行动作；第二轮改为可见0,1、模型cuda:0、EGL1后import通过，但test wrapper误用了main函数名。现已按官方真实入口eval_single_process修正并静态核验符号；这两轮不计验收。旧日志保留，下一轮使用新输出目录。评测依赖另补matplotlib后已完成。LingBot官方依赖主体安装完成，flash-attn2.8.3.post2正构建。
+
+## 15:08 原版 FastWAM LIBERO 闭环通过与用户补充
+
+用户澄清“缩短测试”不是指定固定1–2训练步或8动作；实际要求是用足够短的测试证明代码跑通并搭好环境、资产，配置来源不变。当前已完成的步数是本轮具体smoke取值，不是所有模型的强制标准，不为凑步数重复测试。
+
+- FastWAM LIBERO v3因Hydra从导入模块寻找configs包而失败，显式--config-path到已推送repo/configs后解决；dry配置解析成功输出，测试末尾无episode断言仅因dry模式而触发，不是配置解析失败。
+- v4链257972已自然结束：四套Spatial/Object/Goal/Long各真实8步，原版native evaluator，全部client exit0。结合原生训练与checkpoint审计，fastwam/libero-native-closed-loop-v4/smoke-acceptance.json已验收。当前3/9通过：OpenWAM LIBERO、RoboTwin、FastWAM LIBERO；另FastWAM RoboTwin历史完成待配置复核。退出阶段EGL析构有ignored警告，动作和渲染在执行阶段成功，保留此限制，不额外扩大修改。
+- LingBot base下载186492已完成，固定68b7bc1；官方LIBERO下载220180因latents/.DS_Store返回403反复退避。确认进程后仅SIGINT它，保留文件，使用相同revision及目标目录、ignore_patterns仅**/.DS_Store续传257971。非数据文件排除不修改样本范围或数据内容。
+- RoboDojo全量Assets下载65528仍在Material阶段，尚未到机器人与物体。确认并停止该进程，优先下载当前pour_liquid_into_cup所需x5/Room/Sensor/Geometry及wuliangye/mug/goblet/Fluid，再继续原全量Assets；新PID270126，日志robodojo-assets-prioritized.log，复用缓存且无删除。优先阶段2297文件，尚未完成。
+- RoboDojo真实相机诊断链275772等待FastWAM闭环释放GPU后运行，使用已补GLU私有prefix、原生Isaac Camera及红色立方体场景，检查128x128 RGB有限/非零方差，输出robodojo-camera-smoke.log/json/png；此项只证明渲染，不代替任务policy闭环。当前正在启动，未宣称通过。
+- LingBot flash-attn编译239461经ps确认ninja/nvcc/cicc实际活跃，非下载假死，仍待完成；数据和模型环境相互独立。
