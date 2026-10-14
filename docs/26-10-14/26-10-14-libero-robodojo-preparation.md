@@ -349,3 +349,11 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 ## 16:19 LingBot 首个有效更新及 RoboTwin 原生客户端
 - LingBot RoboDojo 两卡训练完成第一个 optimizer update，video loss0.2004/action loss0.3017/grad norm2.74，首次更新耗时181.91秒含编译；未保存最终 checkpoint 前不计训练门禁通过。
 - 添加 tests/run_lingbot_robotwin_policy_smoke.py，固定作者模型/仿真 SHA，只替换官方客户端的安装路径占位符，保留专家筛种、prompt、动作转换和 take_action；只在原生服务返回 action 后统计已完成16D有限动作，达到短测试界限退出并清理环境，不产生虚假任务成功率。AST通过，尚未实跑。
+
+## 16:20 LingBot RoboDojo 训练门禁进展
+- 原生短训练 NATIVE_ROBODOJO_TRAIN_EXIT 0；两个 optimizer 更新分别 video/action loss0.2004/0.3017、0.1841/0.2651，grad norm2.74/2.65。保存路径 lingbot/robodojo-native-v1/checkpoints/checkpoint_step_2/transformer，正在 CPU 上对固定 XPolicyLab 原生模型逐键/形状/有限值审计。没有 optimizer 状态，不宣称完整续训。
+- OpenWAM RoboDojo v8 自动开始，policy PID381447；后续真实动作未通过前不增加验收数。
+
+## 16:22 LingBot RoboDojo checkpoint 审计通过
+- checkpoint-smoke-audit.json 已生成：step2 transformer 10,177,831,668 bytes，839 keys，与固定 XPolicyLab 原生模型逐键/形状一致，所有 tensor 有限。训练和 checkpoint 两项通过，仿真尚未通过。
+- 添加单独 serve_lingbot_robodojo_baseline.py，固定 XPolicyLab53c5da5与 robotwin30_train，保留30D/action_per_frame12；仅绑定组装 checkpoint 路径及监听端口，不借用作者 LIBERO/RoboTwin 配置。官方单环境 take_action 内部调用 take_action_batch，现有 RoboDojo 真实动作计数包装可直接覆盖，无需修改仿真步进逻辑。
