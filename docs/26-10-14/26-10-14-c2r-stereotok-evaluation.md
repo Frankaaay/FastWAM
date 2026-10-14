@@ -130,3 +130,9 @@ Windows初次并发测试触发目标文件并行replace的WinError5，属于Win
 - 控制器依赖这台Windows主机和网络持续在线，不能宣称机器关机仍自动恢复；heartbeat另负责控制器存活/错误检查和阶段切换。GPU评估clone维持原f9cb版本，监督代码独立发布，不热改运行clone。
 - 监督器发布143d738，已启动本机隐藏进程PID33980；本机clean-jobs-supervisor.json/lock和clean-supervisor.stdout.log/stderr.log保存状态，GPU源码不变。控制器首个CPU检查dlc1d5n5zfsnwhux于18:11:40报告4971/5000、errors=[]，证明回收后已新增51回合，剩29；不是仅凭Running判定恢复。自动跟进已ACTIVE并明确核验独立监督器存活、处理非抢占故障、未知提交及阶段交接。
 - 12项本地测试全部通过，包括真实原始默认值回归、确认终态回收/保留活跃未知owner、恢复可认领，以及模拟GetJob/抢占/创建调用验证固定槽替换后仍16GPU且旧Job溯源保留。CPU生产检查已实际运行回收函数并读取正式summary；未将本机模拟测试称为云端抢占端到端测试。
+
+### 18:21 clean完成与randomized场景门禁
+- 独立控制器progress的18:17:27正式summary为5000/5000、complete=true、errors=[]、clean SR=0.7898000000000001，即3949成功/5000=78.98%。全部50条件各100，summary验证ordinal无重漏且seed/instruction匹配冻结plans。控制器PID33980已退出，未继续补卡。
+- 逐个GetJob核验并停止残余clean作业，最新clean-jobs.json的38个作业已全部终态；clean-final-status.json保留状态。原始被抢占Job和所有日志结果保留。最终补齐阶段16:09启动至18:17汇总约2小时08分，含16:46–18:08失效认领停滞，不冒充纯运行吞吐或从零全量用时。
+- 既有tests/benchmark_c2r_render.py增加scene-replay-only门禁，真实执行dump_bin_bigbin/click_bell/put_bottles_dustbin的专家有效种子准备，保存初始全部actor名称/位姿，再跨task后重放同一种子两次，比较位姿atol1e-6且无相对宽限；只用于验证，不改生产协议。Python编译通过，真实GPU结果仍待回执。
+- 新发布921bb0c4f598cf858d97b8f6ac64f22e2dc98987；1GPU固定门禁Job dlc1qh7w23kscmsc，创建独立clone /mnt/workdir/frank/projects/FastWAM-C2R-eval-randomized-20261014及全新root /mnt/workdir/frank/runs/c2r-stereotok-randomized-final-20261014，原manifest仅筛50randomized条件，不复用旧plans/results。Job先输出clean逐任务结果、验证checkpoint路径和已落盘worker退出码/source绑定，再执行场景门禁，scene-replay.json必须passed=true才启动randomized全量。不得把Creating或静态编译当门禁通过。
