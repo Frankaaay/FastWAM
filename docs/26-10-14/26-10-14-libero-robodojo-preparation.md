@@ -162,3 +162,12 @@ FastWAM LIBERO训练进程exit0；step1 loss1.6486（action1.0798/video0.5688）
 新增tests/serve_openwam_baseline.py，专用于本任务闭环smoke，不接入生产路径：保存config与请求benchmark必须匹配；dataset适配器继续验证OpenWAM SHA；mot/proprio严格加载训练checkpoint，step至少2；各run内保存归一化统计副本和hash绑定。只复用官方dataloader的Normalizer、统一维度scatter/gather、multiview拼图；FastWAM仍调用infer_action。单客户端JSON WebSocket与官方LIBERO客户端协议相同，拒绝缺相机、错维度、非有限数、未知提示词缓存。默认10去噪步/full32chunk对齐OpenWAM deploy默认。RoboDojo还需XPolicyLab原生坐标/动作桥接。
 
 没有直接复用OpenWAM整套PolicyServer，因为其包导入会拉起全部模型架构；FastWAM独立环境实测首先缺ftfy，继续安装会造成无关模型依赖耦合。当前test server仅需独立websockets运行依赖，待FastWAM训练退出后安装，避免修改正在运行的环境。新增脚本AST解析通过；尚未进行真实checkpoint加载和客户端测试。
+
+## 13:40 左右 checkpoint 与离线动作验收
+
+- FastWAM两组训练链70448均exit0。RoboDojo step1 loss1.6447（action1.2185/video0.4262），step2 loss3.5958（action2.9290/video0.6668），运行目录fastwam/robodojo/20261014_132808。
+- checkpoint审计88437已完成：两组weights各12042624505bytes；payload.step=2，trainer_state.global_step=2、batch_in_epoch=2；mot1649keys/6020823312params、proprio2keys/331776params。逐张量finite检查全通过，报告fastwam-checkpoint-audit.json。
+- 训练结束后远端clean clone ff-only到9d53118，FastWAM独立env安装websockets16.1.1。离线推理审计94246分别严格重载mot与proprio，复用真实数据第一帧和恢复的raw state；两组都生成32步finite chunk，LIBERO raw10D、RoboDojo raw20D。证据fastwam-inference-audit.log及每个run/canonical_deployment/offline-inference-audit.json。只证明重载/推理，不冒充真实仿真闭环。
+- 推理审计期间OpenWAM链72159定向SIGSTOP防GPU冲突，finally已SIGCONT恢复；它仍等待LIBERO安装63082完成（官方conda在OpenWAM目录生成临时requirements，当前未隐藏/删除这个活跃文件）。
+- IsaacSim5.1.0.0安装63080已完成；实查torch2.7.0为CUDA12.6轮子，官方IsaacLab/RoboDojo要求cu128。新链99194按官方精确torch2.7.0+cu128/vision0.22.0+cu128/audio2.7.0+cu128补齐，之后执行固定submodule的isaaclab.sh --install none。日志robodojo-isaaclab-setup.log；后续仍需官方runtime repin、CuRobo和渲染验收，不能据安装metadata声称仿真成功。
+- RoboTwin独立准备链96530：clone到projects/RoboTwin-openwam-baselines-20261014，固定OpenWAM验证SHA0aeea2d669c0f8516f4d5785f0aa33ba812c14b4；从frank自己的robotwin-render-py310只读克隆独立env robotwin-openwam-baselines-20261014。源版本torch2.4.1+cu124/sapien3.0.0b1/mplib0.2.1/curobo0.7.8符合；warp1.4.1、缺websockets需要在新env修正为官方warp1.13.0及客户端依赖，不修改已有FastWAM RoboTwin环境。clone尚未完成，后续需独立curobo源码绑定和资产检查。
