@@ -22,22 +22,26 @@ def write_json(path, value):
 
 @contextlib.contextmanager
 def claim(root, key):
-    """Kernel-held lease: process exit releases work without deleting evidence."""
-    import fcntl
+    """Server-side mkdir exclusion across independently mounted DLC containers.
+
+    Abruptly killed owners remain claimed until the job supervisor confirms
+    termination and archives active; never steal a live owner's work by timeout.
+    """
     path = root / 'claims' / key
     path.mkdir(parents=True, exist_ok=True)
-    with (path / 'lock').open('a') as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            yield False
-            return
-        try:
-            write_json(path / f'owner-{time.time_ns()}.json',
-                       dict(pid=os.getpid(), job=os.environ.get('DLC_JOB_ID'), at=time.time()))
-            yield True
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+    active = path / 'active'
+    try:
+        active.mkdir()
+    except FileExistsError:
+        yield False
+        return
+    token = uuid.uuid4().hex
+    try:
+        write_json(active / 'owner.json',
+                   dict(pid=os.getpid(), job=os.environ.get('DLC_JOB_ID'), at=time.time(), token=token))
+        yield True
+    finally:
+        active.rename(path / ('released-' + token))
 
 
 def tuples(value):

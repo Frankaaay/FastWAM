@@ -24,7 +24,6 @@ class EvaluationTests(unittest.TestCase):
         evaluation.write_json(self.root / 'plans/a--clean.json', dict(episodes=[
             dict(ordinal=i, seed=100000+i, instruction='test') for i in range(2)]))
 
-    @unittest.skipIf(sys.platform == 'win32', 'Production leases use Linux flock')
     def test_claim_has_single_owner_and_releases(self):
         with evaluation.claim(self.root, 'a--0') as owned:
             self.assertTrue(owned)
@@ -33,13 +32,10 @@ class EvaluationTests(unittest.TestCase):
         with evaluation.claim(self.root, 'a--0') as reclaimed:
             self.assertTrue(reclaimed)
 
-    @unittest.skipIf(sys.platform == 'win32', 'Production leases use Linux flock')
-    def test_claim_releases_after_worker_killed(self):
-        lockdir = self.root / 'claims/killed'
-        lockdir.mkdir(parents=True)
+    def test_killed_owner_requires_confirmed_termination_before_reclaim(self):
         child = subprocess.Popen([sys.executable, '-c',
-            "import fcntl,sys,time; f=open(sys.argv[1],'a'); fcntl.flock(f,fcntl.LOCK_EX); print('locked',flush=True); time.sleep(60)",
-            str(lockdir / 'lock')], stdout=subprocess.PIPE, text=True)
+            "import importlib.util,sys,time,pathlib; s=importlib.util.spec_from_file_location('e',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); c=m.claim(pathlib.Path(sys.argv[2]),'killed'); assert c.__enter__(); print('locked',flush=True); time.sleep(60)",
+            str(Path(evaluation.__file__)), str(self.root)], stdout=subprocess.PIPE, text=True)
         try:
             self.assertEqual(child.stdout.readline().strip(), 'locked')
             with evaluation.claim(self.root, 'killed') as other:
@@ -48,6 +44,12 @@ class EvaluationTests(unittest.TestCase):
             child.kill()
             child.wait()
             child.stdout.close()
+        with evaluation.claim(self.root, 'killed') as other:
+            self.assertFalse(other)
+        # The supervisor has observed process termination; retain its evidence.
+        active = self.root / 'claims/killed/active'
+        self.assertEqual(json.loads((active / 'owner.json').read_text())['pid'], child.pid)
+        active.rename(active.with_name('retired-confirmed-dead'))
         with evaluation.claim(self.root, 'killed') as reclaimed:
             self.assertTrue(reclaimed)
 
