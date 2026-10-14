@@ -1,6 +1,7 @@
-"""Closed-loop smoke server for the two canonical OpenWAM-reader baselines.
+"""Legacy FastWAM adaptation using an OpenWAM reader, not an OpenWAM model.
 
 Run in the FastWAM environment with the pinned OpenWAM checkout on PYTHONPATH.
+Not accepted as a provenance-aligned native benchmark baseline.
 Only transport is implemented here; OpenWAM owns layout, normalization and
 unified action mapping, and its benchmark clients own simulator conversion.
 """

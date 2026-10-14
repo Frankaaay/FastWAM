@@ -292,3 +292,9 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 - 已确认首轮及GPU进程退出后，定向安装datasets4.0.0，保留数据文件、模型/优化器/动作/latent配置不变；同时补RoboDojo官方转换器必需h5py3.14.0，不改numpy/torch。日志lingbot-datasets4-reader-repair.log：Dataset.from_parquet读出388x7动作，与PyArrow原始列逐元素完全相等。pip check明确保留3条LeRobot metadata冲突（datasets、torch、torchvision），不能声称依赖声明全绿。仍需native训练验收。
 - 新增tests/serve_lingbot_baseline.py，按显式benchmark选择官方配置，仅注入已审计权重组件装配路径与本机监听地址。新增tests/run_lingbot_libero_policy_smoke.py，复用官方Long客户端，计数真实7D有限policy动作，达到短测试上限后正常终止测试，不伪造done或成功率。两者尚未实际执行；AST检查通过。
 - 原生训练wrapper补齐官方main调用的init_logger，确保加载、训练和checkpoint日志完整；下一轮使用新输出目录。基础权重中的patch_embedding两项未使用与官方当前实现使用patch_embedding_mlp相符，不将其静默替换为FastWAM结构。
+
+## 15:42 原生 reader 通过，修正历史服务入口歧义
+
+- LingBot native reader真实读取500窗口/138090frames，样本latents(48,97,8,16)、text(512,4096)、actions/mask(30,97,4,1)均finite，日志lingbot-native-reader-v2.log。独立LingBot环境已补齐LIBERO仿真依赖，torch2.9/numpy1.26.4/datasets4版本断言保持；日志lingbot-libero-eval-dependencies.log。下一轮训练等当前OpenWAM RoboDojo链释放GPU后开始。
+- RoboDojo优先Assets阶段完整结束，继续原全量资产；repo/Assets仅链接到自己固定revision资产目录。OpenWAM首轮315256、二轮317105已终止，都在import阶段失败，没有加载checkpoint、没有动作证据。检查发现历史tests/serve_openwam_baseline.py本质上是FastWAM旧reader适配服务，不能用作OpenWAM模型。为防入口混淆，定向改名tests/serve_fastwam_openwam_reader_baseline.py并在说明中标明不计原生对齐验收；无生产逻辑改动。
+- 当前第三轮319155使用真正的OpenWAM官方scripts/deploy.py与该模型自己的safetensors checkpoint，单独bridge连接原生RoboDojo客户端。输出openwam/robodojo-closed-loop-v3，主日志openwam-robodojo-closed-loop-v3.log；启动脚本openwam-robodojo-chain-v3.py保存到run目录。按XPolicyLab OpenWAM适配约定关闭compile和DiT cache，保持原始10步同步denoise与32动作chunk。尚待服务/场景/动作检查，不能计入通过。
