@@ -433,3 +433,9 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 - FastWAM RoboDojo配置来源改为RoboDojo论文附录K和RoboDojo团队XPolicyLab适配。已直接读取论文确认Wan2.2-TI2V-5B初始化、batch256、20K训练预算；仅短测试，不启动正式20K训练。撤销此前缺OpenWAM复现配置的阻塞。
 - 用户授权恢复全量Assets下载，不把Assets包当作训练轨迹。RoboTwin既有2500条优先复用，后续另核各模型转换/latent缓存，不重复下载原始数据。
 - 实核RAM frank和当前角色可用quota1bybv9m0ixu；复用原2GPU/48CPU/256Gi/priority4实例，StartInstance返回成功，RequestId01A139FC-58B9-5F48-9228-AE61474154CA。等待实际启动/SSH；尚未恢复训练或下载。
+
+### 18:42 FastWAM RoboDojo 原生测试入口
+- 从本地XPolicyLab git对象直接读取固定53c5da5版本train.sh/model.py/deploy.py及vendored训练入口；没有修改该仓库，运行仍使用远端已固定同一SHA。
+- 新增tests/run_fastwam_robodojo_smoke.py：调用该版本原生run_training，joint14、arx_x5、384x320三相机、text128、lr1e-4、weight_decay1e-2，Wan初始化，不使用OpenWAM reader或策略checkpoint。
+- 记录论文batch256/20K与脚本默认每卡B8/GA1/epochs16。smoke明确B2/GA1、短steps/save、workers2/eval0/W&B禁用，正式预算未启动。要求相应独立数据、stats、T5缓存、Wan派生ActionDiT路径，拒绝源码tracked dirty或不同SHA。
+- AST通过；本机无GPU模型依赖，尚无真实Hydra/reader/训练证据。DSW持续Queuing，无SSH地址；没有重复申请实例。
