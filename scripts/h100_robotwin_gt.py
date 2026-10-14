@@ -140,6 +140,8 @@ def native_gt(camera, baseline, focal):
     z = -position[..., 2]
     valid = np.isfinite(position[..., :3]).all(-1) & (z > 0)
     depth = np.where(valid, z, 0).astype(np.float32)
+    if not valid.any():
+        raise ValueError('Camera has no finite positive depth')
     labels = camera.get_picture('Segmentation')
     disparity = np.zeros_like(depth)
     np.divide(focal * baseline, depth, out=disparity, where=valid)
@@ -220,6 +222,11 @@ class Capture:
             self.file.flush(); print('FRAMES', self.index, flush=True)
 
     def close(self):
+        import numpy as np
+        self.file.create_dataset('frame_index', data=np.arange(self.index))
+        self.file.create_dataset('timestamp', data=np.arange(self.index) / 15)
+        self.file.attrs['depth_units'] = 'meters'
+        self.file.attrs['depth_definition'] = 'camera_z'
         self.file.close()
         errors = []
         for name, encoder in self.encoders.items():
@@ -278,6 +285,12 @@ def episode(index):
     from collect_robotwin_missing import verify_raw
     # JPEG vlen arrays are decoded from their byte buffers by the existing validator.
     assert verify_raw(destination / 'episode.hdf5') == len(qpos)
+    for camera in capture.encoders:
+        checked = subprocess.run([str(ROOT / 'bin/ffmpeg'), '-v', 'error', '-xerror',
+            '-i', str(destination / (camera + '.mp4')), '-progress', 'pipe:1', '-f', 'null', '-'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        counts = re.findall(r'^frame=(\d+)$', checked.stdout, re.MULTILINE)
+        assert counts and int(counts[-1]) == len(qpos), (camera, counts[-1:])
     write_json(destination / 'accepted.json', dict(row, path=str(destination / 'episode.hdf5'),
         source_sha=source_sha(), seconds=time.monotonic()-start, scene_info=scene,
         gt=dict(depth='camera Z in meters float32; invalid=0', segmentation='raw uint32 simulator IDs',
@@ -321,9 +334,25 @@ def pool(worker, limit):
     write_json(ROOT / f'worker-{worker}-{os.environ["SLURM_JOB_ID"]}.json', dict(failed=failures))
 
 
+def finalize():
+    plan = json.loads((ROOT / 'inputs/plan.json').read_text())
+    accepted = [json.loads((ROOT / 'episodes' / f"{r['source_episode_index']:04d}/accepted.json").read_text())
+                for r in plan['rows']]
+    assert len(accepted) == 2500
+    assert {r['source_episode_index'] for r in accepted} == set(range(2500))
+    assert set(collections.Counter(r['task'] for r in accepted).values()) == {50}
+    assert sum(r['length'] for r in accepted) == plan['expected_frames']
+    write_json(ROOT / 'manifest.json', dict(episodes=accepted, source_manifest_sha256=plan['source_manifest_sha256'],
+        frames=sum(r['length'] for r in accepted), fps=15, resolution=[240, 320]))
+    write_json(ROOT / 'ready.json', dict(episodes=2500, tasks=50, frames=plan['expected_frames'],
+        source_sha=source_sha(), manifest_sha256=hashlib.sha256((ROOT / 'manifest.json').read_bytes()).hexdigest(),
+        validation='same-source qpos, task success, six-camera calibration, full JPEG and MP4 decode',
+        gt='same-capture depth_m, valid, disparity_px, mesh_id, actor_id, occluded, outside_right_or_left_fov'))
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=['export', 'prepare', 'episode', 'pool'])
+    parser.add_argument('mode', choices=['export', 'prepare', 'episode', 'pool', 'finalize'])
     parser.add_argument('--index', type=int)
     parser.add_argument('--worker', type=int, default=0)
     parser.add_argument('--smoke', action='store_true')
@@ -331,4 +360,5 @@ if __name__ == '__main__':
     if args.mode == 'export': export_h800()
     elif args.mode == 'prepare': prepare()
     elif args.mode == 'episode': episode(args.index)
+    elif args.mode == 'finalize': finalize()
     else: pool(args.worker, args.smoke)

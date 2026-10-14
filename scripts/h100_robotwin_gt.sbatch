@@ -29,4 +29,5 @@ else
     test -f "$root/episodes/0000/accepted.json"
     test -f "$root/episodes/0016/accepted.json"
     srun --gpus-per-task=1 --kill-on-bad-exit=1 bash -c 'exec "$1" scripts/h100_robotwin_gt.py pool --worker "$SLURM_PROCID"' bash "$python"
+    srun --ntasks=1 "$python" scripts/h100_robotwin_gt.py finalize
 fi
