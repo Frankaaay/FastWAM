@@ -12,6 +12,52 @@ sys.path.insert(0, str(repo / 'scripts/c2r'))
 import evaluate
 
 
+def check_scene_replay(output):
+    """Exercise native expert preparation and repeated cross-task scene replay."""
+    official, device = evaluate.setup_runtime()
+    factory = official.class_decorator
+    snapshots = {}
+
+    def snapshot(env):
+        return [(actor.get_name(), np.concatenate([actor.get_pose().p, actor.get_pose().q]).tolist())
+                for actor in env.scene.get_all_actors()]
+
+    def create(task):
+        env = factory(task)
+        setup = env.setup_demo
+
+        def capture(*args, **kwargs):
+            result = setup(*args, **kwargs)
+            snapshots[(task, kwargs['seed'])] = snapshot(env)
+            return result
+
+        env.setup_demo = capture
+        return env
+
+    plans = []
+    official.class_decorator = create
+    for task in ('dump_bin_bigbin', 'click_bell', 'put_bottles_dustbin'):
+        case = dict(task=task, phase='randomized')
+        plan = evaluate.prepare_case(official, device, case, 1)
+        episode = plan['episodes'][0]
+        plans.append((case, episode, snapshots[(task, episode['seed'])]))
+    official.class_decorator = factory
+    records = []
+    for case, episode, expected in plans:
+        env, config = evaluate.environment(official, device, case['task'], case['phase'])
+        for repeat in range(2):
+            evaluate.random.setstate(evaluate.tuples(episode['python_before_scene']))
+            env.setup_demo(now_ep_num=episode['ordinal'], seed=episode['seed'], is_test=True, **config)
+            actual = snapshot(env)
+            assert [x[0] for x in actual] == [x[0] for x in expected], case
+            assert np.allclose([x[1] for x in actual], [x[1] for x in expected],
+                               atol=1e-6, rtol=0), (case, repeat)
+            env.close_env()
+        records.append(dict(**case, seed=episode['seed'], repeats=2, actor_count=len(expected), passed=True))
+    evaluate.write_json(output, dict(passed=True, checks=records))
+    print('SCENE_REPLAY_PASS', json.dumps(records), flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', type=Path, required=True)
@@ -19,7 +65,11 @@ def main():
     parser.add_argument('--task', default='click_bell')
     parser.add_argument('--episodes', type=int, default=1)
     parser.add_argument('--phases', nargs='+', choices=['clean', 'randomized'], default=['clean', 'randomized'])
+    parser.add_argument('--scene-replay-only', action='store_true')
     args = parser.parse_args()
+    if args.scene_replay_only:
+        check_scene_replay(args.output)
+        return
     manifest = json.loads((args.root / 'manifest.json').read_text())
     official, device = evaluate.setup_runtime()
     from fastwam_c2r.policy import C2RPolicy
