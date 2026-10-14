@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import random
 import sys
+import subprocess
 import time
 import traceback
 
@@ -31,6 +32,24 @@ def claim(root, key):
 
 def tuples(value):
     return tuple(map(tuples, value)) if isinstance(value, list) else value
+
+
+def ready_cases(root, cases):
+    """Consume completed plans while other workers finish their expert checks."""
+    pending = list(cases)
+    deadline = time.monotonic() + 6 * 3600
+    while pending:
+        ready = [case for case in pending if (root / 'plans' / (case['task'] + '--' + case['phase'] + '.json')).exists()]
+        for case in ready:
+            pending.remove(case)
+            yield case
+        if pending and not ready:
+            failures = list((root / 'errors').glob('prepare--*.json'))
+            if failures:
+                raise RuntimeError(f'Expert preparation failed: {failures}')
+            if time.monotonic() > deadline:
+                raise TimeoutError('Expert preparation did not finish within six hours')
+            time.sleep(10)
 
 
 def setup_runtime():
@@ -78,6 +97,8 @@ def prepare_case(official, device, case, count):
     random.seed(0)
     started = time.time()
     while len(records) < count:
+        if seed >= 110000:
+            raise RuntimeError(f'Could not prepare {count} valid episodes after 10000 candidates: {case}')
         ordinal = len(records)
         before = random.getstate()
         try:
@@ -97,18 +118,16 @@ def prepare_case(official, device, case, count):
             records.append(dict(ordinal=ordinal, seed=seed, instruction=instruction,
                                 python_before_scene=before_rollout, python_after_instruction=random.getstate(),
                                 numpy_after_instruction=[npstate[0], npstate[1].tolist(), *npstate[2:]]))
-            env.close_env(clear_cache=True)
+            env.close_env(clear_cache=((ordinal + 2) % config['clear_cache_freq'] == 0))
             print('PLAN', case['task'], case['phase'], ordinal, seed, flush=True)
         except official.UnStableError as exc:
             env.close_env()
             rejected.append(dict(seed=seed, reason=repr(exc), python_before=before))
-        except AssertionError as exc:
-            # Official expert validation rejects a seed when no grasp pose exists.
-            if str(exc) != 'target_pose cannot be None for move action.':
-                raise
+        except Exception as exc:
+            # Match official expert/setup rejection, never catch rollout failures.
             env.close_env()
-            rejected.append(dict(seed=seed, reason=repr(exc), python_before=before))
-        # Unexpected configuration/runtime errors are not treated as invalid seeds.
+            rejected.append(dict(seed=seed, reason=repr(exc), traceback=traceback.format_exc(), python_before=before))
+            print('REJECT', case, seed, traceback.format_exc(), flush=True)
         seed += 1
     return dict(**case, episodes=records, rejected=rejected, seconds=time.time()-started)
 
@@ -144,7 +163,7 @@ def rollout_case(official, device, model, case, episodes):
                       success=bool(env.eval_success), actions=env.take_action_cnt, observations=observations,
                       inference_seconds=sum(model.inference_seconds), setup_seconds=setup_seconds,
                       observation_seconds=observation_seconds, action_seconds=action_seconds, seconds=time.time()-start)
-        env.close_env(clear_cache=True)
+        env.close_env(clear_cache=((episode['ordinal'] + 2) % config['clear_cache_freq'] == 0))
         results.append(result)
         print('EPISODE', json.dumps(result), flush=True)
     return results
@@ -165,6 +184,14 @@ def summarize(root, manifest):
     per_case = []
     for case in manifest['cases']:
         values = [r for r in rows if (r['task'], r['phase']) == (case['task'], case['phase'])]
+        expected = {}
+        if values:
+            plan = json.loads((root / 'plans' / (case['task'] + '--' + case['phase'] + '.json')).read_text())
+            expected = {ep['ordinal']: ep for ep in plan['episodes']}
+        for value in values:
+            episode = expected[value['ordinal']]
+            if (value['seed'], value['instruction']) != (episode['seed'], episode['instruction']):
+                raise ValueError(f'Seed/instruction mismatch: {case}, {value["ordinal"]}')
         complete = {v['ordinal'] for v in values} == set(range(manifest['episodes']))
         per_case.append(dict(**case, completed=len(values), successes=sum(v['success'] for v in values),
                              success_rate=sum(v['success'] for v in values)/len(values) if complete else None))
@@ -182,18 +209,25 @@ def summarize(root, manifest):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('mode', choices=['prepare', 'rollout', 'summary'])
+    parser.add_argument('mode', choices=['prepare', 'rollout', 'pipeline', 'summary'])
     parser.add_argument('--root', type=Path, required=True)
     args = parser.parse_args()
     root = args.root.resolve()
     manifest = json.loads((root / 'manifest.json').read_text())
+    if args.mode == 'pipeline':
+        subprocess.run([sys.executable, __file__, 'prepare', '--root', str(root)], check=True)
+        args.mode = 'rollout'
     if args.mode == 'summary':
-        print(json.dumps(summarize(root, manifest), indent=2))
+        import fcntl
+        with (root / 'aggregate.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            print(json.dumps(summarize(root, manifest), indent=2))
         return
     official, device = setup_runtime()
     model = None
     errors = []
-    for case in manifest['cases']:
+    cases = manifest['cases'] if args.mode == 'prepare' else ready_cases(root, manifest['cases'])
+    for case in cases:
         key = case['task'] + '--' + case['phase']
         if args.mode == 'prepare':
             if not claim(root, 'prepare--' + key):

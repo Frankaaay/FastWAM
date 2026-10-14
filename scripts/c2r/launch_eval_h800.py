@@ -11,7 +11,7 @@ import time
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', type=Path, required=True)
-    parser.add_argument('--mode', choices=['prepare', 'rollout'], required=True)
+    parser.add_argument('--mode', choices=['prepare', 'rollout', 'pipeline'], required=True)
     parser.add_argument('--gpus', type=int, required=True)
     parser.add_argument('--workers-per-gpu', type=int, required=True)
     parser.add_argument('--source-sha', required=True)
@@ -55,6 +55,10 @@ def main():
     for _, log, _ in children:
         log.close()
     (logs / 'exit.json').write_text(json.dumps(dict(codes=codes, seconds=time.time()-started, source_sha=sha)))
+    if args.mode in ('rollout', 'pipeline'):
+        with (logs / 'summary.log').open('x') as log:
+            subprocess.run([str(py), str(repo / 'scripts/c2r/evaluate.py'), 'summary', '--root', str(args.root)],
+                           env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
     if any(codes.values()):
         raise RuntimeError(codes)
 
