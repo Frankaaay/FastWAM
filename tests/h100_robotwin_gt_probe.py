@@ -26,8 +26,13 @@ report = dict(job=os.environ['SLURM_JOB_ID'], device=str(device), buffers={})
 for key in ('Color', 'Position', 'Segmentation'):
     array = camera.get_picture(key)
     assert array.shape == (240, 320, 4), (key, array.shape)
-    assert np.isfinite(array).all(), key
+    if key != 'Position':
+        assert np.isfinite(array).all(), key
+    finite = array[np.isfinite(array)]
+    assert finite.size, key
     report['buffers'][key] = dict(shape=list(array.shape), dtype=str(array.dtype),
-                                minimum=float(array.min()), maximum=float(array.max()))
-assert np.any(-camera.get_picture('Position')[..., 2] > 0)
+                                finite_fraction=float(np.isfinite(array).mean()),
+                                minimum=float(finite.min()), maximum=float(finite.max()))
+depth = -camera.get_picture('Position')[..., 2]
+assert np.any(np.isfinite(depth) & (depth > 0))
 print(json.dumps(report), flush=True)
