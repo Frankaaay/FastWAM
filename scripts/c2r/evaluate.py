@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 import random
 import sys
-import subprocess
 import time
 import traceback
 
@@ -20,35 +19,64 @@ def write_json(path, value):
     tmp.replace(path)
 
 
+@contextlib.contextmanager
 def claim(root, key):
+    """Kernel-held lease: process exit releases work without deleting evidence."""
+    import fcntl
     path = root / 'claims' / key
-    try:
-        path.mkdir(parents=True, exist_ok=False)
-    except FileExistsError:
-        return False
-    write_json(path / 'owner.json', dict(pid=os.getpid(), job=os.environ.get('DLC_JOB_ID'), at=time.time()))
-    return True
+    path.mkdir(parents=True, exist_ok=True)
+    with (path / 'lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            write_json(path / f'owner-{time.time_ns()}.json',
+                       dict(pid=os.getpid(), job=os.environ.get('DLC_JOB_ID'), at=time.time()))
+            yield True
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def tuples(value):
     return tuple(map(tuples, value)) if isinstance(value, list) else value
 
 
-def ready_cases(root, cases):
-    """Consume completed plans while other workers finish their expert checks."""
+def ready_cases(root, cases, episodes=None, prepare=False):
+    """Rescan unfinished work so released leases are reclaimed after preemption."""
     pending = list(cases)
-    deadline = time.monotonic() + 6 * 3600
+    deadline = time.monotonic() + 24 * 3600
     while pending:
-        ready = [case for case in pending if (root / 'plans' / (case['task'] + '--' + case['phase'] + '.json')).exists()]
+        ready = []
+        for case in list(pending):
+            key = case['task'] + '--' + case['phase']
+            completed_path = root / 'completed' / (key + '.json')
+            if episodes is not None and completed_path.exists():
+                pending.remove(case)
+                continue
+            has_plan = (root / 'plans' / (key + '.json')).exists()
+            if episodes is not None:
+                rows = [json.loads(p.read_text()) for p in (root / 'results').glob(key + '--*.json')]
+                if any(row.get('error') for row in rows):
+                    raise RuntimeError(f'Rollout failure requires review: {key}')
+                done = {ep['ordinal'] for row in rows for ep in row.get('episodes', [])}
+                if done == set(range(episodes)):
+                    write_json(completed_path, dict(episodes=episodes))
+                    pending.remove(case)
+                    continue
+            if has_plan or prepare:
+                ready.append(case)
         for case in ready:
-            pending.remove(case)
+            if episodes is None:
+                pending.remove(case)
             yield case
-        if pending and not ready:
+        if pending:
             failures = list((root / 'errors').glob('prepare--*.json'))
             if failures:
                 raise RuntimeError(f'Expert preparation failed: {failures}')
             if time.monotonic() > deadline:
-                raise TimeoutError('Expert preparation did not finish within six hours')
+                raise TimeoutError('Evaluation did not finish within 24 hours')
             time.sleep(10)
 
 
@@ -132,7 +160,22 @@ def prepare_case(official, device, case, count):
     return dict(**case, episodes=records, rejected=rejected, seconds=time.time()-started)
 
 
-def rollout_case(official, device, model, case, episodes):
+def initialize_task_state(task, env):
+    # Same scene-derived fields as the pinned RoboTwin experts/OpenWAM helper.
+    if task not in ('open_laptop', 'place_object_scale', 'put_object_cabinet'):
+        return
+    module = sys.modules[type(env).__module__]
+    if task == 'open_laptop':
+        face = module.get_face_prod(env.laptop.get_pose().q, [1, 0, 0], [1, 0, 0])
+        env.arm_tag = module.ArmTag('left' if face > 0 else 'right')
+    else:
+        position = env.object.get_pose().p
+        env.arm_tag = module.ArmTag('right' if position[0] > 0 else 'left')
+        if task == 'put_object_cabinet':
+            env.origin_z = position[2]
+
+
+def rollout_case(official, device, model, case, episodes, on_episode=None):
     import numpy as np
     env, config = environment(official, device, case['task'], case['phase'])
     results = []
@@ -140,6 +183,7 @@ def rollout_case(official, device, model, case, episodes):
         start = time.time()
         random.setstate(tuples(episode['python_before_scene']))
         env.setup_demo(now_ep_num=episode['ordinal'], seed=episode['seed'], is_test=True, **config)
+        initialize_task_state(case['task'], env)
         random.setstate(tuples(episode['python_after_instruction']))
         state = episode['numpy_after_instruction']
         np.random.set_state((state[0], np.asarray(state[1], dtype=np.uint32), *state[2:]))
@@ -165,6 +209,8 @@ def rollout_case(official, device, model, case, episodes):
                       observation_seconds=observation_seconds, action_seconds=action_seconds, seconds=time.time()-start)
         env.close_env(clear_cache=((episode['ordinal'] + 2) % config['clear_cache_freq'] == 0))
         results.append(result)
+        if on_episode is not None:
+            on_episode(result)
         print('EPISODE', json.dumps(result), flush=True)
     return results
 
@@ -214,9 +260,6 @@ def main():
     args = parser.parse_args()
     root = args.root.resolve()
     manifest = json.loads((root / 'manifest.json').read_text())
-    if args.mode == 'pipeline':
-        subprocess.run([sys.executable, __file__, 'prepare', '--root', str(root)], check=True)
-        args.mode = 'rollout'
     if args.mode == 'summary':
         import fcntl
         with (root / 'aggregate.lock').open('a') as lock:
@@ -226,49 +269,73 @@ def main():
     official, device = setup_runtime()
     model = None
     errors = []
-    cases = manifest['cases'] if args.mode == 'prepare' else ready_cases(root, manifest['cases'])
+    cases = manifest['cases'] if args.mode == 'prepare' else ready_cases(
+        root, manifest['cases'], manifest['episodes'], prepare=args.mode == 'pipeline')
     for case in cases:
         key = case['task'] + '--' + case['phase']
-        if args.mode == 'prepare':
-            if not claim(root, 'prepare--' + key):
+        if args.mode == 'prepare' or not (root / 'plans' / (key + '.json')).exists():
+            if (root / 'plans' / (key + '.json')).exists():
                 continue
-            logpath = root / 'logs' / ('prepare--' + key + '.log')
-            logpath.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                with logpath.open('x') as log, contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
-                    plan = prepare_case(official, device, case, manifest['episodes'])
-                write_json(root / 'plans' / (key + '.json'), plan)
-            except Exception:
-                error = traceback.format_exc()
-                write_json(root / 'errors' / ('prepare--' + key + '.json'), dict(error=error))
-                errors.append(error)
-                print(error, flush=True)
-            continue
+            with claim(root, 'prepare--' + key) as acquired:
+                if not acquired or (root / 'plans' / (key + '.json')).exists():
+                    continue
+                logpath = root / 'logs' / (f'prepare--{key}--{time.time_ns()}.log')
+                logpath.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    with logpath.open('x') as log, contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
+                        plan = prepare_case(official, device, case, manifest['episodes'])
+                    write_json(root / 'plans' / (key + '.json'), plan)
+                except Exception:
+                    error = traceback.format_exc()
+                    write_json(root / 'errors' / ('prepare--' + key + '.json'), dict(error=error))
+                    errors.append(error)
+                    print(error, flush=True)
+            if args.mode == 'prepare' or not (root / 'plans' / (key + '.json')).exists():
+                continue
         plan = json.loads((root / 'plans' / (key + '.json')).read_text())
         for offset in range(0, manifest['episodes'], manifest['chunk_size']):
             chunkkey = key + f'--{offset:03d}'
-            if not claim(root, 'rollout--' + chunkkey):
-                continue
-            started = time.time()
-            record = dict(**case, offset=offset, job=os.environ.get('DLC_JOB_ID'), pid=os.getpid())
-            logpath = root / 'logs' / ('rollout--' + chunkkey + '.log')
-            logpath.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                with logpath.open('x') as log, contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
-                    if model is None:
-                        from fastwam_c2r.policy import C2RPolicy
-                        model = C2RPolicy(manifest['checkpoint'], manifest['training_root'])
-                    record['episodes'] = rollout_case(official, device, model, case,
-                        plan['episodes'][offset:offset+manifest['chunk_size']])
-            except Exception:
-                record['error'] = traceback.format_exc()
-                errors.append(record['error'])
-                print(record['error'], flush=True)
-            record['seconds'] = time.time() - started
-            write_json(root / 'results' / (chunkkey + '.json'), record)
-            print('DONE', chunkkey, record['seconds'], bool(record.get('error')), flush=True)
-            if record.get('error'):
-                break
+            resultpath = root / 'results' / (chunkkey + '.json')
+            chunk = plan['episodes'][offset:offset+manifest['chunk_size']]
+            if resultpath.exists():
+                existing = json.loads(resultpath.read_text())
+                if not existing.get('error') and {e['ordinal'] for e in existing.get('episodes', [])} == {e['ordinal'] for e in chunk}:
+                    continue
+            with claim(root, 'rollout--' + chunkkey) as acquired:
+                if not acquired:
+                    continue
+                record = json.loads(resultpath.read_text()) if resultpath.exists() else dict(
+                    **case, offset=offset, episodes=[])
+                if record.get('error'):
+                    errors.append(record['error'])
+                    break
+                chunk = plan['episodes'][offset:offset+manifest['chunk_size']]
+                finished = {ep['ordinal'] for ep in record['episodes']}
+                remaining = [ep for ep in chunk if ep['ordinal'] not in finished]
+                if not remaining:
+                    continue
+                started = time.time()
+                record.update(job=os.environ.get('DLC_JOB_ID'), pid=os.getpid())
+                logpath = root / 'logs' / (f'rollout--{chunkkey}--{time.time_ns()}.log')
+                logpath.parent.mkdir(parents=True, exist_ok=True)
+                def save_episode(ep):
+                    record['episodes'].append(ep)
+                    write_json(resultpath, record)
+                try:
+                    with logpath.open('x') as log, contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
+                        if model is None:
+                            from fastwam_c2r.policy import C2RPolicy
+                            model = C2RPolicy(manifest['checkpoint'], manifest['training_root'])
+                        rollout_case(official, device, model, case, remaining, on_episode=save_episode)
+                except Exception:
+                    record['error'] = traceback.format_exc()
+                    errors.append(record['error'])
+                    print(record['error'], flush=True)
+                record['seconds'] = record.get('seconds', 0.) + time.time() - started
+                write_json(resultpath, record)
+                print('DONE', chunkkey, record['seconds'], bool(record.get('error')), flush=True)
+                if record.get('error'):
+                    break
         if errors:
             break
     if errors:

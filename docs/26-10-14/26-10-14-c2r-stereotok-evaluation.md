@@ -60,3 +60,11 @@
 - snapshot time=1791950818.8734612（北京时间12:06:58.873）：97个plan、437个chunk文件、2165个已发布episode。39组状态27Running/12Queuing；用每组实际Pods[0].GmtStartTime至同一快照的GPU时间积分=61.3012564 GPU小时，当前35.3173838回合/GPU小时。排队24GPU未计。约为旧全量61.3945的0.57525倍（当前低42.47%）、ruhu12.9904的2.71873倍。当前长任务优先且含准备/冷启动，未结束，不是完整任务混合的最终速度或纯优化因果倍数。状态原始快照speed-status-1206.json可复算。
 - 发现实际rollout异常，不能以Running宣称健康：open_laptop clean offsets5/10/15明确报AttributeError: open_laptop object has no attribute arm_tag。源码check_success读取self.arm_tag；该字段只在play_once设定，当前rollout创建独立env后setup_demo没有调用play_once，准备与rollout进程间未传递该任务状态。需要定向复核官方/ruhu任务初始化合同，保留原计划、指令、成功episode与错误证据，再以新发布源码和独立运行clone修复缺失回合；不得热改d91运行clone或把失败当策略失败。
 - GetPodLogs对单条EVAL_SNAPSHOT大JSON在约4KiB截断，故尚未取得完整错误列表/phase counts/exits；后续CPU检查应分行输出简短记录，不再把全部trace堆在一行。437chunk与2165episode存在4个非完整chunk，需逐一核对，不能猜测第四个根因。
+## 12:12起资源纠正与慢速调查
+
+- 用户先要求停止75卡、改16卡，已对原39个DLC逐个StopJob并GetJob确认39/39 Stopped。随后用户最新明确为固定资源16卡打底、额外闲时资源补充；额外使用ForceQuotaOverSold，总申请暂沿用原75卡上限。旧39任务不重启。当前自己的DSW单卡仅用于准备/检查，正式固定16卡启动前停止，避免额外固定占卡。
+- CPU只读诊断dlc1wbll7tycnj5m成功（1CPU/0GPU/ForceQuotaOverSold），停止后结果488chunks/2420完整回合；四个错误均open_laptop clean offsets0/5/10/15缺失arm_tag。98plans完整，put_bottles_dustbin randomized已准备97/100；put_object_cabinet randomized约36/100，候选拒绝多（last valid seed100725），需保留原门禁，不跳过或缩小100回合。
+- 2420回合累积298120.636秒，setup18563.756（6.23%）、observation31900.967（10.70%）、action247654.044（83.07%）；action中包含模型推理16207.037（占总5.44%）。930844动作，median389动作/回合，wall median109.714秒。推理缓存优化作用于很小的占比，不支持全量同比例加速。当前阶段长case优先与旧完整全量任务混合不同，42.5%差不能直接作为同条件回归结论。
+- root原因：manifest分进程后没有恢复expert-only任务状态。只读核对ruhu已验证的OpenWAM task_state helper以及本地三个任务play_once/check_success；在evaluate.py rollout setup后按初始物体位姿恢复open_laptop/place_object_scale/put_object_cabinet的arm_tag与cabinet.origin_z，不跑专家动作、不更改种子/指令/成功阈值。
+- 为落实用户动态闲时加减卡要求，现有claim改为Linux内核flock租约，逐回合原子落盘，日志/owner按attempt保留；worker退出自动释放锁，存活worker重新扫描未完成工作。只在独立接续root启用，原目录与失败证据不覆盖。已完成case标记减少CPFS扫描；prepare与rollout同worker循环，避免长prepare阻塞全局或被抢占后永久留下mkdir claim。
+- 本地6个CPU测试：4通过、2个Linux flock测试明确跳过，远端CPFS仍需执行退出释放测试。已有render benchmark扩展指定task/回合数，旧执行候选eager渲染+每次encode prompt，与当前deferred+缓存在同模型/EEF32/场景计划下对照；两phase反转先后顺序观察冷缓存偏置，保存像素/动作/EEF状态一致性和分阶段时间，不用旧qpos协议替代当前科学合同。尚未完成GPU对照，不提前宣称速度或恢复完成。

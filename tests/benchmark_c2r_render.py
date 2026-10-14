@@ -16,6 +16,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--task', default='click_bell')
+    parser.add_argument('--episodes', type=int, default=1)
     args = parser.parse_args()
     manifest = json.loads((args.root / 'manifest.json').read_text())
     official, device = evaluate.setup_runtime()
@@ -24,10 +26,11 @@ def main():
     factory = official.class_decorator
     all_results = []
     for phase in ('clean', 'randomized'):
-        case = dict(task='click_bell', phase=phase)
-        plan = json.loads((args.root / 'plans' / f'click_bell--{phase}.json').read_text())
+        case = dict(task=args.task, phase=phase)
+        plan = json.loads((args.root / 'plans' / f'{args.task}--{phase}.json').read_text())
         runs = {}
-        for mode in ('eager', 'deferred'):
+        # Reverse the order in the second condition to expose warm-cache bias.
+        for mode in (('eager', 'deferred') if phase == 'clean' else ('deferred', 'eager')):
             trace = dict(pixels=[], actions=[], states=[])
             def create(task):
                 env = factory(task)
@@ -49,7 +52,14 @@ def main():
                 env.take_action = act
                 return env
             official.class_decorator = create
-            result = evaluate.rollout_case(official, device, model, case, plan['episodes'][:1])
+            policy_step = model.step
+            if mode == 'eager':
+                def uncached_step(env, obs):
+                    model._prompt = None
+                    return policy_step(env, obs)
+                model.step = uncached_step
+            result = evaluate.rollout_case(official, device, model, case, plan['episodes'][:args.episodes])
+            model.step = policy_step
             runs[mode] = dict(result=result, trace=trace)
         official.class_decorator = factory
         a, b = runs['eager'], runs['deferred']
