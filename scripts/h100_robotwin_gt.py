@@ -172,11 +172,15 @@ class Capture:
         self.index = 0
         self.encoders = {}
         self.destination = destination
+        self.timings = collections.Counter()
 
     def append(self, env):
         import cv2
         import numpy as np
+        tick = time.monotonic()
         obs = env.get_obs()
+        self.timings['observation_seconds'] += time.monotonic() - tick
+        tick = time.monotonic()
         cameras = dict(zip(env.cameras.static_camera_name, env.cameras.static_camera_list))
         cameras.update(left_camera=env.cameras.left_camera, right_camera=env.cameras.right_camera)
         cameras.update({name: camera for name, _, camera, _ in env.cameras.stereo_pairs})
@@ -187,6 +191,8 @@ class Capture:
             for c, value in zip(names, gt):
                 obs['observation'][c].update(value)
         np.testing.assert_allclose(obs['joint_action']['vector'], self.expected[self.index], atol=1e-5, rtol=0)
+        self.timings['gt_seconds'] += time.monotonic() - tick
+        tick = time.monotonic()
         def append_group(group, data):
             for key, value in data.items():
                 if isinstance(value, dict):
@@ -217,6 +223,7 @@ class Capture:
                                              compression_opts=1, shuffle=True)
                     ds = group[key]; ds.resize(self.index + 1, axis=0); ds[self.index] = array
         append_group(self.file, obs)
+        self.timings['write_seconds'] += time.monotonic() - tick
         self.index += 1
         if self.index % 30 == 0:
             self.file.flush(); print('FRAMES', self.index, flush=True)
@@ -237,7 +244,7 @@ class Capture:
             raise RuntimeError(f'Video encoding failed: {errors}')
 
 
-def episode(index):
+def episode(index, output_root=None):
     import importlib
     import numpy as np
     import random
@@ -246,7 +253,7 @@ def episode(index):
     import yaml
     plan = json.loads((ROOT / 'inputs/plan.json').read_text())
     row = next(r for r in plan['rows'] if r['source_episode_index'] == index)
-    episode_root = ROOT / 'episodes' / f'{index:04d}'
+    episode_root = (output_root or ROOT) / 'episodes' / f'{index:04d}'
     episode_root.mkdir(parents=True, exist_ok=True)
     if (episode_root / 'accepted.json').exists():
         raise FileExistsError('Episode is already accepted')
@@ -289,6 +296,7 @@ def episode(index):
     try:
         env.setup_demo(now_ep_num=row['episode'], seed=row['seed'], **options)
         env.set_path_lst(options)
+        setup_seconds = time.monotonic() - start
         scene = env.play_once()
         assert env.check_success(), 'Task success check failed'
         assert capture.index == len(qpos), (capture.index, len(qpos))
@@ -296,6 +304,7 @@ def episode(index):
         capture.close()
         env.close_env(clear_cache=True)
     from collect_robotwin_missing import verify_raw
+    validate_start = time.monotonic()
     # JPEG vlen arrays are decoded from their byte buffers by the existing validator.
     assert verify_raw(destination / 'episode.hdf5') == len(qpos)
     for camera in capture.encoders:
@@ -306,6 +315,8 @@ def episode(index):
         assert counts and int(counts[-1]) == len(qpos), (camera, counts[-1:])
     write_json(episode_root / 'accepted.json', dict(row, path=str(destination / 'episode.hdf5'),
         source_sha=source_sha(), seconds=time.monotonic()-start, scene_info=scene, device=device_record,
+        timings=dict(capture.timings, setup_seconds=setup_seconds,
+                     validation_seconds=time.monotonic()-validate_start),
         gt=dict(depth='camera Z in meters float32; invalid=0', segmentation='raw uint32 simulator IDs',
                 disparity='positive fx*baseline/Z in pixels',
                 occlusion='cross-eye nearest-pixel depth test; tolerance=max(2mm,0.5%Z)',
@@ -370,9 +381,10 @@ if __name__ == '__main__':
     parser.add_argument('--index', type=int)
     parser.add_argument('--worker', type=int, default=0)
     parser.add_argument('--smoke', action='store_true')
+    parser.add_argument('--output-root', type=Path)
     args = parser.parse_args()
     if args.mode == 'export': export_h800()
     elif args.mode == 'prepare': prepare()
-    elif args.mode == 'episode': episode(args.index)
+    elif args.mode == 'episode': episode(args.index, args.output_root)
     elif args.mode == 'finalize': finalize()
     else: pool(args.worker, args.smoke)
