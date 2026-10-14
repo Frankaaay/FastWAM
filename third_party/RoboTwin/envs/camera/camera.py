@@ -304,7 +304,7 @@ class Camera:
         """Capture stereo RGB and native GT through one synchronized GPU batch."""
         cameras = [self.left_camera, self.right_camera, *self.static_camera_list,
                    *(right for _, _, right, _ in self.stereo_pairs)]
-        assert len(cameras) == 6
+        assert len(self.stereo_pairs) == 3 and len({id(camera) for camera in cameras}) == len(cameras)
         self._capture_indices = {id(camera): i for i, camera in enumerate(cameras)}
         self._capture_systems = sapien.render.RenderSystemGroup([render_system])
         self._capture_group = self._capture_systems.create_camera_group(
