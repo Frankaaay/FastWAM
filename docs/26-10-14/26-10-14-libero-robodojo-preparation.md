@@ -244,3 +244,13 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 - LingBot官方LIBERO发布数据为LIBERO-Long，来源robbyant/libero-long-lerobot revision8c0313b1c7cd9fa3798798479cbf59b11af8979d，API usedStorage4693296349bytes。启动完整原生data/meta/videos/latents下载PID220180到datasets/LingBot-LIBERO-Long-8c0313b，日志lingbot-va-libero-native-download.log，2507目标文件；不以FastWAM/OpenWAM数据加工替代。官方dataset缺empty_emb.pt，后续须按其T5 encoder生成，不使用其它模型缓存；尚未验证reader。
 
 本轮实现进展和已核验活跃等待均有PID依据；八组目标未完成，持续目标保持active，无正式训练。
+## 14:50 用户明确最短 smoke 验收与九项计数
+
+用户明确优先尽快证明代码跑通：训练只需1至2个更新、checkpoint检查、少量真实仿真动作，配置按已确认来源表核对；无需完整episode或分数复现。计数统一九项，包含FastWAM RoboTwin历史完成但配置仍需复核。
+
+- OpenWAM RoboTwin接受为smoke通过：clean400步自然exit0，randomized在已实际执行346步后按用户最新指示SIGINT停止（退出130，不是自然exit0），服务随父链finally退出。checkpoint报告、真实推理日志与动作计数已核对，证据openwam/robotwin-closed-loop-v2/smoke-acceptance.json；当前2/9明确通过，另1/9历史完成待复核。
+- FastWAM原版LIBERO训练215003已exit0，loss1.7995/5.2131；运行fastwam/libero-native/20261014_144406。审计240346通过：payload.step=2，weights12041735545bytes，mot1649keys、proprio_encoder2keys全部finite，证据checkpoint-smoke-audit.json。原版文本缓存40条/128，无截断；仿真尚未通过。
+- FastWAM官方评测import实测缺robosuite。训练结束后才启动独立FastWAMenv评测依赖链241144，保持numpy1.26.4及既有模型版本，添加robosuite1.4/mujoco3.3.2/bddl1.0.1等仿真依赖；日志fastwam-native-libero-eval-dependencies.log。没有改动独立OpenWAM LIBERO模拟器环境。
+- 新增tests/run_native_libero_smoke.py，复用官方eval_libero_single的全部预处理、模型推理、动作转换和episode执行，仅在test进程限制每套8个policy动作；计数实际env.step返回，断言7D有限动作及原生输入合同，写smoke-action-evidence.json。生产评测步数不变。本地AST及diff检查通过，远端真实运行待依赖完成及源码同步。
+- Isaac诊断213730已exit0，完成启动和10次update；新增显式日志/关闭crash reporter后不再首秒崩溃，不能据此证明根因或相机正确。明确缺libGLU.so.1导致材质库无法加载；229786已将libglu1-mesa9.0.2/libopengl0包解到独立envs/robodojo-system-libs-20261014，下一次渲染将显式加此LD_LIBRARY_PATH，未更换驱动或渲染配置。
+- LingBot官方torch栈已完成。官方requirements因LeRobot0.3.3声明torch<2.8/torchvision<0.23而与LingBot显式2.9/.24冲突，安装器确切报错已保留。新链239461用仅torch2.9/torchvision.24的显式resolver overrides保留LingBot原版版本，继续其余官方依赖；记录metadata冲突，pip check不声称全绿，后续须真实reader/训练验收。日志lingbot-va-official-requirements-v2.log。
