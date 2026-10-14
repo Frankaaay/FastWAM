@@ -2,7 +2,9 @@
 import argparse
 import copy
 import json
+import multiprocessing
 import os
+from functools import partial
 from pathlib import Path
 import subprocess
 import sys
@@ -10,6 +12,9 @@ from types import SimpleNamespace
 
 
 def main():
+    # CUDA/OpenMP have already been initialized when the native trainer builds
+    # its dataset pool; fork can inherit invalid runtime locks on this host.
+    multiprocessing.set_start_method("spawn", force=True)
     parser = argparse.ArgumentParser()
     for name in ("repo", "data", "base", "output"):
         parser.add_argument(f"--{name}", type=Path, required=True)
@@ -77,6 +82,8 @@ def main():
             "smoke_overrides": overrides,
             "resolved_config": dict(cfg),
             "world_size": int(os.environ.get("WORLD_SIZE", "1")),
+            "dataset_init_workers": 2,
+            "multiprocessing_start_method": "spawn",
             "meaning": "code-path smoke, not score reproduction",
         }
         (args.output / "resolved-smoke-contract.json").write_text(
@@ -85,6 +92,9 @@ def main():
         print("LINGBOT_NATIVE_LIBERO_CONTRACT_PASS", flush=True)
     VA_CONFIGS["libero_train"] = cfg
     import train
+    train.MultiLatentLeRobotDataset = partial(
+        train.MultiLatentLeRobotDataset, num_init_worker=2
+    )
     train.init_logger()
     train.run(SimpleNamespace(config_name="libero_train", save_root=str(args.output)))
 

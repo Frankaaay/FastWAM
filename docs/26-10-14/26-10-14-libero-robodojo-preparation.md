@@ -300,3 +300,8 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 - 当前第三轮319155使用真正的OpenWAM官方scripts/deploy.py与该模型自己的safetensors checkpoint，单独bridge连接原生RoboDojo客户端。输出openwam/robodojo-closed-loop-v3，主日志openwam-robodojo-closed-loop-v3.log；启动脚本openwam-robodojo-chain-v3.py保存到run目录。按XPolicyLab OpenWAM适配约定关闭compile和DiT cache，保持原始10步同步denoise与32动作chunk。尚待服务/场景/动作检查，不能计入通过。
 
 15:44：OpenWAM RoboDojo第三轮319155/服务319156仍实际活跃，官方loader已输出Architecture dual_system_self_attn并加载对应safetensors；尚未ready、尚未启动simulator，不把模型装载等同动作闭环。LingBot重试链321035已启动并健康检查，日志lingbot-native-libero-chain-v2.log，明确等待319155及其finally清理释放GPU，再用同一官方配置运行3个optimizer更新，输出lingbot/libero-native-v2。远端源码暂保持8c5cf603fac54ec066b042d693a321ffefd8af69，不在活跃任务期间pull最新仅入口改名/文档提交。当前完整验收仍3/9。
+
+## 15:47 真实训练与部署阻塞修复
+
+- OpenWAM RoboDojo v3使用官方模型入口，加载架构后因cv2缺libGLX.so.0退出；不是checkpoint结构错误。v4将既有system-libs私有prefix加入policy/bridge启动LD_LIBRARY_PATH，复用原模型和配置，不安装或改系统驱动。新链PID见本轮工具回执，日志openwam-robodojo-closed-loop-v4.log。
+- LingBot v2在FSDP后构建dataset Pool时，两个子进程收到SIGSEGV，栈位于torch libgomp/GOMP_parallel；父进程Pool仍等结果，不能把它当训练继续。只终止321035及经ps父子关系确认的259个本作业后代。CPU独立reader已通过，故定向将测试进程的multiprocessing改为spawn、native dataset初始化worker由默认128降到2；DataLoader worker仍2，模型/数据/损失/优化器/GA10不改，测试合同明确记录这项运行资源覆盖。原版源码不修改。
