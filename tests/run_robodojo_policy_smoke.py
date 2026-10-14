@@ -52,6 +52,10 @@ def main():
                 "meaning": "short policy loop, not a benchmark score",
             }, indent=2))
             print("ROBODOJO_COMPLETED_SIMULATOR_ACTIONS", completed, flush=True)
+            # IsaacSim can terminate the process inside simulation_app.close(),
+            # so emit action evidence before returning to the native shutdown.
+            if completed >= args.actions:
+                print("ROBODOJO_SHORT_POLICY_LOOP_PASS", completed, flush=True)
             return result
 
         def short_run():

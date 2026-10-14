@@ -357,3 +357,11 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 ## 16:22 LingBot RoboDojo checkpoint 审计通过
 - checkpoint-smoke-audit.json 已生成：step2 transformer 10,177,831,668 bytes，839 keys，与固定 XPolicyLab 原生模型逐键/形状一致，所有 tensor 有限。训练和 checkpoint 两项通过，仿真尚未通过。
 - 添加单独 serve_lingbot_robodojo_baseline.py，固定 XPolicyLab53c5da5与 robotwin30_train，保留30D/action_per_frame12；仅绑定组装 checkpoint 路径及监听端口，不借用作者 LIBERO/RoboTwin 配置。官方单环境 take_action 内部调用 take_action_batch，现有 RoboDojo 真实动作计数包装可直接覆盖，无需修改仿真步进逻辑。
+
+- LingBot XPolicyLab 转发服务导入定位缺少 msgpack_numpy；原 env 不带 pip（命令真实到远端失败），使用既有 uv 向该已结束训练的独立环境安装 msgpack-numpy0.4.8 --no-deps 成功，未改变模型依赖。下一步复核转发服务导入后启动该项仿真。
+
+## 16:25 当前验收更新为 5/9：OpenWAM RoboDojo 通过
+- v8 已由真实策略驱动仿真8个动作，action-evidence.json计数8，原生任务正常完成、录像9帧、SIMULATOR_EXIT0，完整 simulator.log 无 Traceback/unhandled exception。两步训练不代表任务成功率；本次0/1只是流程结果。
+- 外层最后成功打印未出现导致 AssertionError：上游 main 最后 simulation_app.close() 可直接终止进程，包装器返回后的打印不会执行。独立核验动作、原生完成标记和退出码后生成 openwam/robodojo-closed-loop-v8/smoke-acceptance.json，保留原始错误日志，不修改证据。
+- 测试包装将成功动作标记放到实际 take_action_batch 返回且计数达标后输出，防止关闭阶段吞掉标记；无动作仍不通过。不为此重跑已充分验证的 OpenWAM。
+- 当前完整通过：OpenWAM LIBERO/RoboTwin/RoboDojo、FastWAM原版LIBERO、LingBot原版LIBERO-Long。LingBot RoboDojo仅训练+checkpoint通过。闭环队列PID387816，日志 lingbot-robodojo-closed-loop-v1.log，输出 lingbot/robodojo-closed-loop-v1；固定RoboDojo适配与joint动作，组装训练step2权重，推理独立config副本attn_mode=torch不修改训练checkpoint。
