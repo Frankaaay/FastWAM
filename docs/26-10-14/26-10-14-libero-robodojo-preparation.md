@@ -439,3 +439,19 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 - 新增tests/run_fastwam_robodojo_smoke.py：调用该版本原生run_training，joint14、arx_x5、384x320三相机、text128、lr1e-4、weight_decay1e-2，Wan初始化，不使用OpenWAM reader或策略checkpoint。
 - 记录论文batch256/20K与脚本默认每卡B8/GA1/epochs16。smoke明确B2/GA1、短steps/save、workers2/eval0/W&B禁用，正式预算未启动。要求相应独立数据、stats、T5缓存、Wan派生ActionDiT路径，拒绝源码tracked dirty或不同SHA。
 - AST通过；本机无GPU模型依赖，尚无真实Hydra/reader/训练证据。DSW持续Queuing，无SSH地址；没有重复申请实例。
+
+- 18:43 连续三轮核验同一DSW仍Queuing，无SSH地址。固定XPolicyLab转换器cam_head到cam_high映射、原生reader及训练/部署接口已只读核对，未发现需要改变数据语义之处。当前阻塞仅云端资源分配；两项smoke及Assets续传尚未重启，7/9计数不变。保留唯一实例排队，不重复申请、不提高优先级。
+
+### 18:47 用户授权抢占Frank闲时资源
+- 实核RAM frank205455090823393499。Running列表24项，其中16项ForceQuotaOverSold。选择单个2GPU/48CPU/256Gi评测作业frank_randomized_final_idle_14（dlc1j9l98ryww1ja），非训练作业，输出/mnt/workdir/frank/runs/c2r-stereotok-randomized-final-20261014位于CPFS。固定921bb0c源码存在terminal-job claim回收机制；停止可能需重跑在途回合，不修改结果。
+- 经StopJob dry-run后执行停止，优先为既有排队2GPU DSW腾资源；其余作业保持。尚须核实Stopped和DSW实际运行。
+
+- 18:49 idle14已Stopped，但idle15接走释放资源。按用户抢占授权，将13个仍排队的同属Frank randomized闲时评测优先级4→3（保留任务而非取消），原优先级回执保存在本机LOCALAPPDATA/AliyunCLI/h800-requests/baseline-preempt-20261014/queued-original-priorities.json；本次DSW保持4。核对idle15归属、闲时策略及相同评测命令后停止dlc1jjkumjcylo7v，待资源实际释放。实验完成后应恢复这13项优先级，记录两项被停止评测，不能声称自动恢复已完成。
+- 18:50 DSW实际调度成功，SSH恢复，实测2xL20Y 81559MiB，CPFS正常挂载。Git首轮TLS失败，定向HTTP/1.1重试fetch/pull成功，远端clean HEAD4ca4eb1。
+- Assets续传PID2977，robodojo-assets-resume-v3.log，单worker固定revision35efbc7，只Assets/**；失败最多8次、间隔300秒退避，已越过此前11174位置。不能称下载完成。
+- LingBot RoboTwin train-v2 PID5646，闭环后处理队列5647；固定runner4ca4eb1，原生初始化/配置，实际合同50clean+498aug。18:56已进入3次更新训练，尚无checkpoint/动作验收。输出lingbot/robotwin-native-v2与robotwin-native-closed-loop-v2。
+- FastWAM原生reader读取LingBot工具生成的通用joint导出时先因datasets3.6不识别List失败。独立datasets4安装路径（未改共享env）验证action/state与原始Arrow逐值相同，但原生reader随后不兼容datasets4 Column（torch.stack需要list/tuple）。两轮均保留失败日志，未改原生reader。
+- 改用固定XPolicyLab官方converter+独立datasets3.6包，在已有LingBot完整转换工具环境运行CPU数据转换；输出全新datasets/FastWAM-RoboDojo-native-v21-35efbc7，输入仍为同2条HDF5/375帧，未修改旧数据或采样语义。转换PID9272，native-convert.log；禁止递归删除并保留临时images。尚未验证完成。
+- LingBot RoboTwin训练v2 exit0，三次更新video/action loss .4205/.2288、.2197/.1540、.4593/.5539，grad2.23/1.85/4.73；step3保存成功。审计839keys、10,177,831,668bytes、原生keys/shapes精确匹配且全finite，无optimizer状态。
+- 闭环v2首次planner初始化报warp无torch子模块，之后原作者重试触发left_planner未初始化的衍生错误。定向SIGINT失败client13447，由父链finally清理server；未计动作通过。测试入口显式import warp.torch解决导入顺序，不改planner/物理参数/模型配置，待重试。
+- FastWAM官方转换器重新导出2/2轨迹、375帧完成，使用datasets3.6生成兼容原生reader的Parquet，独立输出FastWAM-RoboDojo-native-v21-35efbc7；未改LingBot数据或共享环境。datasets4兼容尝试未作为最终路径，保留日志。

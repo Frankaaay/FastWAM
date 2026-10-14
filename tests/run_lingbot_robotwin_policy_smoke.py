@@ -28,6 +28,8 @@ def main():
             ["git", "-C", str(repo), "diff", "HEAD", "--name-only"], text=True
         ).strip()
     args.output.mkdir(parents=True, exist_ok=True)
+    # The pinned CuRobo planner accesses wp.torch before importing the submodule.
+    import warp.torch
     sys.path.insert(0, str(args.repo))
     source = args.repo / "evaluation/robotwin/eval_polict_client_openpi.py"
     text = source.read_text()
