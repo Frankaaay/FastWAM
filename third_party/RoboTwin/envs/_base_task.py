@@ -444,7 +444,7 @@ class Base_Task(gym.Env):
 
     # =========================================================== Sapien ===========================================================
 
-    def _update_render(self):
+    def _update_render(self, sync_scene=True):
         """
         Update rendering to refresh the camera's RGBD information
         (rendering must be updated even when disabled, otherwise data cannot be collected).
@@ -457,8 +457,9 @@ class Base_Task(gym.Env):
             now_ambient_light = self.scene.ambient_light
             now_ambient_light = np.clip(np.array(now_ambient_light) + np.random.rand(3) * 0.2 - 0.1, 0, 1)
             self.scene.set_ambient_light(now_ambient_light)
-        self.cameras.update_wrist_camera(self.robot.left_camera.get_pose(), self.robot.right_camera.get_pose())
-        self.scene.update_render()
+        if sync_scene:
+            self.cameras.update_wrist_camera(self.robot.left_camera.get_pose(), self.robot.right_camera.get_pose())
+            self.scene.update_render()
 
     # =========================================================== Basic APIs ===========================================================
 
@@ -1515,7 +1516,7 @@ class Base_Task(gym.Env):
         self.take_action_cnt += 1
         # print(f"step: \033[92m{self.take_action_cnt} / {self.step_lim}\033[0m", end="\r")
 
-        self._update_render()
+        self._update_render(sync_scene=bool(self.render_freq or self.eval_video_path is not None))
         if self.render_freq:
             self.viewer.render()
 
@@ -1680,7 +1681,7 @@ class Base_Task(gym.Env):
                 now_right_id += 1
 
             self.scene.step()
-            self._update_render()
+            self._update_render(sync_scene=bool(self.render_freq or self.eval_video_path is not None))
                 
             if self.check_success():
                 self.eval_success = True
@@ -1690,7 +1691,7 @@ class Base_Task(gym.Env):
                     self.eval_video_ffmpeg.stdin.write(eval_frame.tobytes())
                 return
 
-        self._update_render()
+        self._update_render(sync_scene=bool(self.render_freq or self.eval_video_path is not None))
         if self.render_freq:  # UI
             self.viewer.render()
 
