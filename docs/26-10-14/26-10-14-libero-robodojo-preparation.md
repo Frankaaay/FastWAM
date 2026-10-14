@@ -305,3 +305,12 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 
 - OpenWAM RoboDojo v3使用官方模型入口，加载架构后因cv2缺libGLX.so.0退出；不是checkpoint结构错误。v4将既有system-libs私有prefix加入policy/bridge启动LD_LIBRARY_PATH，复用原模型和配置，不安装或改系统驱动。新链PID见本轮工具回执，日志openwam-robodojo-closed-loop-v4.log。
 - LingBot v2在FSDP后构建dataset Pool时，两个子进程收到SIGSEGV，栈位于torch libgomp/GOMP_parallel；父进程Pool仍等结果，不能把它当训练继续。只终止321035及经ps父子关系确认的259个本作业后代。CPU独立reader已通过，故定向将测试进程的multiprocessing改为spawn、native dataset初始化worker由默认128降到2；DataLoader worker仍2，模型/数据/损失/优化器/GA10不改，测试合同明确记录这项运行资源覆盖。原版源码不修改。
+
+## 15:59 LingBot 原生训练与 checkpoint 通过、后续真实闭环
+
+- LingBot LIBERO原生v3在spawn/2初始化worker下完成3次optimizer更新，保持B1/GA10和官方优化参数。video/action losses依次0.1667/0.4615、0.1591/0.4570、0.1540/0.4972，grad_norm3.17/3.26/3.33；15:51:55保存step3并exit0。输出lingbot/libero-native-v3；checkpoint audit对官方模型meta实例逐key/shape核对839 tensors，全部finite，10177831668bytes。官方保存为weights-only，无optimizer state；证据checkpoint-smoke-audit.json及lingbot-libero-checkpoint-audit.log。还未通过仿真，不能计入第四项完成。
+- LingBot RoboTwin官方clean任务原生reader通过50episodes/50窗口，样本latents(48,9,24,20)、text(512,4096)、actions(30,9,16,1)有限；aug仍下载。代码另建RoboTwin-lingbot-baselines-20261014，按LingBot README固定2eeec322d95799f537cbfe5f291a8220d965ccb8，clean detached HEAD，不复用OpenWAM的0aeea2d源码版本。
+- LingBot RoboDojo来源转换325312通过：官方XPolicyLab converter从两条H5生成375frames/14D joint。新目标datasets/LingBot-RoboDojo-source-v21-35efbc7，未覆盖已有数据。递归删除在实验进程内被禁止，保留生成的images；退出时TemporaryDirectory清理因此有ignored异常，未执行删除。官方process_data.py链330634随后exit0，输出datasets/LingBot-RoboDojo-latents-35efbc7：两条轨迹176/199frames，三相机latent分别22/25frames，独立empty_emb.pt与30D映射。其官方默认target_fps10在原始25fps下使用round stride2，实际采样12.5fps；须继续核对与robotwin30配置action_per_frame12的训练/推理关系，不能静默修改采样或宣称完整验收。
+- OpenWAM RoboDojo v4服务和bridge已成功ready，simulator在argparse阶段把--device误作--device_id的缩写而退出；v5移除此多余参数后进入真实场景，但缺生成的Assets/Robots/x5/curobo.yml。虽然Isaac退出码为0，异常栈及无action-evidence证明不通过。按官方utils/update_embodiment_config_path.py规则，仅从x5/curobo_tmp.yml替换本机资产根生成该文件（独占新建），保留原模板和SHA256，证据robodojo-x5-curobo-path-binding.json。
+- OpenWAM v6链355736再次运行，日志openwam-robodojo-closed-loop-v6.log，除exit0外明确要求action-evidence中真实动作>0以及最终短闭环通过标记，避免Isaac吞退出码误计通过。尚未验收。
+- LingBot LIBERO闭环v1的官方服务成功ready，客户端缺官方LIBERO依赖future而失败；已补future0.18.2，原生client import实测通过。v2链359086等待OpenWAM v6释放GPU后执行，输出lingbot/libero-native-closed-loop-v2，使用审计后的step3 transformer与官方base VAE/text/tokenizer装配。v1 server的SIGTERM是失败后父链清理，不是模型自身失败。当前完整验收仍3/9。
