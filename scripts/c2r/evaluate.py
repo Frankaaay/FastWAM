@@ -102,6 +102,12 @@ def prepare_case(official, device, case, count):
         except official.UnStableError as exc:
             env.close_env()
             rejected.append(dict(seed=seed, reason=repr(exc), python_before=before))
+        except AssertionError as exc:
+            # Official expert validation rejects a seed when no grasp pose exists.
+            if str(exc) != 'target_pose cannot be None for move action.':
+                raise
+            env.close_env()
+            rejected.append(dict(seed=seed, reason=repr(exc), python_before=before))
         # Unexpected configuration/runtime errors are not treated as invalid seeds.
         seed += 1
     return dict(**case, episodes=records, rejected=rejected, seconds=time.time()-started)
@@ -121,15 +127,23 @@ def rollout_case(official, device, model, case, episodes):
         env.set_instruction(episode['instruction'])
         model.reset()
         observations = 0
+        setup_seconds = time.time() - start
+        observation_seconds = 0.
+        action_seconds = 0.
         while env.take_action_cnt < env.step_lim:
+            tick = time.perf_counter()
             obs = env.get_obs() if model.should_request_observation() else None
+            observation_seconds += time.perf_counter() - tick
             observations += int(obs is not None)
+            tick = time.perf_counter()
             model.step(env, obs)
+            action_seconds += time.perf_counter() - tick
             if env.eval_success:
                 break
         result = dict(ordinal=episode['ordinal'], seed=episode['seed'], instruction=episode['instruction'],
                       success=bool(env.eval_success), actions=env.take_action_cnt, observations=observations,
-                      inference_seconds=sum(model.inference_seconds), seconds=time.time()-start)
+                      inference_seconds=sum(model.inference_seconds), setup_seconds=setup_seconds,
+                      observation_seconds=observation_seconds, action_seconds=action_seconds, seconds=time.time()-start)
         env.close_env(clear_cache=True)
         results.append(result)
         print('EPISODE', json.dumps(result), flush=True)
