@@ -64,3 +64,11 @@
 - Job16105冻结36b57f86d545f0f17f9b90ab582f6b2f51dc70d5，全部step退出0。首条140帧、84个HDF5 dataset与原16091逐帧逐元素完全一致，含RGB JPEG字节、全部数值GT、动作、标定、时标；证据benchmarks/16105/group-full-frame-equality.json。四进程测试卡GPU利用率实测100%，仅瞬时样本，不声称全程100%。
 - 2500条共551534帧，中位167、P95=473、最长895帧。正式恢复8GPU/32独立rank/128CPU/768G，每卡4rank，GPU-bind single:4；最长优先全局领取，单条时限max(1800,6*length+300)秒。已验收2条保留跳过，旧8条partial保留重做，不复用不完整数据。
 - 主体含逐条完整解码验收按当前短轨迹基准外推约14.3小时；不同任务、共享IO、失败恢复不确定，给14–20小时窗口，最终manifest/ready后处理另预留5–15分钟。基准只覆盖一个任务的4条，不能冒充50任务稳定吞吐实测。
+
+## 优化后全量恢复与一次健康检查
+
+- Job16110于2026-10-14 10:34:56 Asia/Shanghai实际RUNNING，节点xn01-gpu1-0058；32tasks、每task4CPU、8GPU、768G、normal/48h。冻结源码551075053976a5ab8a03c11479b90424ebdef049，运行clone clean；该提交相对已测36b57f8仅文档差异。sbatch --test-only曾给出较晚预测，但实际提交后立即启动，以实际StartTime为准。
+- 一次启动健康检查在运行1m28s时完成：32个逐条日志、PCI19/3b/4c/5d/9b/bb/cb/db每卡恰好4个renderer，零Traceback；4条已写到30帧，其余未达到每30帧打印阈值。八卡当次nvidia-smi利用率全部100%，显存17.3–25.2GiB。此为启动快照，不代表全程平均利用率或全量验收。
+- 最长任务优先已实际派发open_microwave和put_bottles_dustbin，沿全局锁逐条领取。已验收0/16保留，旧partial保留，未删除文件。2500最终ready仍未完成。
+- 正式日志 /gpfs/jiuquyun/home/Frank/logs/robotwin-gt-16110.out；逐条 /gpfs/jiuquyun/projects/Frank/robotwin-stereo-gt-20261014/logs/*-16110.log；输出根不变。预计主体10月15日00:35–06:35北京，最终汇总/ready另5–15分钟。若运行失败或任务复杂度超出基准，ETA需调整。
+- 按长任务规则启动后只做此次健康检查；本地记录commit/push不热更新运行clone。
