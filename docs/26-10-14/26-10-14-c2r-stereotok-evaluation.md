@@ -45,3 +45,12 @@
 - 已 StopInstance，随后 GetInstance 确认 Stopped；没有停止、重启或修改任何评估 DLC，也没有更改训练。
 - 有界尝试 `get-pod-logs` 读取首个 DLC `dlcbv6akram9k2jy` 的 20 行日志，仅返回挂载/启动信息。当前 launcher 将逐 worker 日志写到 CPFS，不能用容器启动日志推断回合进展。
 - 本轮无代码或评估合同修改。保留所有成功产物及失败证据；下一次跟进继续核对资源是否允许临时读取，待可访问后检查实际回合、错误与退出码。当前无法更新基于实际吞吐的 ETA。
+## 11:24–11:30 单卡归一化速度核查
+
+用户要求对比当前全量、ruhu、优化前，排除卡数。统一资源效率定义为有效已完成回合数 / sum(每组GPU数×实际评估占卡小时)，排队不计，已退出分片不继续计；冷启动/等待/故障计入端到端资源效率，并另列局部同条件A/B。未完成任务的任务混合、成功提前退出和硬件差异仍不能自动消除。
+
+- 旧 StereoTok 全量：10000有效回合及覆盖验收见 FastWAM/docs/26-10-09/26-10-09-fastwam-two-tokenizers-training.md。本轮 GetJob 实时核对六组全部 Succeeded；按已记录释放时刻02:38:53–57的中点02:38:55（北京时间10月10日）至各DLC GmtFinishTime计算。五组8卡分别于07:45:16、09:10:03、05:00:03、05:34:40、04:52:42结束，最后4卡05:05:50结束。约162.8811 GPU小时，61.3945回合/GPU小时、58.6372 GPU秒/回合；约4秒释放散差和job退出尾部使此值为近似。排除训练依赖预占等待。44×全墙钟会错误计成约287 GPU小时，不能当实际资源效率。
+- ruhu：以Frank通过h100只读 /gpfs/jiuquyun/projects/ruhu/fastwam-c2r-20261011/evaluation/aligned20/results/formal/{demo_clean,demo_randomized}/各task/episode*.json，1468文件全部complete；本轮该目录可读。sacct -j15094,15152 -X -P实际均8GPU，分别23266秒、27587秒，总113.0067 GPU小时，12.9904有效回合/GPU小时、277.1281 GPU秒/回合。含这两个job内的预检、恢复、卡住及未落盘回合开销，不含更早建立共享manifest的GPU预算；不是纯稳态推理效率。旧Stereo/该ruhu作业资源效率约4.73倍，并非本轮优化收益。
+- ruhu逐回合壁钟合计318690.9658秒，median193.4232秒；623790 executed_actions、20197次模型推理，推理median .3422926702秒/mean .3438375104秒，总6944.4862秒（约逐回合wall总和2.18%）。不能将wall余量全部归因渲染。合同有every-action get_obs，Wan单目、H100、RoboTwin0aeea2d；当前StereoTok双目L20Y、bf44be5、按replan观察。旧Stereo为qpos/replan24，当前EEF/replan32。跨组并非纯代码优化因果对照。
+- 同条件已验证优化：2卡8相同计划回合，1worker/GPU 572.0597s → 2worker/GPU 502.1072s，即25.1722 → 28.6791回合/GPU小时，吞吐提升13.93%，端到端耗时减少12.23%；不是翻倍GPU。指令cache推理 .322300701 → .2915683365s，耗时减9.53%，吞吐增10.54%，四稳态样本且动作bitwise一致。这些均为局部pilot，不能充当当前全量吞吐。
+- 当前全量本轮实际完成数仍未知：按授权再次尝试本人DSW，事件11:24:18明确CPU/GPU/memory资源不足、SSH Allocating，未执行远端命令。随后停止，GetInstance确认Stopped。DLC日志API只提供父进程启动信息；不从Running、卡数或之前2.5–4h粗估倒推虚构实际吞吐。下次产物可读时必须按同一快照统计完成回合与每个DLC实际启动/退出时间积分，并尽可能对齐task/phase/动作步数后更新比较。未改正在运行源码、模型、协议或任务。
