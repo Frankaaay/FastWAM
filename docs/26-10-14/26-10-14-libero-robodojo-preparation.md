@@ -476,3 +476,24 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 - v3定位：rank1首次AdamW更新前参数与梯度均finite，更新后group0 param0非finite；rank0该次更新检查通过。继续在测试入口记录实际dtype/grad_dtype/eps/lr/foreach，确定优化器数值根因，未改学习率或数据合同。
 
 - v2优化器状态只读核验：FP32 master partition每rank3,010,374,760元素，超过2^31；eps1e-8、foreach=None、bf16 enabled、fp16 disabled。不是FP16 epsilon下溢。下一轮保持全部数学超参，只将测试入口AdamW foreach=False，验证大扁平分区的multi-tensor更新是否为触发因素；这是待验证推断。v3因rank1异常/rank0集合等待，定向中断launcher74070，确认进程退出后才同步代码。
+
+- 固定35efbc7 Assets下载已返回ROBODOJO_FULL_ASSETS_DOWNLOAD_COMPLETE，15365/15365，PID2977正常退出；开始按每个下载metadata的revision与实际文件大小单线程核验，预期41,269,513,111bytes。全量训练轨迹不在本次下载范围。v4原生训练PID82963/闭环等待82964，运行SHA b856e4929c6a552540008808b188729361fa531a，仅测试AdamW foreach=False的数值差异。
+
+- Assets核验通过：15365项metadata revision均35efbc7dedfdbeeb6e95fb749bd885d73d483e41，实际总字节41,269,513,111，与清单一致，bad=[]；证据runs/five-baselines-20261014/robodojo-full-assets-verification.json。
+- v4单张量AdamW需第二个11.21GiB临时张量，free8.65GiB而OOM，尚不能验证该实现是否修复NaN。v5仅为smoke将ZeRO1 offload_optimizer.device改cpu，zero_force_ds_cpu_optimizer=false保留原生torch AdamW；foreach=False、数学超参不变。独立运行配置fastwam/robodojo-zero1-cpu-smoke.json与yaml，非论文正式配置。PID88705训练、88706后续checkpoint/闭环队列；日志fastwam-robodojo-native-train-v5.log与loop-v5.log。
+
+- v5已完成前两次更新，双rank每次更新前后finite检查均通过，loss2.0692/3.1668（action1.5549/2.3165，video0.5143/0.8503）。CPU offload+single-tensor AdamW暂未复现NaN；这只能证明该smoke运行方式有效，尚不能把根因断言为单一CUDA foreach kernel。等待step3/checkpoint及闭环，不提前计9/9。
+
+- v5三步均通过双rank AdamW前后finite检查，loss2.0692、3.1668、3.7001，step3 action2.1934/video1.5066。19:54:51保存完成，训练exit0，weights=fastwam/robodojo-native-v5/checkpoints/weights/step_000003.pt，state同目录state/step_000003。闭环链88706开始CPU checkpoint审计。原生setup_policy_server --help、sim_robotwin模型配置解析proprio_dim14检查均通过（需既有system-libs LD_LIBRARY_PATH）。
+
+### 20:02 最终验收与资源收尾
+- 9/9按用户约定完成代码smoke：FastWAM RoboTwin沿用用户明确接受的历史完成项；其余8项本次训练、checkpoint检查和真实动作闭环证据均已保存。不是论文分数复现，也未启动正式训练或StereoTok。
+- FastWAM RoboDojo v5：固定XPolicyLab53c5da5、Wan初始化、joint14/384x320/text128；三步loss2.0692/3.1668/3.7001，两rank更新前后参数finite。训练exit0，checkpoint12,041,813,369bytes，mot1649keys及proprio2keys全部finite；真实策略在pour_liquid_into_cup执行8次动作，simulator exit0，native loop PASS。验收文件：/mnt/workdir/frank/runs/five-baselines-20261014/fastwam/robodojo-native-closed-loop-v5/smoke-acceptance.json。
+- 运行限制必须保留：本次2GPU smoke使用ZeRO1优化器CPU卸载和torch AdamW foreach=False；不宣称原始纯GPU优化器路径已修复或正式预算已验证。学习率、betas、epsilon、weight_decay及模型/数据语义未改。GPU更新后NaN的精确kernel根因仍未完全隔离。
+- LingBot RoboTwin原生548/550窗口、官方base初始化；step3 checkpoint839keys全finite，demo_clean真实16D策略动作8次，client/chain exit0；验收文件lingbot/robotwin-native-closed-loop-v3/smoke-acceptance.json。
+- Assets全量15,365文件、41,269,513,111bytes，固定35efbc7，下载metadata及实际大小逐项检查通过。全量训练轨迹及全部派生缓存仍属后续范围；复用既有RoboTwin2500的决定不变。
+- 最终索引：/mnt/workdir/frank/runs/five-baselines-20261014/preparation-status.json。OpenWAM LIBERO证据为openwam/libero-closed-loop-v2/closed-loop-exit-zero.json，其余新验收采用各模型独立smoke-acceptance.json。
+- 训练、仿真、策略服务、下载进程全部退出，nvidia-smi计算进程为空。13个临时优先级3作业逐项核实归属后恢复4，GetJob复核13/13；本机priority-restoration-verified.json留存。此前抢占停止的idle14/idle15不擅自重启，避免与C2R supervisor后续作业重复；其CPFS结果未删除。
+- 已向唯一实验DSW dsw-t7b951pdehd9to9kgb发StopInstance，RequestId01A13A4B-0352-5F45-9B35-4CAF6A4D276C，等待Stopped确认。所有资产、checkpoint和日志留在Frank CPFS持久目录。
+
+- 最终GetInstance确认Status=Stopped，2GPU实验实例已释放；无剩余本任务训练、仿真、下载或资源恢复操作。
