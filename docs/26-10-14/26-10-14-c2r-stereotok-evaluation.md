@@ -54,3 +54,9 @@
 - ruhu逐回合壁钟合计318690.9658秒，median193.4232秒；623790 executed_actions、20197次模型推理，推理median .3422926702秒/mean .3438375104秒，总6944.4862秒（约逐回合wall总和2.18%）。不能将wall余量全部归因渲染。合同有every-action get_obs，Wan单目、H100、RoboTwin0aeea2d；当前StereoTok双目L20Y、bf44be5、按replan观察。旧Stereo为qpos/replan24，当前EEF/replan32。跨组并非纯代码优化因果对照。
 - 同条件已验证优化：2卡8相同计划回合，1worker/GPU 572.0597s → 2worker/GPU 502.1072s，即25.1722 → 28.6791回合/GPU小时，吞吐提升13.93%，端到端耗时减少12.23%；不是翻倍GPU。指令cache推理 .322300701 → .2915683365s，耗时减9.53%，吞吐增10.54%，四稳态样本且动作bitwise一致。这些均为局部pilot，不能充当当前全量吞吐。
 - 当前全量本轮实际完成数仍未知：按授权再次尝试本人DSW，事件11:24:18明确CPU/GPU/memory资源不足、SSH Allocating，未执行远端命令。随后停止，GetInstance确认Stopped。DLC日志API只提供父进程启动信息；不从Running、卡数或之前2.5–4h粗估倒推虚构实际吞吐。下次产物可读时必须按同一快照统计完成回合与每个DLC实际启动/退出时间积分，并尽可能对齐task/phase/动作步数后更新比较。未改正在运行源码、模型、协议或任务。
+## 12:07 首次获得当前全量速度与异常
+
+- 不再等待GPU读取实例：以现有DLC请求为模板提交1CPU/4Gi/0GPU、10分钟上限的只读统计作业 dlcgln9qjo42bany，已Succeeded。只用系统python3读取本任务结果目录，无远端文件写入或源码执行；统计输出经GetPodLogs取回。本机请求/回执/输出 readonly-cpu*.json 保存在既有frank-c2r-eval-20261014请求目录。后续可沿用CPU读取机制，避免DSW单卡排队；DSW仍Stopped。
+- snapshot time=1791950818.8734612（北京时间12:06:58.873）：97个plan、437个chunk文件、2165个已发布episode。39组状态27Running/12Queuing；用每组实际Pods[0].GmtStartTime至同一快照的GPU时间积分=61.3012564 GPU小时，当前35.3173838回合/GPU小时。排队24GPU未计。约为旧全量61.3945的0.57525倍（当前低42.47%）、ruhu12.9904的2.71873倍。当前长任务优先且含准备/冷启动，未结束，不是完整任务混合的最终速度或纯优化因果倍数。状态原始快照speed-status-1206.json可复算。
+- 发现实际rollout异常，不能以Running宣称健康：open_laptop clean offsets5/10/15明确报AttributeError: open_laptop object has no attribute arm_tag。源码check_success读取self.arm_tag；该字段只在play_once设定，当前rollout创建独立env后setup_demo没有调用play_once，准备与rollout进程间未传递该任务状态。需要定向复核官方/ruhu任务初始化合同，保留原计划、指令、成功episode与错误证据，再以新发布源码和独立运行clone修复缺失回合；不得热改d91运行clone或把失败当策略失败。
+- GetPodLogs对单条EVAL_SNAPSHOT大JSON在约4KiB截断，故尚未取得完整错误列表/phase counts/exits；后续CPU检查应分行输出简短记录，不再把全部trace堆在一行。437chunk与2165episode存在4个非完整chunk，需逐一核对，不能猜测第四个根因。
