@@ -329,3 +329,14 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 - OpenWAM RoboDojo v7 仍运行，GPU1 有真实负载，场景完成设置并重置；没有动作证据前不计通过。官方 Dockerfile 的单 Vulkan ICD 建议已阅读，当前已有显式 VK_ICD_FILENAMES；未为等待场景启动擅自更改物理配置。
 - 本地 schannel fetch 握手失败，通过单次 git -c http.sslBackend=openssl fetch origin 成功；未关闭证书校验，未改全局 Git 配置。目标远端仍 91a33f0。
 - 新训练入口仅完成语法与 diff 检查，尚未运行；下一步待当前 RoboDojo 闭环释放 GPU 后启动。
+
+- 16:12 已推送 eb15e88；H800 LingBot RoboDojo 短训练链 PID 371228 已启动，等待 OpenWAM v7 PID 361002 释放 GPU 后核验 clean、fetch/ff-only 并要求 runner=eb15e88，再以两卡运行原生训练入口。日志 /mnt/workdir/frank/runs/five-baselines-20261014/lingbot-robodojo-native-train-v1.log，输出 lingbot/robodojo-native-v1；当前是等待状态，不计训练通过。
+
+## 16:13 RoboDojo ffmpeg 根因修复
+- 全日志定位 v7 反复重置直接根因 FileNotFoundError: ffmpeg，发生在 get_obs_batch 的录像入口，尚无策略动作。官方循环捕获异常继续布局种子，因此不能用尾部场景日志判断推进成功。向核验过命令行的 simulator PID 363280 发送 SIGTERM，保留日志并让原链清理服务。
+- 既有私有 system-libs/prefix/usr/bin/ffmpeg 已存在，需同时加入 bin PATH 和 usr/lib/x86_64-linux-gnu/pulseaudio 的 LD_LIBRARY_PATH；完整环境下 ffmpeg -version exit0，6.1.1-3ubuntu5。没有安装替代模型依赖或更改物理参数。
+- 新运行链 openwam-robodojo-chain-v8.py PID 372981 等待 LingBot RoboDojo 训练 PID 371228 后再启动，输出 openwam/robodojo-closed-loop-v8，日志 openwam-robodojo-closed-loop-v8.log；同时按官方 Dockerfile 将 VK_DRIVER_FILES 与既有 VK_ICD_FILENAMES 绑定到同一驱动 ICD。未获得真实动作前不计通过。
+
+## 16:15 LingBot RoboDojo 训练启动及 RoboTwin 入口
+- 原 RoboDojo v7 在自身 600 秒超时及 finally 清理后结束，保留其 ffmpeg 首因，不将 timeout 当新根因。LingBot RoboDojo 链已完成 clean fetch/ff-only，实际 runner eb15e88735bb2e7b497c60ee38e20ba2a00d92cc，打印 NATIVE_ROBODOJO_TRAIN_START，两卡执行中。
+- 新增独立 tests/run_lingbot_robotwin_smoke.py，使用原作者 robotwin_train（B1/GA1、30D、action_per_frame16、robotwin_tshape），仅路径与测试运行长度/保存/worker/W&B 覆盖。启动前逐项检查已选 adjust_bottle clean50+aug500 的 metadata、Parquet 和三个相机所有窗口，避免 reader 静默跳过；记录固定 HF revision 和任务子集范围。现仅 AST 检查通过，数据仍下载中，尚未启动 RoboTwin 训练。
