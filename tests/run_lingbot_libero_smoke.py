@@ -85,6 +85,7 @@ def main():
         print("LINGBOT_NATIVE_LIBERO_CONTRACT_PASS", flush=True)
     VA_CONFIGS["libero_train"] = cfg
     import train
+    train.init_logger()
     train.run(SimpleNamespace(config_name="libero_train", save_root=str(args.output)))
 
 

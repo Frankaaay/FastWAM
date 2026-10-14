@@ -285,3 +285,10 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 - HuggingFace repo_info siblings返回100000文件上限，未涵盖clean路径；不把截断列表当完整manifest。改用本机官方HF tree API对两个精确任务前缀分页读取，保存lingbot-robotwin-adjust-bottle-595d4ac-manifest.json；远端mirror树查询403/超时未造成数据变更。按固定manifest逐文件hf_hub_download并核对size，PID303771，日志lingbot-robotwin-adjust-bottle-download.log，目标datasets/LingBot-RoboTwin-adjust-bottle-595d4ac。一次健康检查确认已完成101/3858文件，仍在下载。
 - 新增tests/run_robodojo_policy_smoke.py，仅包装固定09bd5f5的官方main/create_eval_env；保持真实任务、观测、原生策略调用与take_action_batch，临时缩短step_lim，只有原生动作调用返回后才记录实际计数。证据明确区分短动作闭环与benchmark分数，生产代码不改。AST检查通过；尚未远端执行，需等待LingBot双卡训练释放和RoboDojo资产就绪。
 - OpenWAM对FastWAM两项复现的精确配置来源仍未找到；搜索结果中另有同名Stanford OpenWAM，不能混用。只认OpenWAM-Official/OpenWAM固定4d7f642及对应2609.07398论文。已有XPolicyLab FastWAM joint训练脚本本身并不能证明OpenWAM采用了相同参数。
+
+## 15:36 LingBot 原生 reader 故障定向修复
+
+- 官方LIBERO数据已完整下载2506个文件（只排除非数据.DS_Store），训练门禁确认500episodes/500完整双相机窗口。首轮298690已结束exit1，真实模型加载和FSDP初始化后，native reader遇ValueError: Feature type List not found。原始parquet的action/state Arrow metadata确为List；LeRobot0.3.3要求datasets<=3.6.0，与官方发布数据不兼容。
+- 已确认首轮及GPU进程退出后，定向安装datasets4.0.0，保留数据文件、模型/优化器/动作/latent配置不变；同时补RoboDojo官方转换器必需h5py3.14.0，不改numpy/torch。日志lingbot-datasets4-reader-repair.log：Dataset.from_parquet读出388x7动作，与PyArrow原始列逐元素完全相等。pip check明确保留3条LeRobot metadata冲突（datasets、torch、torchvision），不能声称依赖声明全绿。仍需native训练验收。
+- 新增tests/serve_lingbot_baseline.py，按显式benchmark选择官方配置，仅注入已审计权重组件装配路径与本机监听地址。新增tests/run_lingbot_libero_policy_smoke.py，复用官方Long客户端，计数真实7D有限policy动作，达到短测试上限后正常终止测试，不伪造done或成功率。两者尚未实际执行；AST检查通过。
+- 原生训练wrapper补齐官方main调用的init_logger，确保加载、训练和checkpoint日志完整；下一轮使用新输出目录。基础权重中的patch_embedding两项未使用与官方当前实现使用patch_embedding_mlp相符，不将其静默替换为FastWAM结构。
