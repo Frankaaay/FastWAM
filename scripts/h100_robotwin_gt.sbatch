@@ -3,9 +3,9 @@
 #SBATCH --partition=h100
 #SBATCH --qos=normal
 #SBATCH --nodes=1
-#SBATCH --ntasks=8
+#SBATCH --ntasks=32
 #SBATCH --gres=gpu:8
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=4
 #SBATCH --mem=768G
 #SBATCH --time=2-00:00:00
 #SBATCH --output=/gpfs/jiuquyun/home/Frank/logs/%x-%j.out
@@ -28,6 +28,6 @@ elif [[ ${1:-} == smoke ]]; then
 else
     test -f "$root/episodes/0000/accepted.json"
     test -f "$root/episodes/0016/accepted.json"
-    srun --gpus-per-task=1 --kill-on-bad-exit=1 bash -c 'exec "$1" scripts/h100_robotwin_gt.py pool --worker "$SLURM_PROCID"' bash "$python"
+    srun --gpu-bind=single:4 --kill-on-bad-exit=1 bash -c 'exec "$1" scripts/h100_robotwin_gt.py pool --worker "$SLURM_PROCID"' bash "$python"
     srun --ntasks=1 "$python" scripts/h100_robotwin_gt.py finalize
 fi

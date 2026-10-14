@@ -5,7 +5,6 @@ write a fresh personal H100 output. No deletion, replacement, or replanning.
 """
 import argparse
 import collections
-import concurrent.futures
 import hashlib
 import io
 import json
@@ -174,10 +173,9 @@ class Capture:
         self.encoders = {}
         self.destination = destination
         self.timings = collections.Counter()
-        self.writer = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        self.pending = collections.deque()
 
     def append(self, env):
+        import cv2
         import numpy as np
         tick = time.monotonic()
         obs = env.get_obs()
@@ -194,15 +192,6 @@ class Capture:
                 obs['observation'][c].update(value)
         np.testing.assert_allclose(obs['joint_action']['vector'], self.expected[self.index], atol=1e-5, rtol=0)
         self.timings['gt_seconds'] += time.monotonic() - tick
-        # Bound memory while overlapping compression/encoding with the next capture.
-        if len(self.pending) == 2:
-            self.pending.popleft().result()
-        self.pending.append(self.writer.submit(self._write, obs, self.index))
-        self.index += 1
-
-    def _write(self, obs, index):
-        import cv2
-        import numpy as np
         tick = time.monotonic()
         def append_group(group, data):
             for key, value in data.items():
@@ -225,28 +214,22 @@ class Capture:
                     assert ok
                     import h5py
                     if key not in group:
-                        group.create_dataset(key, (len(self.expected),), dtype=h5py.vlen_dtype(np.dtype('uint8')))
-                    group[key][index] = encoded.reshape(-1)
+                        group.create_dataset(key, (0,), maxshape=(None,), dtype=h5py.vlen_dtype(np.dtype('uint8')))
+                    ds = group[key]; ds.resize(self.index + 1, axis=0); ds[self.index] = encoded.reshape(-1)
                 else:
                     if key not in group:
-                        group.create_dataset(key, (len(self.expected), *array.shape),
+                        group.create_dataset(key, (0, *array.shape), maxshape=(None, *array.shape),
                                              dtype=array.dtype, chunks=(1, *array.shape), compression='gzip',
                                              compression_opts=1, shuffle=True)
-                    group[key][index] = array
+                    ds = group[key]; ds.resize(self.index + 1, axis=0); ds[self.index] = array
         append_group(self.file, obs)
         self.timings['write_seconds'] += time.monotonic() - tick
-        if (index + 1) % 30 == 0:
-            self.file.flush(); print('FRAMES', index + 1, flush=True)
+        self.index += 1
+        if self.index % 30 == 0:
+            self.file.flush(); print('FRAMES', self.index, flush=True)
 
     def close(self):
         import numpy as np
-        self.writer.shutdown(wait=True)
-        writer_error = None
-        for pending in self.pending:
-            try:
-                pending.result()
-            except Exception as error:
-                writer_error = error
         self.file.create_dataset('frame_index', data=np.arange(self.index))
         self.file.create_dataset('timestamp', data=np.arange(self.index) / 15)
         self.file.attrs['depth_units'] = 'meters'
@@ -259,8 +242,6 @@ class Capture:
                 errors.append(name)
         if errors:
             raise RuntimeError(f'Video encoding failed: {errors}')
-        if writer_error is not None:
-            raise writer_error
 
 
 def episode(index, output_root=None):
@@ -366,7 +347,7 @@ def pool(worker, limit):
             with log_path.open('x') as log:
                 try:
                     result = subprocess.run([sys.executable, str(Path(__file__).resolve()), 'episode', '--index', str(index)],
-                        stdout=log, stderr=subprocess.STDOUT, timeout=1800)
+                        stdout=log, stderr=subprocess.STDOUT, timeout=max(1800, row['length'] * 6 + 300))
                     code = result.returncode
                 except subprocess.TimeoutExpired:
                     code = 124

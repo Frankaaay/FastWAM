@@ -38,3 +38,6 @@
 - 定向优化Capture：单个后台writer，最多两帧在途，渲染与JPEG/GT压缩/视频管道写入重叠；按已知帧数预分配HDF5，省去逐帧resize。保持所有数值dtype/压缩参数和六目视频编码不变，验收前等待所有写入并传播异常。增加顺序/dtype和后台错误传播测试；需真实轨迹吞吐及数据对比后才能正式启用。
 - 本地编译通过；本地环境缺h5py，新增writer测试改在既有H100运行环境、Slurm基准开始前执行，未为测试安装新依赖。
 - CameraGroup追加接口核实：此前逐camera读取产生stale-buffer警告，下一探针直接读取group.get_picture_cuda张量再CPU回读，判断批量接口本身是否可用；仍只在tests实验，不进入生产。
+- 拟采用已验证的每GPU四个领取lane（八卡共32），沿用全局flock、最长轨迹优先、仅跳过accepted。单条时限按max(1800,6*帧数+300)秒，避免同卡竞争让长轨迹误触旧30分钟上限；最终并发仍以异步版实测为准。
+- Slurm共享GPU绑定实核：srun --ntasks=12 --gpu-bind=single:4，12个rank实际PCI为9b/bb/cb各4个。正式使用32个独立Slurm rank、每rank4CPU、GPU总数8，保留srun kill-on-bad-exit，不在pool内部叠线程。异步版首条与16091基线84个HDF5 dataset逐帧完全一致；比较经分配中的Slurm step执行。首次检查缺PYTHONPATH失败，补齐既有extras后通过，非数据失败。
+- 异步writer首两条123.74/118.16秒，慢于基线117.12/111.27；后台线程wall计时大幅拉长，未实现预期重叠收益。恢复此前已验收的同步Capture（包括原resize方式），不把无收益实现留在生产；最终保留32个Slurm rank调度与长轨迹时限优化。本地原生GT两项测试通过。

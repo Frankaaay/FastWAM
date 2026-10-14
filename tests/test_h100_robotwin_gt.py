@@ -1,8 +1,6 @@
 import importlib.util
 from pathlib import Path
 import unittest
-import tempfile
-import h5py
 import numpy as np
 
 spec = importlib.util.spec_from_file_location('gt', Path(__file__).resolve().parents[1] / 'scripts/h100_robotwin_gt.py')
@@ -10,29 +8,6 @@ gt = importlib.util.module_from_spec(spec); spec.loader.exec_module(gt)
 
 
 class NativeGT(unittest.TestCase):
-    def test_background_writer_preserves_order_and_dtype(self):
-        with tempfile.TemporaryDirectory() as folder:
-            capture = gt.Capture(Path(folder), np.zeros((2, 14)))
-            for index in range(2):
-                obs = {'observation': {'camera': {'actor_id': np.array([[999 + index]], np.uint32)}}}
-                capture.pending.append(capture.writer.submit(capture._write, obs, index))
-            capture.index = 2
-            capture.close()
-            with h5py.File(Path(folder) / 'episode.hdf5') as f:
-                data = f['observation/camera/actor_id'][:]
-                np.testing.assert_array_equal(data[:, 0, 0], [999, 1000])
-                self.assertEqual(data.dtype, np.dtype('uint32'))
-                np.testing.assert_array_equal(f['frame_index'][:], [0, 1])
-
-    def test_background_failure_is_propagated(self):
-        with tempfile.TemporaryDirectory() as folder:
-            capture = gt.Capture(Path(folder), np.zeros((1, 14)))
-            def fail():
-                raise OSError('writer failed')
-            capture.pending.append(capture.writer.submit(fail))
-            with self.assertRaisesRegex(OSError, 'writer failed'):
-                capture.close()
-
     def test_depth_and_integer_ids(self):
         class Camera:
             def get_picture(self, key):
