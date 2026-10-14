@@ -15,9 +15,39 @@ import ast
 spec = importlib.util.spec_from_file_location('evaluation', Path(__file__).resolve().parents[1] / 'scripts/c2r/evaluate.py')
 evaluation = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(evaluation)
+launcher_spec = importlib.util.spec_from_file_location(
+    'launcher', Path(__file__).resolve().parents[1] / 'scripts/c2r/launch_eval_h800.py')
+launcher = importlib.util.module_from_spec(launcher_spec)
+launcher_spec.loader.exec_module(launcher)
 
 
 class EvaluationTests(unittest.TestCase):
+    def test_supervisor_retires_only_confirmed_dead_owners(self):
+        states = {}
+        for name, status in [('live', 'Running'), ('pending', 'Queuing'), ('dead', 'Failed'),
+                             ('stopped', 'Stopped'), ('done', 'Succeeded'), ('unknown', None)]:
+            evaluation.write_json(self.root / 'claims' / name / 'active/owner.json',
+                                  dict(job=name, token=name, pid=1))
+            if status:
+                states[name] = dict(JobId=name, Status=status)
+        retired = launcher.retire_terminal_claims(self.root, states)
+        self.assertEqual(set(retired), {'dead', 'stopped', 'done'})
+        for name in ('live', 'pending', 'unknown'):
+            self.assertTrue((self.root / 'claims' / name / 'active/owner.json').exists())
+        for name in retired:
+            archive = next((self.root / 'claims' / name).glob('retired-*'))
+            self.assertTrue((archive / 'owner.json').exists())
+            self.assertTrue((archive / 'retirement.json').exists())
+            with evaluation.claim(self.root, name) as acquired:
+                self.assertTrue(acquired)
+        self.assertEqual(launcher.retire_terminal_claims(self.root, states), [])
+
+    def test_supervisor_rejects_missing_token_and_mismatched_identity(self):
+        evaluation.write_json(self.root / 'claims/no-token/active/owner.json', dict(job='a'))
+        evaluation.write_json(self.root / 'claims/wrong-id/active/owner.json', dict(job='a', token='x'))
+        self.assertEqual(launcher.retire_terminal_claims(
+            self.root, {'a': dict(JobId='b', Status='Failed')}), [])
+
     def test_native_scene_defaults_are_isolated_across_tasks_and_episodes(self):
         source = Path(__file__).resolve().parents[1] / 'third_party/RoboTwin/envs/_base_task.py'
         tree = ast.parse(source.read_text())

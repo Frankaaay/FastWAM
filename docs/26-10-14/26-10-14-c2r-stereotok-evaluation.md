@@ -122,3 +122,9 @@ Windows初次并发测试触发目标文件并行replace的WinError5，属于Win
 - 用户追问clean分数ETA：2025缺失按历史35.32–61.39回合/GPU小时，固定16卡理想2.06–3.58小时，含启动/长尾暂按2–4小时；当前57卡若持续可用，理想0.58–1.01小时，含启动/长尾暂按1–2小时。均是条件估计，不是修复版稳态实测，不承诺固定完成时刻。clean验收5000后立即报分，再按新授权重建全部randomized计划/回合。
 - stereotok跟进已恢复ACTIVE/10分钟，更新到新clean清单、clone、SHA、2975恢复基数和先clean后randomized阶段门禁；禁止恢复旧任务/训练，禁止按超时抢claim。完成后暂停跟进。
 - 首次真实健康快照16:10:09（dlcftwk5ne165x1o）：50plans、2975回合、result/prepare errors均0、114活动认领/114worker日志，未见Traceback或exit.json；抽样仍在SAPIEN导入启动阶段。尚无新增回合，不把这次快照解释为稳态吞吐。
+
+### 18:08后抢占认领恢复与持续监督修复
+- 用户报告4920/5000卡住，要求固定16卡持续推进、闲时收回不能阻塞。实时GetJob确认8个固定Job全部Running，剩余认领属于已Failed作业；不是固定卡申请不足，而是mkdir强杀后遗留认领、缺少实际运行的持续回收控制器。此前依赖聊天heartbeat不充分，本次读取automation又处于PAUSED；不将监控配置等同实际执行。
+- CPU修复Job dlc1j9ctu33b0tyg依据本次逐个GetJob终态确认，归档16个失效active到各自retired唯一目录，保存owner及终态证据；15个adjust_bottle、1个scan_object，原4920成功回合和全部失败证据保留。没有按超时抢占活跃worker，没有修改运行clone。
+- 现有launch_eval_h800.py加入本机独立supervise模式：每轮查询DLC状态，0GPU/1CPU控制作业执行安全回收和正式summary；60秒循环间隔（含API/CPU调度延迟），不依赖聊天唤醒。仅JobId一致、token存在且云端明确终态才回收；未知/live不回收。控制器保留提交intent、回执、PID锁和进度，未知提交结果禁止盲重试。固定抢占后按原请求补位，闲时仅ForceQuotaOverSold补位；固定16与闲时<=59断言，非抢占程序失败保留needs_diagnosis，不无界重复崩溃。已替换旧Job身份保留查询，避免遗漏其认领。
+- 控制器依赖这台Windows主机和网络持续在线，不能宣称机器关机仍自动恢复；heartbeat另负责控制器存活/错误检查和阶段切换。GPU评估clone维持原f9cb版本，监督代码独立发布，不热改运行clone。
