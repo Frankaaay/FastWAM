@@ -110,7 +110,7 @@ class Base_Task(gym.Env):
         self.plan_success = True
         self.step_lim = None
         self.fix_gripper = False
-        self.setup_scene()
+        self.setup_scene(render_device=kwags.get("render_device"))
 
         self.left_js = None
         self.right_js = None
@@ -241,7 +241,12 @@ class Base_Task(gym.Env):
 
         # declare sapien scene
         scene_config = sapien.SceneConfig()
-        self.scene = self.engine.create_scene(scene_config)
+        if kwargs.get("render_device") is not None:
+            sapien.physx.set_scene_config(scene_config)
+            self.scene = sapien.Scene([sapien.physx.PhysxCpuSystem(),
+                                       sapien.render.RenderSystem(device=kwargs["render_device"])])
+        else:
+            self.scene = self.engine.create_scene(scene_config)
         # set simulation timestep
         self.scene.set_timestep(kwargs.get("timestep", 1 / 250))
         # add ground to scene
