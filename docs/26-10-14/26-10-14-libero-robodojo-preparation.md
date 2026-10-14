@@ -221,3 +221,16 @@ LingBot-VA独立环境链184552已启动，源码fetch/pull确认up-to-date；�
 OpenWAM LIBERO首轮服务成功加载本次checkpoint和官方compile/cache，但客户端因启动环境漏传LIBERO_PATH而退出，尚未执行动作；保留原日志，不是模型推理失败。补齐独立LIBERO_PATH与LIBERO_CONFIG_ROOT后重启闭环链186140，输出openwam/libero-closed-loop-v2，日志openwam-libero-closed-loop-v2.log。RoboDojo依赖链176682已完成cuRobo v2安装；import验证184769已提交，日志robodojo-runtime-import.log，仍待结果及真实渲染。
 
 FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，删除512文本、80D/OpenWAM reader与5epoch覆盖；继承10epoch等原版参数，只保留smoke B2/max2/save2/eval0和明确路径覆盖。四套原始tar数据源yuanty/LIBERO-fastwam revisionee018b997c430bb12b5bf3c892d744798c5a2f91，不能误取同repo的lerobot_v30派生版。当前Frank个人datasets只有OpenWAM版本，需独立下载官方四个tar并使用原生reader验证。原版baseline目前尚未重跑通过。
+
+## 14:29 最终配置归属确认与当前验收
+
+用户最终确认：FastWAM LIBERO对齐FastWAM原版；FastWAM RoboTwin clean-only/RoboDojo只对齐OpenWAM实际复现FastWAM的设置，不能套OpenWAM自身训练配置。OpenWAM三个benchmark遵循自身来源；LingBot-VA LIBERO/RoboTwin遵循原作者，RoboDojo遵循RoboDojo团队XPolicyLab适配并单独核验。未公开参数保留待核实，不推定相同。
+
+- OpenWAM LIBERO闭环v2通过：四套各task0/trial1/8 policy actions，results均有实际动作计数。结合三组训练checkpoint审计，目前八组目标只有OpenWAM LIBERO完成smoke验收（1/8），不是完整论文评测或成功率复现。证据runs/five-baselines-20261014/openwam/libero-closed-loop-v2。
+- FastWAM官方LIBERO四个tar已下载解包到datasets/FastWAM-LIBERO-native-ee018b9，日志fastwam-native-libero-download.log包含四个NATIVE_LIBERO_SUITE_EXTRACTED。尚需原生reader/128长度T5缓存及训练闭环。纠正配置已推送bae58fa；远端fetch连续TLS/GnuTLS -110失败，remote仍e2dd655，尚未通过新配置Hydra验证，不绕过Git门禁复制源码。
+- RoboTwin独立env已装官方stable PyTorch3D0.7.8（75ebeea），安装日志robotwin-pytorch3d-install.log。将独立env中imageio_ffmpeg自带7.0.2二进制链接为该env/bin/ffmpeg，客户端PATH明确优先独立env/bin。重试链PID208717，输出openwam/robotwin-closed-loop-v2，分别demo_clean/demo_randomized各1episode，未启用planner fallback。启动健康检查时尚在策略服务装载，无闭环通过结论。
+- RoboDojo IsaacSim首轮启动在0.85s左右崩溃，尚无Kit场景日志、渲染或policy动作。日志robodojo-isaac-startup.log及/root/.nvidia-omniverse/logs/omni.processlifetime.log；不能据此确定驱动是根因。CuRobo/IsaacLab imports此前通过不等于渲染通过。资产下载65528继续，约56%文件数而非字节进度。
+- LingBot官方torch环境链184552及base下载186492仍活跃；尚未完成整体依赖或训练。各自日志lingbot-va-environment.log、lingbot-va-base-download.log。
+- OpenWAM论文https://arxiv.org/pdf/2609.07398的附录B/Table9/Table10明示OpenWAM-alpha预训练/SFT，不能用它们填充FastWAM复现参数；表内FastWAM成绩引用也不能独立证明重训方法。FastWAM RoboDojo/RoboTwin复现配置来源仍需核实，已有OpenWAM-reader FastWAM结果只保留为适配实验。
+
+本轮RAM重新核验frank/205455090823393499；DSW dsw-t7b951pdehd9to9kgb Running，SSH实际到达120.77.254.228:1020。持续目标保持active，未启动正式训练或StereoTok。
