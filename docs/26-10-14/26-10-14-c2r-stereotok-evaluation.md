@@ -198,3 +198,9 @@ Windows初次并发测试触发目标文件并行replace的WinError5，属于Win
 - 固定8作业：dlc1dptdl7ug7aod、dlc1e9skcr2lonb1、dlc1ejs5qjqprfe3、dlc1etrr4bv3h2di、dlc1etrr4bvu31ic、dlc1fdqxvv4n6uhm、dlc1fdqxvv55f3d6、dlc1fnqj9nh7utb2。独立监督器隐藏进程PID36544，randomized-jobs-supervisor.json/lock及randomized-supervisor.stdout.log/stderr.log；首轮状态18:33:31为固定12Running+4EnvPreparing，闲时12Running+19EnvPreparing+28Queuing，不等于已产出回合。控制器probe dlc1xp0557s324pp；初次额外worker健康/远端registry发布0GPU Job dlc3xps0bc8v8htq。
 - 跟进已更新当前randomized清单/PID/阶段，禁止重复启动或恢复clean。尚无稳态速度，不给全量完成承诺；持续控制器负责已确认终态认领回收和原额度资源补位，聊天跟进核查其健康并处理非抢占故障。
 - 18:34:29初次实际worker检查：94份worker日志、50个活动认领，0已发布完整plans/0rollout回合，result/prepare errors均0，未见Traceback或退出记录；处于50条件专家筛选准备阶段，未将认领数当完成计划。
+
+### 20:40 用户检查：训练正常结束，评估监督受云权限变更阻断
+- GetJob训练dlc1ife1hnwmbq9s实时Succeeded。randomized监督日志持续增长：20:36:42快照3451/5000、errors=[]，此前各轮持续新增，不是已证实GPU计算停滞。
+- 独立监督器36544出现CreateJob退出2，保留create_intent c2r-watch-46e89be37271.json并等待核对。两次ListJobs按DisplayName均TotalCount0，确认原提交未落地；停止身份已核验的本机监督器以避免并发写状态，保留lock及全部日志。定向重试返回400 BadRequest: the user is not allowed to use this quota，未创建作业。未重启GPU/训练，未删除文件。
+- 实时CommonQuotaConfig.allowedRoles GmtModifiedTime=2026-10-14T12:36:03Z（20:36:03北京时间）：quota1bybv9m0ixu仅role-y37r56eto47vv4qxzd，Frank仅research role-ruehjev23bey9is0wh。其对应quotan2i9e2t9tqr虽在role映射，ListQuotas Workspace350607返回Quotas=[] TotalCount0，无法验证任何可用新配额；jobConfig也仅列原父配额。没有换配额绕过权限或试探提交。
+- 当前38个randomized Job实时状态：固定16GPU Running，闲时35GPU Running/4GPU Stopped/20GPU Queuing。JobRunning不证明无worker局部故障；最新完整产物快照仍20:36:42的3451，不能冒充20:40实时回合数。权限恢复前无法提交0GPU持久结果读取/回收作业或新GPU补位，监督器暂未恢复；已有计算作业未被本次操作停止。需管理员恢复本RAM对评估配额的权限或提供可验证允许的配额，之后核对旧create intent无落地、归档已死PID锁并恢复监督器，优先检查4GPU Stopped的残余claims。
