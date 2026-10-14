@@ -8,6 +8,8 @@ import sys
 import subprocess
 from types import SimpleNamespace
 from unittest.mock import patch
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 spec = importlib.util.spec_from_file_location('evaluation', Path(__file__).resolve().parents[1] / 'scripts/c2r/evaluate.py')
 evaluation = importlib.util.module_from_spec(spec)
@@ -69,6 +71,19 @@ class EvaluationTests(unittest.TestCase):
                                   dict(episodes=[dict(ordinal=0), dict(ordinal=1)]))
             with self.assertRaises(StopIteration):
                 next(iterator)
+
+    def test_atomic_writes_with_equal_pids_have_distinct_temporary_files(self):
+        barrier = threading.Barrier(8)
+        original = Path.write_text
+        def synchronized(path, *args, **kwargs):
+            result = original(path, *args, **kwargs)
+            barrier.wait(timeout=10)
+            return result
+        destination = self.root / 'complete.json'
+        with patch.object(Path, 'write_text', synchronized):
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                list(pool.map(lambda i: evaluation.write_json(destination, dict(value=i)), range(8)))
+        self.assertIn(json.loads(destination.read_text())['value'], range(8))
 
     def test_ready_cases_do_not_wait_for_first_case(self):
         cases = [dict(task='slow', phase='clean'), dict(task='a', phase='clean')]

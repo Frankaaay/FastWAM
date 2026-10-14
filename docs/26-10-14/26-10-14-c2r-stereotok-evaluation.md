@@ -79,3 +79,6 @@
 - 新38 Job清单/请求在本机既有请求目录 resume-jobs.json、fixed16-resume-*.json、idle-resume-*.json；有界启动快照：固定8作业16卡Running；闲时25作业49卡Running、5作业10卡Queuing。本人准备DSW已GetInstance确认Stopped。全部旧39固定作业仍停止，新诊断4作业已停止；没有额外固定GPU。
 - 0GPU健康读取Job dlc15avk7fmd2ic5负责发布新root/jobs.json并读取plans/results/errors/worker退出，输出分行避免API约4KiB截断；不能仅以Running作为回合完成证据。
 - 自动跟进stereotok已更新为最新固定16+闲时规则并ACTIVE；检查仅接续root/新清单，禁止恢复旧39作业或训练。定向修复异常、只补缺失，统计新增吞吐时扣除2582恢复回合；最终总成本需另加首轮及诊断实际GPU小时，不把恢复复制当新产出。完整A/B尚未结束，后续不能宣称新配置已全量证实更快。
+
+### 启动并发写入修复
+0GPU健康读取发现completed标记写入的临时文件仅按PID命名；不同DLC容器具有相同PID，多个worker完成扫描同时写同一个case标记，tmp被另一容器rename后导致FileNotFoundError。原result/plan仍保留。write_json改用UUID临时名，8路相同PID并发写入barrier回归测试覆盖此根因；不热改9e1079e运行clone，发布新SHA独立clone，仅替换退出/受影响作业。全局唯一临时名也适用于后续每回合保存。

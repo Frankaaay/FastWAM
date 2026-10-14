@@ -9,12 +9,13 @@ import random
 import sys
 import time
 import traceback
+import uuid
 
 
 def write_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + f'.{os.getpid()}.tmp')
+    tmp = path.with_name(path.name + f'.{uuid.uuid4().hex}.tmp')
     tmp.write_text(json.dumps(value, indent=2) + '\n')
     tmp.replace(path)
 
