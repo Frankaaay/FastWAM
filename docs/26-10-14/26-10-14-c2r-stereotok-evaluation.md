@@ -121,3 +121,4 @@ Windows初次并发测试触发目标文件并行replace的WinError5，属于Win
 - 已提交8组固定双卡16GPU和29组闲时双卡+1单卡59GPU，全部mode rollout、每卡2worker。精确38Job清单本机既有请求目录 clean-jobs.json，请求 clean-final-*.json，16:09逐个GetJob快照 clean-launch-status.json：固定16卡Running，闲时41卡Running/18卡Queuing。Running只代表调度；首次健康读取0GPU Job dlcftwk5ne165x1o负责发布新root/jobs.json和检查worker日志、错误、认领、实际回合数。
 - 用户追问clean分数ETA：2025缺失按历史35.32–61.39回合/GPU小时，固定16卡理想2.06–3.58小时，含启动/长尾暂按2–4小时；当前57卡若持续可用，理想0.58–1.01小时，含启动/长尾暂按1–2小时。均是条件估计，不是修复版稳态实测，不承诺固定完成时刻。clean验收5000后立即报分，再按新授权重建全部randomized计划/回合。
 - stereotok跟进已恢复ACTIVE/10分钟，更新到新clean清单、clone、SHA、2975恢复基数和先clean后randomized阶段门禁；禁止恢复旧任务/训练，禁止按超时抢claim。完成后暂停跟进。
+- 首次真实健康快照16:10:09（dlcftwk5ne165x1o）：50plans、2975回合、result/prepare errors均0、114活动认领/114worker日志，未见Traceback或exit.json；抽样仍在SAPIEN导入启动阶段。尚无新增回合，不把这次快照解释为稳态吞吐。
