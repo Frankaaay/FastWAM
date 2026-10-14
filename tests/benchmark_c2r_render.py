@@ -18,6 +18,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--task', default='click_bell')
     parser.add_argument('--episodes', type=int, default=1)
+    parser.add_argument('--phases', nargs='+', choices=['clean', 'randomized'], default=['clean', 'randomized'])
     args = parser.parse_args()
     manifest = json.loads((args.root / 'manifest.json').read_text())
     official, device = evaluate.setup_runtime()
@@ -25,7 +26,7 @@ def main():
     model = C2RPolicy(manifest['checkpoint'], manifest['training_root'])
     factory = official.class_decorator
     all_results = []
-    for phase in ('clean', 'randomized'):
+    for phase in args.phases:
         case = dict(task=args.task, phase=phase)
         plan = json.loads((args.root / 'plans' / f'{args.task}--{phase}.json').read_text())
         runs = {}
