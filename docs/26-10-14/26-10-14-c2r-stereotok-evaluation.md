@@ -204,3 +204,8 @@ Windows初次并发测试触发目标文件并行replace的WinError5，属于Win
 - 独立监督器36544出现CreateJob退出2，保留create_intent c2r-watch-46e89be37271.json并等待核对。两次ListJobs按DisplayName均TotalCount0，确认原提交未落地；停止身份已核验的本机监督器以避免并发写状态，保留lock及全部日志。定向重试返回400 BadRequest: the user is not allowed to use this quota，未创建作业。未重启GPU/训练，未删除文件。
 - 实时CommonQuotaConfig.allowedRoles GmtModifiedTime=2026-10-14T12:36:03Z（20:36:03北京时间）：quota1bybv9m0ixu仅role-y37r56eto47vv4qxzd，Frank仅research role-ruehjev23bey9is0wh。其对应quotan2i9e2t9tqr虽在role映射，ListQuotas Workspace350607返回Quotas=[] TotalCount0，无法验证任何可用新配额；jobConfig也仅列原父配额。没有换配额绕过权限或试探提交。
 - 当前38个randomized Job实时状态：固定16GPU Running，闲时35GPU Running/4GPU Stopped/20GPU Queuing。JobRunning不证明无worker局部故障；最新完整产物快照仍20:36:42的3451，不能冒充20:40实时回合数。权限恢复前无法提交0GPU持久结果读取/回收作业或新GPU补位，监督器暂未恢复；已有计算作业未被本次操作停止。需管理员恢复本RAM对评估配额的权限或提供可验证允许的配额，之后核对旧create intent无落地、归档已死PID锁并恢复监督器，优先检查4GPU Stopped的残余claims。
+
+### 用户授权接续Wan评估，配额仍未恢复
+- 最新用户明确要求random结束后启动Wan eval。本次GetJob：randomized固定16GPU对应8Job全部Succeeded，闲时55GPU对应28Job Succeeded、4GPU对应2Job Stopped，已无Running/Queuing。所有38Job终态快照randomized-status-before-wan.json；这不是5000结果/seed合同验收，尚需持久文件正式summary。
+- Wan目标为优化后source9a7c95c训练Job dlc1np6brflwbfe1，本次GetJob确认Succeeded，训练root /mnt/workdir/frank/runs/fastwam-c2r-wan-train-20261013-dlc1np6brflwbfe1，预期final checkpoints/weights/step_010725.pt待直接验收及strict载入。不是旧Wan dlcuj5eyz3wpbnhc。评估应复用已修复的同源evaluate/原clean与新randomized冻结plans，保持相同seed/instruction、EEF32/10denoise、50×2×100；policy已按模型requires_stereo选择Wan输入，无需修改训练。
+- 再次查询allowedRoles/GetMember/ListQuotas：20:36权限变更仍在，Frank只有research，原配额不允许，ListQuotas为空；没有盲目重试CreateJob、切换未验证配额或宣称Wan已启动。管理员恢复或提供有效授权配额后，先验收StereoTok随机5000和Wan权重，再独立root固定16+额外59闲时评估Wan，监督器继续用于回收和补位。当前无GPU评估在运行。
