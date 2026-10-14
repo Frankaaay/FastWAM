@@ -274,3 +274,7 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 - LingBot flash-attn239461继续实际编译，15:19 ninja日志已有70条目标完成记录。RoboDojo优先资产270126继续下载，15:17为841/2297文件；文件比例不代表字节或完整准备比例。
 - 本轮RAM frank205455090823393499与DSW Running/SSH公网映射再次核验，命令实际到达远端；当前完整验收仍3/9，其余继续推进。
 新增tests/run_lingbot_libero_smoke.py：只导入固定SHA的官方LingBot原生训练入口；复制其LIBERO配置，仅覆盖本地路径、测试时长、保存频率、worker数和smoke W&B开关。保留B1/GA10、原始优化器与动作/latent合同，训练前逐episode检查所有发布的双相机latent窗口，缺失立即失败，不容许reader静默筛样本。默认3个optimizer更新是本次短测试选择，不是通用验收要求；双卡与官方8卡的全局batch差异只用于运行门禁，不作性能复现。AST与git diff检查通过，真实训练待下载和环境终态。
+
+15:24：LingBot flash-attn构建/安装完成，官方模型依赖imports及原生train import均通过。pip check仍明确记录LeRobot对torch/vision的两条metadata冲突，未宣称全绿。官方VA_Server._get_t5_prompt_embeds方法以AST直接提取执行（未改其实现），使用LingBot base自己的T5生成empty_emb.pt，shape512x4096/bfloat16/全部finite；日志lingbot-official-empty-embedding.log。
+
+测试包装78a55c5已推送且远端clean clone同步。启动原生LingBot LIBERO链PID298690，日志lingbot-native-libero-chain-v1.log；先等待288304完整下载成功标记，再使用2卡、原版B1/GA10、3次optimizer更新和末次checkpoint保存。输出lingbot/libero-native-v1。一次健康检查确认链处于WAITING_FOR_OFFICIAL_DATA_DOWNLOAD，尚未开始训练，不算验收通过。下载进程与RoboDojo资产进程均活跃。首次本地push遇TLS握手失败，幂等重试成功；未旁路复制源码。
