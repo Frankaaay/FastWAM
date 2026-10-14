@@ -115,3 +115,9 @@ Windows初次并发测试触发目标文件并行replace的WinError5，属于Win
 - 额外修复故障隔离：ready_cases遇到已失败的条件先记录blocked并让其他条件继续；最后仍非零报告失败，不伪造完整性。已失败chunk不重复把其他worker拉退出，当前worker新异常仍记录后退出，防带损坏CUDA/仿真状态继续。准备失败也仅隔离对应条件。正式summary仍要求所有目标回合完整且无error。
 - 针对日志确认的缓存故障，launcher给每worker预建可写kernels/matplotlib目录并设置PYTORCH_KERNEL_CACHE_PATH/MPLCONFIGDIR；不改模型、渲染、数值精度或种子。旧运行clone不热改。
 - 分阶段输出：计划新clean root /mnt/workdir/frank/runs/c2r-stereotok-clean-final-20261014，仅含原50clean cases/冻结plans和有效结果，目标5000；randomized新root在clean严格验收后再创建，50randomized cases从seed100000按原专家筛选规则重建100有效回合，旧random计划不复用。最终分别报告两phase，不把旧random混入。
+
+### 16:09 clean 独立恢复与条件 ETA
+- 旧两个残留闲时作业均 GetJob 确认 Stopped。发布 f9cb2e89f8d820a40a25239006ad846266f682fa；独立 clean clone /mnt/workdir/frank/projects/FastWAM-C2R-eval-isolated-20261014。bootstrap CPU Job dlcc7z11nwpetepo 在真实 Linux CPFS 运行9项测试全部通过；新 root /mnt/workdir/frank/runs/c2r-stereotok-clean-final-20261014，仅含50个clean条件，复制并校验2975/5000有效回合，剩余2025，完整SR仍为null。原plans/results及recovery来源均保留，旧randomized不混入。
+- 已提交8组固定双卡16GPU和29组闲时双卡+1单卡59GPU，全部mode rollout、每卡2worker。精确38Job清单本机既有请求目录 clean-jobs.json，请求 clean-final-*.json，16:09逐个GetJob快照 clean-launch-status.json：固定16卡Running，闲时41卡Running/18卡Queuing。Running只代表调度；首次健康读取0GPU Job dlcftwk5ne165x1o负责发布新root/jobs.json和检查worker日志、错误、认领、实际回合数。
+- 用户追问clean分数ETA：2025缺失按历史35.32–61.39回合/GPU小时，固定16卡理想2.06–3.58小时，含启动/长尾暂按2–4小时；当前57卡若持续可用，理想0.58–1.01小时，含启动/长尾暂按1–2小时。均是条件估计，不是修复版稳态实测，不承诺固定完成时刻。clean验收5000后立即报分，再按新授权重建全部randomized计划/回合。
+- stereotok跟进已恢复ACTIVE/10分钟，更新到新clean清单、clone、SHA、2975恢复基数和先clean后randomized阶段门禁；禁止恢复旧任务/训练，禁止按超时抢claim。完成后暂停跟进。
