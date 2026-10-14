@@ -154,3 +154,11 @@ RoboDojo资产首次下载已因hf-mirror HTTP429失败（Assets/Eval_Layout/...
 - OpenWAM官方依赖安装完成；初次import因libGLX.so.0不在搜索路径失败。个人已有system-libs/prefix/usr/lib/x86_64-linux-gnu包含此库，显式LD_LIBRARY_PATH后torch/hydra/cv2/h5py/pyarrow/av/deepspeed/transformers/diffusers全import通过，torch2.7.1+cu128、transformers5.19.0。不替换官方opencv版本。
 - 原35953/36999等待链在尚未开始训练/仿真时定向结束，重新提交携带LD_LIBRARY_PATH且绑定新PID的链：OpenWAM72159等待FastWAM70448及LIBERO setup63082；LIBERO环境smoke72160等待63082和72159。日志分别openwam-training-chain-v2.log与libero-render-chain-v2.log。不存在继续恢复35953的待办。
 - LIBERO官方pip安装和IsaacSim包写入CPFS仍进行中；RoboDojo资产低并发续传仍运行。5组闭环验收均未完成，持续处理目标未结束。
+
+## 13:28 首个训练成功与闭环服务适配
+
+FastWAM LIBERO训练进程exit0；step1 loss1.6486（action1.0798/video0.5688），step2 loss4.4030（action3.7078/video0.6952），梯度累计1、world_size2、ZeRO2、bf16。运行目录fastwam/libero/20261014_132144，权重checkpoints/weights/step_000002.pt及完整state已写出。仍需直接读取checkpoint计数/张量及策略仿真。RoboDojo同链已启动Wan载入。
+
+新增tests/serve_openwam_baseline.py，专用于本任务闭环smoke，不接入生产路径：保存config与请求benchmark必须匹配；dataset适配器继续验证OpenWAM SHA；mot/proprio严格加载训练checkpoint，step至少2；各run内保存归一化统计副本和hash绑定。只复用官方dataloader的Normalizer、统一维度scatter/gather、multiview拼图；FastWAM仍调用infer_action。单客户端JSON WebSocket与官方LIBERO客户端协议相同，拒绝缺相机、错维度、非有限数、未知提示词缓存。默认10去噪步/full32chunk对齐OpenWAM deploy默认。RoboDojo还需XPolicyLab原生坐标/动作桥接。
+
+没有直接复用OpenWAM整套PolicyServer，因为其包导入会拉起全部模型架构；FastWAM独立环境实测首先缺ftfy，继续安装会造成无关模型依赖耦合。当前test server仅需独立websockets运行依赖，待FastWAM训练退出后安装，避免修改正在运行的环境。新增脚本AST解析通过；尚未进行真实checkpoint加载和客户端测试。
