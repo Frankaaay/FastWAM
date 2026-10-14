@@ -171,3 +171,15 @@ FastWAM LIBERO训练进程exit0；step1 loss1.6486（action1.0798/video0.5688）
 - 推理审计期间OpenWAM链72159定向SIGSTOP防GPU冲突，finally已SIGCONT恢复；它仍等待LIBERO安装63082完成（官方conda在OpenWAM目录生成临时requirements，当前未隐藏/删除这个活跃文件）。
 - IsaacSim5.1.0.0安装63080已完成；实查torch2.7.0为CUDA12.6轮子，官方IsaacLab/RoboDojo要求cu128。新链99194按官方精确torch2.7.0+cu128/vision0.22.0+cu128/audio2.7.0+cu128补齐，之后执行固定submodule的isaaclab.sh --install none。日志robodojo-isaaclab-setup.log；后续仍需官方runtime repin、CuRobo和渲染验收，不能据安装metadata声称仿真成功。
 - RoboTwin独立准备链96530：clone到projects/RoboTwin-openwam-baselines-20261014，固定OpenWAM验证SHA0aeea2d669c0f8516f4d5785f0aa33ba812c14b4；从frank自己的robotwin-render-py310只读克隆独立env robotwin-openwam-baselines-20261014。源版本torch2.4.1+cu124/sapien3.0.0b1/mplib0.2.1/curobo0.7.8符合；warp1.4.1、缺websockets需要在新env修正为官方warp1.13.0及客户端依赖，不修改已有FastWAM RoboTwin环境。clone尚未完成，后续需独立curobo源码绑定和资产检查。
+
+LIBERO安装63082现已正常完成：官方setup打印No broken requirements found以及LIBERO evaluation environment ready with official requirements and MuJoCo3.3.2。OpenWAM72159恢复后import gate通过，当前进入git fetch门禁，尚无OpenWAM真实训练loss。RoboDojo固定XPolicyLab submodule实际包含policy/OpenWAM/model.py和client_server/ws/model_client.py，可复用其EE坐标桥接；并非假设集成不存在。后续验收仍须真实仿真，当前五组最终baseline通过数为0。
+
+## 13:57 首个 baseline 闭环通过与 OpenWAM 显存修复
+
+- FastWAM LIBERO闭环链104250正常结束。四套spatial/object/goal/libero_10各task0、1trial、settle30、policy_steps8；四份results.json均实际记录8步，策略服务严格加载step2并输出四个finite [32,10] chunk。日志位于five-baselines-20261014/fastwam/libero-closed-loop。2步训练权重成功率0/1符合smoke预期，不表示达到论文分数。结合之前训练、checkpoint审计，FastWAM LIBERO的smoke闭环通过；仍非40任务完整评测。
+- OpenWAM训练链106363在LIBERO第一个AdamW更新失败：torch._foreach_sqrt临时请求11.22GiB，当时GPU仅剩9.32GiB；不是数据、Wan加载或前向初始化失败。保留openwam/libero/train.log，未覆盖旧输出。
+- 使用官方现有training.offload_optimizer_device=cpu重试，保持B2、GA1、lr/seed/数据/模型不变；CPU offload是本次smoke运行差异，正式训练配置尚未启动。新链139735，日志openwam-training-cpu-offload-chain.log，三个benchmark分别写openwam/<benchmark>/cpu-offload-attempt，max_steps2/save2；当前Wan加载中，尚未通过。
+- RoboTwin独立conda clone96530已结束，新env仅安装warp-lang1.13.0/websockets13.1/pyyaml，PID140324，日志robotwin-openwam-runtime-deps.log。检测clone保留editable curobo指向Frank自己的projects/curobo-v0.7.8（clean d64c4b005459db10c5dd867d8b30a87d5bda9bdb），后续需单独绑定源码避免与旧运行相互影响。
+- RoboDojo CUDA12.8精确torch栈安装完成；IsaacLab扩展安装99194仍运行。Assets下载65528仍正常推进，约40%文件数，不能当作40%字节完成。持续目标active；当前最终smoke通过1/5，无正式训练。
+
+RoboTwin runtime依赖140324已成功结束：warp1.4.1→1.13.0、websockets13.1。独立cuRobo构建链167338使用官方v0.7.8/d64c4b0，目标RoboTwin-openwam-baselines-20261014/envs/curobo，编译arch9.0、MAX_JOBS8；随后仅创建三个资产目录symlink到Frank已有assets/RoboTwin-bf44be5，不覆盖原资产。日志robotwin-openwam-curobo.log，尚待构建完成。OpenWAM CPU-offload链139735已完成CPU Adam初始化并进入Training 0/2，暂无通过结论。
