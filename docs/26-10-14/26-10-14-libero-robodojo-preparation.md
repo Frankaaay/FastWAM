@@ -1,5 +1,11 @@
 # 五组 Wan 初始化 baseline 准备与验证记录
 
+## 当前有效合同（用户最新纠正）
+
+- FastWAM LIBERO必须继承官方`libero_uncond_2cam224_1e-4`：原生reader、224x448双相机横拼、action7/proprio8、文本128；只有FastWAM RoboTwin clean-only和RoboDojo对齐OpenWAM对应实验。此前OpenWAM-reader LIBERO smoke是适配实验，撤销其“原版baseline通过”的计数，保留日志溯源并重跑原版。
+- OpenWAM三组保持其官方配置。新增LingBot-VA三组采用LingBot-VA官方初始化和配置（允许官方lingbot-va-base），不套用FastWAM初始化或数据表示。当前待验收总范围为八组。
+- 全部只做训练smoke、checkpoint与真实仿真闭环；无正式训练、无StereoTok接入。历史段落保留当时操作事实，冲突之处以本节为准。
+
 日期：2026-10-14，Asia/Shanghai。目标：先在阿里云 H800 平台跑通原版 FastWAM 的两个仿真，再开展 StereoTok 对照。本轮尚未安装、下载数据、启动实例或训练。
 
 > 上述为初轮状态；最新状态及初始化合同以文末“Wan初始化纠正”节为准。公开策略checkpoint调研仅保留溯源，不作为本任务初始化来源。
@@ -213,3 +219,5 @@ LingBot-VA远端官方clone clean main，SHA7c6ffa9bfc4b83582cafc860fab4c82cc7de
 LingBot-VA独立环境链184552已启动，源码fetch/pull确认up-to-date；官方base模型元数据固定HF robbyant/lingbot-va-base revision68b7bc1b35da6ddc67ea94c4ceb58d768fbb3f9c，总仓库文件24382314341bytes，实际只下载text_encoder/tokenizer/transformer/vae四组。下载PID186492，独立checkpoint目录lingbot-va-base-68b7bc1，max_workers1、HF mirror、失败退避；不使用benchmark posttrain策略权重作为初始权重。
 
 OpenWAM LIBERO首轮服务成功加载本次checkpoint和官方compile/cache，但客户端因启动环境漏传LIBERO_PATH而退出，尚未执行动作；保留原日志，不是模型推理失败。补齐独立LIBERO_PATH与LIBERO_CONFIG_ROOT后重启闭环链186140，输出openwam/libero-closed-loop-v2，日志openwam-libero-closed-loop-v2.log。RoboDojo依赖链176682已完成cuRobo v2安装；import验证184769已提交，日志robodojo-runtime-import.log，仍待结果及真实渲染。
+
+FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，删除512文本、80D/OpenWAM reader与5epoch覆盖；继承10epoch等原版参数，只保留smoke B2/max2/save2/eval0和明确路径覆盖。四套原始tar数据源yuanty/LIBERO-fastwam revisionee018b997c430bb12b5bf3c892d744798c5a2f91，不能误取同repo的lerobot_v30派生版。当前Frank个人datasets只有OpenWAM版本，需独立下载官方四个tar并使用原生reader验证。原版baseline目前尚未重跑通过。

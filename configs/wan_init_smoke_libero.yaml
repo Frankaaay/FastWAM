@@ -1,22 +1,27 @@
-# OpenWAM canonical reader; FastWAM model and first-frame action inference.
+# Native FastWAM LIBERO recipe; only paths and smoke duration/batch are overridden.
 defaults:
   - train
-  - override data: openwam_libero
-  - override model: fastwam
+  - override task: libero_uncond_2cam224_1e-4
   - _self_
 
 model:
-  tokenizer_max_len: 512
   skip_dit_load_from_pretrain: false
   action_dit_pretrained_path: ${oc.env:BASELINE_ACTION_DIT}
-  mot_checkpoint_mixed_attn: true
+
+data:
+  train:
+    dataset_dirs:
+      - ${oc.env:FASTWAM_LIBERO_DATA}/libero_spatial_no_noops_lerobot
+      - ${oc.env:FASTWAM_LIBERO_DATA}/libero_object_no_noops_lerobot
+      - ${oc.env:FASTWAM_LIBERO_DATA}/libero_goal_no_noops_lerobot
+      - ${oc.env:FASTWAM_LIBERO_DATA}/libero_10_no_noops_lerobot
+    text_embedding_cache_dir: ${oc.env:FASTWAM_LIBERO_TEXT_CACHE}
 
 seed: 42
 resume: null
 learning_rate: 1.0e-4
 weight_decay: 0.01
 lr_scheduler_type: cosine
-num_epochs: 5
 batch_size: 2
 gradient_accumulation_steps: 1
 mixed_precision: bf16
@@ -25,9 +30,8 @@ num_workers: 8
 max_steps: 2
 save_every: 2
 log_every: 1
-# This trainer's native validation decoder expects its LeRobot processor.
-# Real simulation evaluation is a separate client, not that decoder.
+# Run the native LIBERO simulator separately after checkpoint verification.
 eval_every: 0
-output_dir: ${oc.env:BASELINE_RUN_ROOT}/fastwam/libero/${now:%Y%m%d_%H%M%S}
+output_dir: ${oc.env:BASELINE_RUN_ROOT}/fastwam/libero-native/${now:%Y%m%d_%H%M%S}
 wandb:
   enabled: false
