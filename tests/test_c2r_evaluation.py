@@ -75,12 +75,22 @@ class EvaluationTests(unittest.TestCase):
     def test_atomic_writes_with_equal_pids_have_distinct_temporary_files(self):
         barrier = threading.Barrier(8)
         original = Path.write_text
+        original_replace = Path.replace
+        replace_lock = threading.Lock()
         def synchronized(path, *args, **kwargs):
             result = original(path, *args, **kwargs)
             barrier.wait(timeout=10)
             return result
+        def replace(path, target):
+            # Windows denies simultaneous replacements of an open destination.
+            # Serialize only rename there; all temporary writes still collide
+            # under the old PID-only implementation before this barrier.
+            if sys.platform == 'win32':
+                with replace_lock:
+                    return original_replace(path, target)
+            return original_replace(path, target)
         destination = self.root / 'complete.json'
-        with patch.object(Path, 'write_text', synchronized):
+        with patch.object(Path, 'write_text', synchronized), patch.object(Path, 'replace', replace):
             with ThreadPoolExecutor(max_workers=8) as pool:
                 list(pool.map(lambda i: evaluation.write_json(destination, dict(value=i)), range(8)))
         self.assertIn(json.loads(destination.read_text())['value'], range(8))

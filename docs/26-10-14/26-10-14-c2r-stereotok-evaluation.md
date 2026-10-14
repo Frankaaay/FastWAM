@@ -82,3 +82,5 @@
 
 ### 启动并发写入修复
 0GPU健康读取发现completed标记写入的临时文件仅按PID命名；不同DLC容器具有相同PID，多个worker完成扫描同时写同一个case标记，tmp被另一容器rename后导致FileNotFoundError。原result/plan仍保留。write_json改用UUID临时名，8路相同PID并发写入barrier回归测试覆盖此根因；不热改9e1079e运行clone，发布新SHA独立clone，仅替换退出/受影响作业。全局唯一临时名也适用于后续每回合保存。
+
+Windows初次并发测试触发目标文件并行replace的WinError5，属于Windows文件句柄语义；测试仅在Windows串行rename，保留8路临时文件写入屏障，Linux仍实际并行rename。未给生产代码加Windows重试旁路，必须以Linux CPFS测试作为部署门禁。
