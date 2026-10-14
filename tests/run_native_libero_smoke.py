@@ -60,7 +60,7 @@ def main():
 
     evaluator._get_max_steps = smoke_limit
     evaluator.run_single_episode = tracked_episode
-    evaluator.main()
+    evaluator.eval_single_process()
     assert evidence, "Evaluator returned without executing a policy episode"
     print("NATIVE_LIBERO_ACTION_SMOKE_PASS", json.dumps(evidence), flush=True)
 
