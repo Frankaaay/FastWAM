@@ -6,15 +6,15 @@
 - OpenWAM三组保持其官方配置。LingBot-VA的LIBERO/RoboTwin采用原作者配置与官方lingbot-va-base初始化；RoboDojo采用RoboDojo团队XPolicyLab适配，不能称为原作者官方实验。不套用FastWAM初始化或数据表示。包括FastWAM历史RoboTwin配置复核在内，总范围为九项。
 - 全部只做训练smoke、checkpoint与真实仿真闭环；无正式训练、无StereoTok接入。历史段落保留当时操作事实，冲突之处以本节为准。
 
-### 当前验收快照（2026-10-14 17:00）
+### 当前验收快照（2026-10-14 18:10，按用户最新口径）
 
 | 模型 | LIBERO | RoboDojo | RoboTwin |
 | --- | --- | --- | --- |
-| FastWAM | 原版四套训练/权重/短闭环通过 | 旧适配不计；OpenWAM对应FastWAM复现配置来源待核实 | 历史完成；clean-only对应复现配置来源待核实 |
+| FastWAM | 原版四套训练/权重/短闭环通过 | 旧适配不计；OpenWAM对应FastWAM复现配置来源待核实 | 按用户最新指示保留此前已完成结果，不再以配置来源复核阻塞 |
 | OpenWAM | 四套短闭环通过 | 训练/权重/8个真实动作通过 | clean及randomized动作闭环通过 |
-| LingBot-VA | 官方Long训练/权重/8个真实动作通过 | RoboDojo团队适配训练/权重/8个真实动作通过 | 独立环境及发布文件下载完成；官方缺两份latent，完整性检查阻断训练，待确认原生过滤行为 |
+| LingBot-VA | 官方Long训练/权重/8个真实动作通过 | RoboDojo团队适配训练/权重/8个真实动作通过 | 环境及所选发布文件完成；两份latent缺项按原生reader过滤，后续继续548/550窗口；训练和闭环尚未通过 |
 
-完整通过6/9。LingBot RoboDojo保留上游训练8动作/latent与推理12动作/frame的已知差异，证明发布适配代码跑通，不宣称时序一致或论文分数复现。每项证据路径与具体覆盖范围见下面的运行记录；不得把历史适配结果加入当前计数。
+按用户保留FastWAM RoboTwin历史结果的最新口径，完成7/9（本轮六项闭环验收，加此前FastWAM RoboTwin）。LingBot RoboDojo保留上游训练8动作/latent与推理12动作/frame的已知差异，证明发布适配代码跑通，不宣称时序一致或论文分数复现。每项证据路径与具体覆盖范围见下面的运行记录；不得把历史适配结果加入当前计数。
 
 日期：2026-10-14，Asia/Shanghai。目标：先在阿里云 H800 平台跑通原版 FastWAM 的两个仿真，再开展 StereoTok 对照。本轮尚未安装、下载数据、启动实例或训练。
 
@@ -417,3 +417,19 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 - RoboDojo 全量资产下载也已因 HF mirror HTTP 429 退出；优先 smoke 所需资产已齐备，已通过验收不受影响。完整资产不得标记完成。DSW 原自动关机时间仍为 17:34，未延长。
 
 - 17:00 在确认原下载 PID270126 已终止后，以相同 RoboDojo revision、Assets/** 范围、原目标和单 worker 恢复 snapshot_download，PID424133，日志 robodojo-assets-resume-v2.log；复用缓存，无覆盖原资产、无删除。LingBot RoboTwin 仍等待数据过滤确认，未重启训练。
+
+- 17:02 续传 PID424133 已终止，日志再次记录 HTTP429 和 LocalEntryNotFoundError，无全量完成标记。停止立即重复请求，保留缓存。仍为6/9；LingBot RoboTwin 等待原生548/550窗口筛选确认，FastWAM RoboTwin clean-only/RoboDojo 等待实际OpenWAM复现配置来源。未继续训练、未改合同。
+
+### 18:10 用户纠正与实时资源查询
+- 用户明确 FastWAM RoboTwin 沿用已完成、已对齐 ruhu 的既有实验；本轮未重新审计该训练，将其计为历史完成，合计7/9。
+- LingBot RoboTwin 按原论文/仓库执行已是用户明确授权。此前额外要求确认原生reader过滤属于过严门禁，撤销该人为阻塞；后续应显式报告官方reader的548/550有效窗口，不伪造缺项、不补造latent。尚未修改或重跑测试，不计通过。
+- RAM身份再次验证frank；GetInstance实时返回Stopped，InstanceShutdownTimer到期09:34:30Z（北京时间17:34:30）。此刻无可用SSH映射，未启动实例；无训练或下载正在继续。
+- RoboDojo全量资产最后已核验续传进度11174/15365，约72.7%文件数；之后HTTP429退出。此数不是字节进度或本轮实时目录统计。资产总清单41,269,513,111 bytes；不能据文件比例推算已下载GB。优先smoke资产2297文件已完成。
+- 发布数据准备范围仍为smoke：OpenWAM LIBERO全发布版本、FastWAM LIBERO四套原生版本、LingBot LIBERO-Long所选完整版本、LingBot RoboTwin adjust_bottle clean50+aug500发布文件已齐；OpenWAM RoboTwin/RoboDojo及LingBot RoboDojo只准备既定少量轨迹和派生缓存，不能声称全任务训练数据已齐。
+- 重新读取OpenWAM官方RoboDojo README，Fast-WAM平均SR2.03/Sc3.48；XPolicyLab公开train.sh存在默认B8/GA1/epochs16及原task配置，故不是没有任何配置，而是尚无证据把该默认配置绑定到OpenWAM报告分数。
+
+### 18:37 恢复授权与配置来源纠正
+- 用户明确同意LingBot RoboTwin按原生548/550有效窗口smoke，全量数据准备留到后续。测试入口仅允许固定revision已核实的两个缺项，记录被原生reader排除的窗口；任何其他缺项仍报错。不修改原版reader或数据。
+- FastWAM RoboDojo配置来源改为RoboDojo论文附录K和RoboDojo团队XPolicyLab适配。已直接读取论文确认Wan2.2-TI2V-5B初始化、batch256、20K训练预算；仅短测试，不启动正式20K训练。撤销此前缺OpenWAM复现配置的阻塞。
+- 用户授权恢复全量Assets下载，不把Assets包当作训练轨迹。RoboTwin既有2500条优先复用，后续另核各模型转换/latent缓存，不重复下载原始数据。
+- 实核RAM frank和当前角色可用quota1bybv9m0ixu；复用原2GPU/48CPU/256Gi/priority4实例，StartInstance返回成功，RequestId01A139FC-58B9-5F48-9228-AE61474154CA。等待实际启动/SSH；尚未恢复训练或下载。

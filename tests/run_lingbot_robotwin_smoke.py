@@ -51,6 +51,11 @@ def main():
         "lerobot_robotwin_eef_aug_500/adjust_bottle-aloha-agilex_randomized_500-1000": 500,
     }
     coverage = {}
+    known_missing = {
+        "lerobot_robotwin_eef_aug_500/adjust_bottle-aloha-agilex_randomized_500-1000/latents/chunk-000/observation.images.cam_left_wrist/episode_000003_0_149.pth",
+        "lerobot_robotwin_eef_aug_500/adjust_bottle-aloha-agilex_randomized_500-1000/latents/chunk-000/observation.images.cam_right_wrist/episode_000498_0_133.pth",
+    }
+    missing = set()
     for name, expected in subsets.items():
         root = args.data / name
         info = json.loads((root / "meta/info.json").read_text())
@@ -58,19 +63,32 @@ def main():
                     (root / "meta/episodes.jsonl").read_text().splitlines()]
         assert len(episodes) == info["total_episodes"] == expected
         windows = 0
+        excluded = []
         for episode in episodes:
             index = episode["episode_index"]
             chunk = index // info["chunks_size"]
             assert (root / info["data_path"].format(
                 episode_chunk=chunk, episode_index=index)).is_file()
             for window in episode["action_config"]:
+                incomplete = []
                 for camera in cfg.obs_cam_keys:
                     latent = (root / "latents" / f"chunk-{chunk:03d}" / camera /
                               f"episode_{index:06d}_{window['start_frame']}_{window['end_frame']}.pth")
-                    assert latent.is_file(), str(latent)
-                windows += 1
+                    if not latent.is_file():
+                        relative = latent.relative_to(args.data).as_posix()
+                        assert relative in known_missing, str(latent)
+                        missing.add(relative)
+                        incomplete.append(relative)
+                if incomplete:
+                    excluded.append(dict(episode_index=index, window=window,
+                                         missing_latents=incomplete))
+                else:
+                    windows += 1
         assert windows > 0
-        coverage[name] = dict(episodes=expected, complete_windows=windows)
+        coverage[name] = dict(episodes=expected, complete_windows=windows,
+                             excluded_windows=excluded)
+    assert missing == known_missing, missing
+    assert sum(v["complete_windows"] for v in coverage.values()) == 548
     if int(os.environ.get("RANK", "0")) == 0:
         args.output.mkdir(parents=True, exist_ok=True)
         (args.output / "resolved-smoke-contract.json").write_text(json.dumps({
