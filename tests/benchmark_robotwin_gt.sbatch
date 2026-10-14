@@ -10,10 +10,10 @@
 #SBATCH --time=00:45:00
 #SBATCH --output=/gpfs/jiuquyun/home/Frank/logs/%x-%j.out
 set -euo pipefail
-cd /gpfs/jiuquyun/projects/Frank/FastWAM-stereotok-replay
+cd "${BENCH_REPO:-/gpfs/jiuquyun/projects/Frank/FastWAM-stereotok-replay}"
 test -z "$(git status --porcelain)"
 git rev-parse HEAD
-export PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+export PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 OMP_NUM_THREADS=${OMP_NUM_THREADS:-1} OPENBLAS_NUM_THREADS=1
 export PYTHONPATH=/gpfs/jiuquyun/projects/Frank/fastwam-stereotok-tests/20261008/render-extras
 export PATH=/gpfs/jiuquyun/containers/tools/cuda-12.8/bin:$PATH
 export CUDA_HOME=/gpfs/jiuquyun/containers/tools/cuda-12.8

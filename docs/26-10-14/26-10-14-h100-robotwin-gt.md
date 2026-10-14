@@ -33,3 +33,4 @@
 - 本地HEAD0e5ef8c、fetch成功且origin差异0/0，原有untracked不动。新增匹配吞吐实验：三GPU分别单卡1/2/4进程、每卡16CPU，相同IDs0/16/1/2，完整渲染/GT/写盘/解码验收。实验输出独立benchmarks/JobID，不进入正式数据。
 - 生产采集只增加阶段计时与实验输出位置参数，不改变相机/渲染精度/轨迹/数据验收标准。依据批次总帧/墙钟时间选择并发；不按单卡显存直接推断加速。
 - 并发实验Job16091正在三卡运行，冻结1276de5；首条单进程117.12秒中observation79.38、GT4.20、write11.05、setup21.20、validation0.67秒。依据SAPIEN本地类型定义新增独立六相机RenderCameraGroup能力/数值探针；复用另一未运行的本人clean FastWAM-stereotok-robotwin clone，避免更新活跃基准源码。总测试GPU不超过4，低于已授权8卡。
+- CameraGroup探针16093退出0，但serial0.381s/group0.377s且Position/Segmentation读回不同，不能用于生产。单卡4进程批次578帧/445.10s=1.299帧每秒；等待1/2进程完整结果。进一步使用同一基准改变OMP线程数，核实单线程CPU去噪限制，不改变OIDN/32SPP等质量参数。

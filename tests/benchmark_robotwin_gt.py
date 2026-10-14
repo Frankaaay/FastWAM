@@ -10,7 +10,7 @@ import time
 
 repo = Path(__file__).resolve().parents[1]
 root = Path('/gpfs/jiuquyun/projects/Frank/robotwin-stereo-gt-20261014')
-width = (1, 2, 4)[int(os.environ['SLURM_PROCID'])]
+width = int(os.environ['BENCH_WIDTH']) if 'BENCH_WIDTH' in os.environ else (1, 2, 4)[int(os.environ['SLURM_PROCID'])]
 output = root / 'benchmarks' / os.environ['SLURM_JOB_ID'] / f'concurrency-{width}'
 output.mkdir(parents=True, exist_ok=False)
 ids = (0, 16, 1, 2)
@@ -30,6 +30,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=width) as executor:
 seconds = time.monotonic() - start
 usage = resource.getrusage(resource.RUSAGE_CHILDREN)
 report = dict(concurrency=width, source_sha=rows[0]['source_sha'], ids=ids,
+              omp_threads=os.environ.get('OMP_NUM_THREADS'),
               frames=sum(r['length'] for r in rows), seconds=seconds,
               frames_per_second=sum(r['length'] for r in rows)/seconds,
               user_cpu_seconds=usage.ru_utime, system_cpu_seconds=usage.ru_stime,
