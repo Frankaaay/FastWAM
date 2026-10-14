@@ -266,3 +266,11 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 - RoboDojo全量Assets下载65528仍在Material阶段，尚未到机器人与物体。确认并停止该进程，优先下载当前pour_liquid_into_cup所需x5/Room/Sensor/Geometry及wuliangye/mug/goblet/Fluid，再继续原全量Assets；新PID270126，日志robodojo-assets-prioritized.log，复用缓存且无删除。优先阶段2297文件，尚未完成。
 - RoboDojo真实相机诊断链275772等待FastWAM闭环释放GPU后运行，使用已补GLU私有prefix、原生Isaac Camera及红色立方体场景，检查128x128 RGB有限/非零方差，输出robodojo-camera-smoke.log/json/png；此项只证明渲染，不代替任务policy闭环。当前正在启动，未宣称通过。
 - LingBot flash-attn编译239461经ps确认ninja/nvcc/cicc实际活跃，非下载假死，仍待完成；数据和模型环境相互独立。
+## 15:20 渲染验证与 LingBot 原生资产推进
+
+- 用户最新确认继续测试；测试长度由足够证明代码跑通决定，不固定1–2步，不启动正式训练或StereoTok。保持三模型独立配置归属。
+- RoboDojo首个相机probe先报空图像shape(0,)，随后清理阶段segfault；不能把后续segfault误作首个根因。私有系统库prefix补齐libXt/libSM/libICE，不修改系统驱动。第二次原生Camera通过world.play及rep.orchestrator.step(rt_subframes=4)显式推进渲染，得到128x128x4、值域112–228、std55.1835的真实图像；PID283109已结束，日志robodojo-camera-smoke-v2.log、证据robodojo-camera-smoke-v2.json/png。此项仅证明渲染，不计任务策略闭环通过。
+- LingBot LIBERO下载257971停在HfApi.repo_info未指定timeout的metadata请求，确认后定向停止。新288304仅将metadata timeout设为30秒，其余revision/文件范围不变，继续原目录断点下载；15:17已推进856/2506文件。日志lingbot-va-libero-native-download-v3.log，尚未宣称数据完整。
+- LingBot flash-attn239461继续实际编译，15:19 ninja日志已有70条目标完成记录。RoboDojo优先资产270126继续下载，15:17为841/2297文件；文件比例不代表字节或完整准备比例。
+- 本轮RAM frank205455090823393499与DSW Running/SSH公网映射再次核验，命令实际到达远端；当前完整验收仍3/9，其余继续推进。
+新增tests/run_lingbot_libero_smoke.py：只导入固定SHA的官方LingBot原生训练入口；复制其LIBERO配置，仅覆盖本地路径、测试时长、保存频率、worker数和smoke W&B开关。保留B1/GA10、原始优化器与动作/latent合同，训练前逐episode检查所有发布的双相机latent窗口，缺失立即失败，不容许reader静默筛样本。默认3个optimizer更新是本次短测试选择，不是通用验收要求；双卡与官方8卡的全局batch差异只用于运行门禁，不作性能复现。AST与git diff检查通过，真实训练待下载和环境终态。
