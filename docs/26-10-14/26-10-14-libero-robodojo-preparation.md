@@ -201,3 +201,15 @@ RoboTwin runtime依赖140324已成功结束：warp1.4.1→1.13.0、websockets13.
 用户新增LingBot-VA训练准备，明确全部先做Wan baseline、全部通过后再考虑StereoTok。原五组继续，未暂停。已查询官方Robbyant/lingbot-va README：官方提供RoboTwin和LIBERO流程；XPolicyLab已有LingBot_VA RoboDojo适配，使用预编码Wan2.2 latent、独立单env cache。官方post-training入口加载lingbot-va-base，不能将其默认当作本任务要求的原始Wan初始化；需检查权重映射和新增action参数初始化，暂未下载LingBot策略checkpoint。H800独立源码clone PID181361，目标projects/LingBot-VA-baselines-20261014，日志lingbot-va-source-clone.log；当前仍clone中。待用户确认LingBot-VA是否同样覆盖三个benchmark及训练smoke/闭环验收，独立代码检查可先推进。
 
 原五组进展：OpenWAM三组CPU-offload训练均已exit0；审计177433已核验LIBERO全部2089张量finite，其余继续。LIBERO闭环链180042等待训练及checkpoint审计成功后使用官方deploy默认compile/cache、10步去噪，四套各8动作；输出openwam/libero-closed-loop，日志openwam-libero-closed-loop-chain.log。RoboTwin独立cuRobo167338构建完成，已绑定新源码并连接三个既有资产目录。RoboDojo运行依赖176682继续安装。
+
+## 用户确认 LingBot-VA 范围与模型配置独立原则
+
+用户明确确认LingBot-VA覆盖RoboTwin/RoboDojo/LIBERO及训练smoke、checkpoint、仿真闭环，具体初始化对齐LingBot-VA官方，不套用FastWAM的原始Wan初始化要求。当前总范围为原五组加LingBot-VA三组；目标统一为先通过各自Wan baseline，再考虑StereoTok，不启动正式训练。LingBot-VA官方post-training使用lingbot-va-base为合法初始化来源；OpenWAM采用自身官方配置；FastWAM采用OpenWAM报告里对应FastWAM实验口径，保留FastWAM模型实现。所有环境、数据处理、参数与输出按模型和benchmark隔离。
+
+LingBot-VA远端官方clone clean main，SHA7c6ffa9bfc4b83582cafc860fab4c82cc7deeeeb；不使用本机C:/Project/lingbot-va这个无Git元数据目录作为运行来源。准备独立env lingbot-va-baselines-20261014，按官方Python3.10.16/torch2.9.0+cu126/vision0.24/audio2.9；实际安装结果待核验。
+
+原五组OpenWAM三个checkpoint审计已结束：每组2089tensor keys、24813767464bytes，全部finite，包含video/action/proprio三组。报告openwam-checkpoint-audit.json；计数证据为训练完成日志和checkpoint文件名，safetensors自身无独立step metadata。LIBERO闭环服务链180042已进入启动，尚未闭环通过。
+
+LingBot-VA独立环境链184552已启动，源码fetch/pull确认up-to-date；官方base模型元数据固定HF robbyant/lingbot-va-base revision68b7bc1b35da6ddc67ea94c4ceb58d768fbb3f9c，总仓库文件24382314341bytes，实际只下载text_encoder/tokenizer/transformer/vae四组。下载PID186492，独立checkpoint目录lingbot-va-base-68b7bc1，max_workers1、HF mirror、失败退避；不使用benchmark posttrain策略权重作为初始权重。
+
+OpenWAM LIBERO首轮服务成功加载本次checkpoint和官方compile/cache，但客户端因启动环境漏传LIBERO_PATH而退出，尚未执行动作；保留原日志，不是模型推理失败。补齐独立LIBERO_PATH与LIBERO_CONFIG_ROOT后重启闭环链186140，输出openwam/libero-closed-loop-v2，日志openwam-libero-closed-loop-v2.log。RoboDojo依赖链176682已完成cuRobo v2安装；import验证184769已提交，日志robodojo-runtime-import.log，仍待结果及真实渲染。
