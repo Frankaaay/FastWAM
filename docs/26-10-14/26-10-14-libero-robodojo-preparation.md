@@ -340,3 +340,12 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 ## 16:15 LingBot RoboDojo 训练启动及 RoboTwin 入口
 - 原 RoboDojo v7 在自身 600 秒超时及 finally 清理后结束，保留其 ffmpeg 首因，不将 timeout 当新根因。LingBot RoboDojo 链已完成 clean fetch/ff-only，实际 runner eb15e88735bb2e7b497c60ee38e20ba2a00d92cc，打印 NATIVE_ROBODOJO_TRAIN_START，两卡执行中。
 - 新增独立 tests/run_lingbot_robotwin_smoke.py，使用原作者 robotwin_train（B1/GA1、30D、action_per_frame16、robotwin_tshape），仅路径与测试运行长度/保存/worker/W&B 覆盖。启动前逐项检查已选 adjust_bottle clean50+aug500 的 metadata、Parquet 和三个相机所有窗口，避免 reader 静默跳过；记录固定 HF revision 和任务子集范围。现仅 AST 检查通过，数据仍下载中，尚未启动 RoboTwin 训练。
+
+## 16:17 LingBot RoboTwin 仿真资产和环境隔离
+- 原作者 README 指定的 RoboTwin 2eeec322 clean clone 已 fetch 核验；按其 assets/_download.py 指向的 TianxingChen/RoboTwin2.0，绑定 Frank 既有 RoboTwin-bf44be5 的 background_texture/embodiments/objects，只新增三个链接，未改资产。绑定证据 runs/five-baselines-20261014/lingbot-robotwin-asset-bindings.json。
+- 仿真既有环境核心版本与 LingBot README 一致：sapien3.0.0b1/scipy1.10.1/mplib0.2.1/gymnasium0.29.1/trimesh4.4.3/open3d0.18/imageio2.34.2。单独 conda clone 到 robotwin-lingbot-baselines-20261014，补 huggingface_hub0.36.2/msgpack1.1.1/websockets15.0.1（原客户端使用 additional_headers/ping_interval，旧13.1不可直接复用）。准备进程 PID378820，日志 lingbot-robotwin-sim-env-setup.log，尚待 import 验证。不变更 OpenWAM 环境。
+- LingBot RoboDojo 首个更新前正在 TorchInductor 编译，已观察到加载生成 .so 的活跃子进程，不依据 GPU 瞬时0%将其判为停滞。
+
+## 16:19 LingBot 首个有效更新及 RoboTwin 原生客户端
+- LingBot RoboDojo 两卡训练完成第一个 optimizer update，video loss0.2004/action loss0.3017/grad norm2.74，首次更新耗时181.91秒含编译；未保存最终 checkpoint 前不计训练门禁通过。
+- 添加 tests/run_lingbot_robotwin_policy_smoke.py，固定作者模型/仿真 SHA，只替换官方客户端的安装路径占位符，保留专家筛种、prompt、动作转换和 take_action；只在原生服务返回 action 后统计已完成16D有限动作，达到短测试界限退出并清理环境，不产生虚假任务成功率。AST通过，尚未实跑。
