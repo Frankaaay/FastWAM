@@ -455,3 +455,20 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 - LingBot RoboTwin训练v2 exit0，三次更新video/action loss .4205/.2288、.2197/.1540、.4593/.5539，grad2.23/1.85/4.73；step3保存成功。审计839keys、10,177,831,668bytes、原生keys/shapes精确匹配且全finite，无optimizer状态。
 - 闭环v2首次planner初始化报warp无torch子模块，之后原作者重试触发left_planner未初始化的衍生错误。定向SIGINT失败client13447，由父链finally清理server；未计动作通过。测试入口显式import warp.torch解决导入顺序，不改planner/物理参数/模型配置，待重试。
 - FastWAM官方转换器重新导出2/2轨迹、375帧完成，使用datasets3.6生成兼容原生reader的Parquet，独立输出FastWAM-RoboDojo-native-v21-35efbc7；未改LingBot数据或共享环境。datasets4兼容尝试未作为最终路径，保留日志。
+
+### 资源抢占后的继续执行
+- 用户明确授权抢占 frank 闲时作业，沿用已分配的 2GPU DSW。两项已停止作业和13项临时优先级调整见上文；恢复责任仍未完成，不将抢占描述为评测已自动续跑。
+- Warp 根因进一步核实：现有 warp-lang 1.13.0 已不存在 warp.torch 模块，因此 ad7c639 的显式 import 单独不足以修复。只在独立 robotwin-lingbot-baselines-20261014 环境安装 warp-lang==1.2.1，未修改 OpenWAM 环境；安装仍进行中，尚未宣称兼容验收。
+- LingBot RoboTwin v3 后处理 PID34552：等待 warp.torch 导入和版本检查通过，再复用 native-v2 的 step3 checkpoint 执行闭环；不重复训练。日志 /mnt/workdir/frank/runs/five-baselines-20261014/lingbot-robotwin-closed-loop-v3.log。runner 精确 SHA ad7c639ff71dd07ea10af783248295e9a1a64477。
+- FastWAM RoboDojo 原生 reader normalization 已通过，训练切分199帧，dataset_stats.json 位于 fastwam/robodojo-native-preparation-v1。原生 text128 T5 缓存生成 PID33997，日志同目录 text-native.log；使用固定 XPolicyLab 原脚本、独立缓存 fastwam-robodojo-native-128，未复用此前 text512 适配缓存。仍未完成训练/动作验收。
+- Assets PID2977 仍存活；全量完成尚无证据。当前接受7/9，不增加完成计数。
+- Warp 首次默认源安装进程31802持续20分钟未完成，核对命令后定向SIGTERM，改阿里云PyPI镜像安装同一1.2.1版本；54375安装exit成功，实际python验证warp.__version__=1.2.1且import warp.torch通过。未改变CuRobo或模型参数。
+- text-native.log 确认原生T5生成1个prompt缓存，context_len128，19:12:29完成。FastWAM RoboDojo训练后处理队列PID55441，等待LingBot闭环释放GPU；使用XPolicyLab原生ZeRO1配置，2GPU/B2/GA1/3updates，原生Wan和既有Wan派生ActionDiT初始化。日志fastwam-robodojo-native-train-v1.log；尚未宣称训练通过。
+
+- LingBot RoboTwin v3通过：真实policy_response_received=true，16D动作实际执行8次，client与chain exit0；step3 checkpoint839keys/全finite检查已通过。smoke-acceptance.json位于lingbot/robotwin-native-closed-loop-v3。服务端末尾SIGTERM是成功后的finally清理，不是推理失败。当前8/9。FastWAM RoboDojo训练已启动，原生合同检查通过，尚无训练完成证据。
+
+- FastWAM RoboDojo v1首次backward/Adam更新OOM：foreach_sqrt需11.21GiB，free3.18GiB，reserved-unallocated16.76GiB。原生视频reader因缺libavutil使用上游内置PyAV解码路径，非此失败根因。保留v1现场；v2仅启用PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True，B2/GA1/2GPU/ZeRO1/模型数据不变，新输出robodojo-native-v2。训练成功后CPU审计mot/proprio全finite，再启动XPolicyLab原生FastWAM server和IsaacSim8动作闭环；失败训练不会启动仿真。
+
+- FastWAM v2首次更新不再OOM，但step1 loss1.9980(action1.4836/video0.5143)之后step2、3均NaN。该结果不计通过；保存仍在进行，后处理必须经过全finite审计。下一步定位首次backward/Adam更新前后非有限值来源，而非缩为一步规避失败；当前仍8/9。
+
+- tests/run_fastwam_robodojo_smoke.py增加仅测试使用的AdamW更新前参数/梯度、更新后参数finite检查，按1048576元素分块避免大布尔临时张量；finally恢复原方法。不更改上游算法、模型或训练配置。AST验证通过，待前轮进程退出后同步精确SHA重试定位。

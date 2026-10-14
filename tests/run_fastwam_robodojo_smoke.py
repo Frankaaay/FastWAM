@@ -78,7 +78,36 @@ def main():
         (args.output / "resolved-smoke-contract.json").write_text(json.dumps(contract, indent=2))
         print("FASTWAM_ROBODOJO_NATIVE_CONTRACT_PASS", flush=True)
     from fastwam.runtime import run_training
-    run_training(cfg)
+    import torch
+
+    # Test-only boundary checks locate corruption before a bad smoke checkpoint
+    # can be accepted. Chunking avoids a model-sized temporary boolean tensor.
+    original_step = torch.optim.AdamW.step
+
+    def check_tensor(value, label):
+        flat = value.detach().reshape(-1)
+        for start in range(0, flat.numel(), 1048576):
+            assert torch.isfinite(flat[start:start + 1048576]).all(), label
+
+    def checked_step(optimizer, *step_args, **step_kwargs):
+        for group_index, group in enumerate(optimizer.param_groups):
+            for index, param in enumerate(group["params"]):
+                label = f"rank={os.environ.get('RANK', '0')} group={group_index} param={index}"
+                check_tensor(param, f"before AdamW parameter: {label}")
+                if param.grad is not None:
+                    check_tensor(param.grad, f"before AdamW gradient: {label}")
+        result = original_step(optimizer, *step_args, **step_kwargs)
+        for group_index, group in enumerate(optimizer.param_groups):
+            for index, param in enumerate(group["params"]):
+                check_tensor(param, f"after AdamW parameter: group={group_index} param={index}")
+        print("FASTWAM_NATIVE_ADAMW_FINITE_PASS", os.environ.get("RANK", "0"), flush=True)
+        return result
+
+    torch.optim.AdamW.step = checked_step
+    try:
+        run_training(cfg)
+    finally:
+        torch.optim.AdamW.step = original_step
 
 
 if __name__ == "__main__":
