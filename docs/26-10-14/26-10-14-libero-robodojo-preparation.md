@@ -319,3 +319,13 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 
 - LingBot LIBERO闭环v2实际通过：官方client task0执行8个7D有限policy动作，client exit0，LINGBOT_NATIVE_LIBERO_POLICY_SMOKE_PASS 8。已核对inference-assembly的transformer真实指向审计过的step3，VAE/text/tokenizer来自同一官方base。验收文件lingbot/libero-native-closed-loop-v2/smoke-acceptance.json，非论文分数。当前通过项为OpenWAM LIBERO/RoboTwin、FastWAM原版LIBERO、LingBot官方LIBERO-Long，共4/9；FastWAM RoboTwin仍另列历史完成待来源复核。
 - OpenWAM RoboDojo v6缺Assets/Eval_Layout/RoboDojo/arx_x5/42，原启动错误地将训练seed42用于场景索引。官方SeedManager默认0，发布布局目录只有0/1/2；v7明确选布局seed0，训练seed42不改，并写launch-contract.json分别记录。没有复制布局伪造seed42。v6退出0但缺action-evidence被门禁拒绝。v7链361002在LingBot闭环释放GPU后继续，日志openwam-robodojo-closed-loop-v7.log，仍待实际动作验收。
+
+## 16:10 继续最小代码闭环验收
+
+- 用户要求缩短测试而非固定 1–2 步；当前已验收仍为 4/9，不重复已通过项。
+- RoboDojo 团队 XPolicyLab 53c5da5 的 LingBot 原生 reader 已读取两条完整轨迹：latents 分别 [48,22,16,48] / [48,25,16,48]，actions 为 [30,22,8,1] / [30,25,8,1]，所有 tensor 有限。证据：H800 runs/five-baselines-20261014/lingbot-robodojo-native-reader.json。
+- 新增 tests/run_lingbot_robodojo_smoke.py 仅作为该适配的训练测试入口，固定来源 SHA，保留原配置 B1/GA8、初始化和动作映射，仅覆盖路径、测试长度、保存周期、worker 和 W&B。沿用已验证 spawn/2 个数据初始化 worker。
+- 上游转换 target_fps=10 在原始 25fps 下取整 stride=2，训练实际每 latent 8 个动作；发布推理配置 action_per_frame=12。原值分别保留并显式写入 contract，不宣称时序一致或分数复现。
+- OpenWAM RoboDojo v7 仍运行，GPU1 有真实负载，场景完成设置并重置；没有动作证据前不计通过。官方 Dockerfile 的单 Vulkan ICD 建议已阅读，当前已有显式 VK_ICD_FILENAMES；未为等待场景启动擅自更改物理配置。
+- 本地 schannel fetch 握手失败，通过单次 git -c http.sslBackend=openssl fetch origin 成功；未关闭证书校验，未改全局 Git 配置。目标远端仍 91a33f0。
+- 新训练入口仅完成语法与 diff 检查，尚未运行；下一步待当前 RoboDojo 闭环释放 GPU 后启动。
