@@ -314,3 +314,8 @@ FastWAM原版LIBERO纠正：wan_init_smoke_libero.yaml改为继承官方task，�
 - OpenWAM RoboDojo v4服务和bridge已成功ready，simulator在argparse阶段把--device误作--device_id的缩写而退出；v5移除此多余参数后进入真实场景，但缺生成的Assets/Robots/x5/curobo.yml。虽然Isaac退出码为0，异常栈及无action-evidence证明不通过。按官方utils/update_embodiment_config_path.py规则，仅从x5/curobo_tmp.yml替换本机资产根生成该文件（独占新建），保留原模板和SHA256，证据robodojo-x5-curobo-path-binding.json。
 - OpenWAM v6链355736再次运行，日志openwam-robodojo-closed-loop-v6.log，除exit0外明确要求action-evidence中真实动作>0以及最终短闭环通过标记，避免Isaac吞退出码误计通过。尚未验收。
 - LingBot LIBERO闭环v1的官方服务成功ready，客户端缺官方LIBERO依赖future而失败；已补future0.18.2，原生client import实测通过。v2链359086等待OpenWAM v6释放GPU后执行，输出lingbot/libero-native-closed-loop-v2，使用审计后的step3 transformer与官方base VAE/text/tokenizer装配。v1 server的SIGTERM是失败后父链清理，不是模型自身失败。当前完整验收仍3/9。
+
+## 16:03 LingBot LIBERO 验收通过（4/9）
+
+- LingBot LIBERO闭环v2实际通过：官方client task0执行8个7D有限policy动作，client exit0，LINGBOT_NATIVE_LIBERO_POLICY_SMOKE_PASS 8。已核对inference-assembly的transformer真实指向审计过的step3，VAE/text/tokenizer来自同一官方base。验收文件lingbot/libero-native-closed-loop-v2/smoke-acceptance.json，非论文分数。当前通过项为OpenWAM LIBERO/RoboTwin、FastWAM原版LIBERO、LingBot官方LIBERO-Long，共4/9；FastWAM RoboTwin仍另列历史完成待来源复核。
+- OpenWAM RoboDojo v6缺Assets/Eval_Layout/RoboDojo/arx_x5/42，原启动错误地将训练seed42用于场景索引。官方SeedManager默认0，发布布局目录只有0/1/2；v7明确选布局seed0，训练seed42不改，并写launch-contract.json分别记录。没有复制布局伪造seed42。v6退出0但缺action-evidence被门禁拒绝。v7链361002在LingBot闭环释放GPU后继续，日志openwam-robodojo-closed-loop-v7.log，仍待实际动作验收。
