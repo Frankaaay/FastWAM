@@ -127,3 +127,11 @@ LIBERO旧/mnt/data/data/h100-jiuquyun/PRETRAIN_DATA/LIBERO目录为空。OpenWAM
 - OpenWAM三组测试链PID35953：/mnt/workdir/frank/runs/five-baselines-20261014/openwam-training-chain.log。等待安装，严格检查imports、SHA/clean/upstream，然后真实reader样本shape/finite验证，依次libero/robodojo/robotwin两卡、B2/GA1、max_steps2/save2、Wan init、finetune/resume null。每组独立reader.log、train.log、training-started.json及checkpoint目录；退出0仍需检查checkpoint内容，不自动认定闭环成功。顶层timeout6300s。仅调用已发布官方入口及CLI覆盖，未部署未提交生产代码。
 - LIBERO渲染链PID36999：同根/libero-render-chain.log，等待官方setup和训练链释放GPU，避免CUDA/EGL并发。spatial/object/goal/libero_10各task0、256分辨率、3步，直接调用官方smoke_libero.py；不是策略rollout。日志libero-<suite>-env.log，顶层timeout8100s。
 - /mnt/workdir/frank/runs/five-baselines-20261014/preparation-status.json记录已验证事实。两条链已提交但最后处于安装等待，不代表训练或仿真通过。FastWAM新适配仍未提交发布，实际训练链尚未启动；完整五组baseline未完成。
+
+## 持续目标与发布授权
+
+用户明确确认本任务commit/push，并要求持续处理五组baseline直到通过后停止。持续目标active；不启动正式训练。FastWAM首批实现已推送0c106f2（原始0cee262之后），远端独立clone为/mnt/workdir/frank/projects/FastWAM-baselines-20261014。新独立策略env fastwam-baselines-20261014复用wheelhouse安装，不修改已有环境。
+
+继续核查发现文本条件差异：OpenWAM LIBERO的LeRobotV3Reader._resolve_prompt直接返回strip后的任务文本；RoboDojo会调用format_prompt_for_inference添加固定前缀。旧precompute_text_embeds只读tasks.jsonl且始终包装DEFAULT_PROMPT，不能复用于canonical LIBERO。适配器新增unique_prompts读取固定SHA reader已有元数据；原缓存入口对OpenWAMDataset直接调用该方法，禁止override_instruction覆盖canonical提示词。两项真实方法AST回归（原始LIBERO文本/空文本拒绝）远端通过；动作mask此前4项通过。端到端reader/cache/model尚待独立环境安装后验证。
+
+RoboDojo资产首次下载已因hf-mirror HTTP429失败（Assets/Eval_Layout/.../cover_blocks_35.json）；保留下载断点，不删除文件。需退避并降低请求频率续传。未成功暂停活跃资产进程，因为检查时其已退出；没有误停其他进程。

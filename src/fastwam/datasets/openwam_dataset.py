@@ -48,6 +48,7 @@ class OpenWAMDataset(RobotVideoDataset):
             raise ValueError("Unexpected OpenWAM benchmark/action contract")
         config.dataset_dir = str(Path(dataset_dirs[0]).resolve(strict=True))
         self.reader = build_dataset(config, split="train")
+        self.benchmark = benchmark
         self.text_embedding_cache_dir = str(text_embedding_cache_dir)
         self.context_len = int(context_len)
         if self.context_len != 512:
@@ -55,6 +56,19 @@ class OpenWAMDataset(RobotVideoDataset):
 
     def __len__(self):
         return len(self.reader)
+
+    def unique_prompts(self):
+        """Use the pinned reader's metadata and exact training prompt convention."""
+        if self.benchmark == "libero":
+            prompts = [text.strip() for text in self.reader._task_idx_to_text.values()]
+        else:
+            from openwam.dataloader.transforms.multiview import format_prompt_for_inference
+            prompts = [format_prompt_for_inference(text)
+                       for dataset in self.reader._sub_datasets
+                       for text in dataset._instructions]
+        if not prompts or any(not text.strip() for text in prompts):
+            raise ValueError("The canonical reader has empty prompt metadata")
+        return sorted(set(prompts))
 
     def __getitem__(self, index):
         sample = self.reader[index]

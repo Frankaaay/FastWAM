@@ -193,7 +193,13 @@ def main(cfg: DictConfig):
 
     context_len = _resolve_context_len(context_lens)
     override_prompt = _get_override_prompt(cfg.get("override_instruction"))
-    if override_prompt is not None:
+    if cfg.data.train.get("_target_") == "fastwam.datasets.openwam_dataset.OpenWAMDataset":
+        if override_prompt is not None:
+            raise ValueError("Canonical OpenWAM prompts must come from the benchmark reader")
+        dataset = hydra.utils.instantiate(cfg.data.train)
+        prompts = dataset.unique_prompts()
+        del dataset
+    elif override_prompt is not None:
         prompts = [override_prompt]
         logger.info("Using override_instruction; skipping dataset scan and encoding exactly 1 prompt.")
     else:
