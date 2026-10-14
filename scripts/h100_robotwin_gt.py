@@ -242,6 +242,7 @@ def episode(index):
     import numpy as np
     import random
     import sapien
+    import torch
     import yaml
     plan = json.loads((ROOT / 'inputs/plan.json').read_text())
     row = next(r for r in plan['rows'] if r['source_episode_index'] == index)
@@ -271,10 +272,15 @@ def episode(index):
             if self.save_data:
                 capture.append(self)
                 self.FRAME_IDX += 1
+    if torch.cuda.device_count() != 1:
+        raise RuntimeError('Each renderer must receive exactly one Slurm GPU')
+    device = sapien.Device('cuda:0')
+    device_record = dict(name=device.name, pci=device.pci_string, cuda_visible_devices=os.environ.get('CUDA_VISIBLE_DEVICES'))
+    print('RENDER_DEVICE', json.dumps(device_record), flush=True)
     options = dict(config, task_name=row['task'], task_config='demo_clean', save_path=str(destination),
         left_robot_file=robot_file, right_robot_file=robot_file, left_embodiment_config=robot_config,
         right_embodiment_config=robot_config, dual_arm_embodied=True, embodiment_name='aloha-agilex',
-        need_plan=False, render_freq=0, save_data=True, render_device=sapien.Device('cuda:0'),
+        need_plan=False, render_freq=0, save_data=True, render_device=device,
         recorded_actor_models=row['recorded_actor_models'],
         stereo=dict(enabled=True, head_baseline_m=.06, left_wrist_baseline_m=.02, right_wrist_baseline_m=.02),
         **trajectory)
@@ -299,7 +305,7 @@ def episode(index):
         counts = re.findall(r'^frame=(\d+)$', checked.stdout, re.MULTILINE)
         assert counts and int(counts[-1]) == len(qpos), (camera, counts[-1:])
     write_json(episode_root / 'accepted.json', dict(row, path=str(destination / 'episode.hdf5'),
-        source_sha=source_sha(), seconds=time.monotonic()-start, scene_info=scene,
+        source_sha=source_sha(), seconds=time.monotonic()-start, scene_info=scene, device=device_record,
         gt=dict(depth='camera Z in meters float32; invalid=0', segmentation='raw uint32 simulator IDs',
                 disparity='positive fx*baseline/Z in pixels',
                 occlusion='cross-eye nearest-pixel depth test; tolerance=max(2mm,0.5%Z)',

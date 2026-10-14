@@ -13,3 +13,4 @@
 - _base_task.py仅增加显式render_device scene创建，避免SAPIEN旧wrapper忽略选卡。其他调用保留原行为。
 - 静态检查发现_init_task_env_原先无参数调用setup_scene；同步传递render_device，确保选卡实际到达RenderSystem。两个本地GT边界测试通过。每条完成后全量解码六路MP4并核帧数，2500条/50任务各50条/551534帧均齐全才发布ready.json。
 - 每次失败保留独立attempt目录；修复后重新提交只跳过accepted条目，绝不因失败目录存在而漏样本，也不覆盖旧尝试。H800导出经只读stdin读取已有文件，不在H800写入或申请新资源。
+- H800导出2500条成功，273688767 bytes，SHA256 1eff4cc50f0c28828c42bed6bf59b016e2d20599d10a71752bae26aef8c62bbb；仅传轨迹/qpos/场景/指令，未复制旧视频。原始资产归档精确中央索引：Aloha 779877448 bytes、objects 4636111726 bytes。每个renderer要求torch只见一张卡，记录SAPIEN实际设备名称/PCI/CUDA_VISIBLE_DEVICES。
