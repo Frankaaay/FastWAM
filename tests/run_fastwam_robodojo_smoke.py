@@ -90,6 +90,11 @@ def main():
             assert torch.isfinite(flat[start:start + 1048576]).all(), label
 
     def checked_step(optimizer, *step_args, **step_kwargs):
+        # ZeRO1 creates a >2**31-element FP32 partition on this two-GPU smoke.
+        # Use AdamW's single-tensor implementation for this runtime diagnostic;
+        # learning rate, betas, epsilon and weight decay remain unchanged.
+        for group in optimizer.param_groups:
+            group["foreach"] = False
         for group_index, group in enumerate(optimizer.param_groups):
             for index, param in enumerate(group["params"]):
                 label = f"rank={os.environ.get('RANK', '0')} group={group_index} param={index}"
