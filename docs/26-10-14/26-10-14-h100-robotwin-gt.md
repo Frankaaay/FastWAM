@@ -11,3 +11,4 @@
 - 最小实现scripts/h100_robotwin_gt.py：只读导出H800冻结manifest的轨迹/种子/场景/qpos/指令；H100同轨迹回放，逐帧qpos atol1e-5。流式保存六目无损libx264/yuv444p/15Hz视频与压缩数值GT，避免逐帧pickle缓存和二次merge。动态逐条flock领取、长轨迹优先、单条30分钟有界时限，任一失败停止并保留现场。
 - 六目GT：float32米制Z、有效mask、float32 fx*b/Z视差、原始uint32 mesh/actor ID；遮挡是nearest-pixel对目深度检验，容差max(2mm,0.5%Z)，视野外单独标记，不冒充精确光线级可见性。保持RGB渲染与相机合同。
 - _base_task.py仅增加显式render_device scene创建，避免SAPIEN旧wrapper忽略选卡。其他调用保留原行为。
+- 静态检查发现_init_task_env_原先无参数调用setup_scene；同步传递render_device，确保选卡实际到达RenderSystem。两个本地GT边界测试通过。每条完成后全量解码六路MP4并核帧数，2500条/50任务各50条/551534帧均齐全才发布ready.json。

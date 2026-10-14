@@ -113,7 +113,7 @@ class Base_Task(gym.Env):
         self.plan_success = True
         self.step_lim = None
         self.fix_gripper = False
-        self.setup_scene()
+        self.setup_scene(render_device=kwags.get("render_device"))
 
         self.left_js = None
         self.right_js = None
