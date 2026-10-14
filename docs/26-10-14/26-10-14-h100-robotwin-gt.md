@@ -42,3 +42,4 @@
 - Slurm共享GPU绑定实核：srun --ntasks=12 --gpu-bind=single:4，12个rank实际PCI为9b/bb/cb各4个。正式使用32个独立Slurm rank、每rank4CPU、GPU总数8，保留srun kill-on-bad-exit，不在pool内部叠线程。异步版首条与16091基线84个HDF5 dataset逐帧完全一致；比较经分配中的Slurm step执行。首次检查缺PYTHONPATH失败，补齐既有extras后通过，非数据失败。
 - 异步writer首两条123.74/118.16秒，慢于基线117.12/111.27；后台线程wall计时大幅拉长，未实现预期重叠收益。恢复此前已验收的同步Capture（包括原resize方式），不把无收益实现留在生产；最终保留32个Slurm rank调度与长轨迹时限优化。本地原生GT两项测试通过。
 - Job16099两项unit通过；正确读取group CUDA buffer后六相机0.390s→0.235s（小场景10次），Segmentation逐像素一致，Color最大差0.037、Position0.161。继续核对serial重复本身的采样波动及动态物体/相机更新，尚未把group用于生产。
+- Job16101确认serial连续capture本身存在随机采样差异（边缘depth最大7.95m，分割1460个元素变化）；group分割与reference完全一致、depth最大0.161m。动态位姿对比分割1430个元素变化，需真实轨迹进一步验证。实现仅此GT采集启用六相机group，RGB/原生GT均读取同一次group buffers；普通Camera调用保留原捕获路径。渲染参数不变。本地GT两项unit通过。

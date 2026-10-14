@@ -14,7 +14,7 @@ class NativeGT(unittest.TestCase):
                 if key == 'Position':
                     return np.array([[[0, 0, -2, 1], [np.nan, 0, np.inf, 0]]], np.float32)
                 return np.array([[[300, 999, 0, 0], [0, 0, 0, 0]]], np.uint32)
-        result = gt.native_gt(Camera(), .06, 100)
+        result = gt.native_gt(Camera().get_picture, .06, 100)
         np.testing.assert_array_equal(result['depth_m'], [[2, 0]])
         np.testing.assert_array_equal(result['valid'], [[1, 0]])
         np.testing.assert_array_equal(result['disparity_px'], [[3, 0]])

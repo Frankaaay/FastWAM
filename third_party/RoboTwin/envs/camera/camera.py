@@ -300,7 +300,30 @@ class Camera:
             matrix[:3, 3] -= baseline * matrix[:3, 1]
             right.entity.set_pose(sapien.Pose(matrix))
 
+    def enable_capture_group(self, render_system):
+        """Capture stereo RGB and native GT through one synchronized GPU batch."""
+        cameras = [self.left_camera, self.right_camera, *self.static_camera_list,
+                   *(right for _, _, right, _ in self.stereo_pairs)]
+        assert len(cameras) == 6
+        self._capture_indices = {id(camera): i for i, camera in enumerate(cameras)}
+        self._capture_systems = sapien.render.RenderSystemGroup([render_system])
+        self._capture_group = self._capture_systems.create_camera_group(
+            cameras, ['Color', 'Position', 'Segmentation'])
+        self._capture_buffers = {}
+
+    def read_picture(self, camera, name):
+        if hasattr(self, '_capture_group'):
+            return self._capture_buffers[name][self._capture_indices[id(camera)]]
+        return camera.get_picture(name)
+
     def update_picture(self):
+        if hasattr(self, '_capture_group'):
+            import torch
+            self._capture_group.take_picture()
+            self._capture_buffers = {
+                name: torch.as_tensor(self._capture_group.get_picture_cuda(name), device='cuda').cpu().numpy().copy()
+                for name in ('Color', 'Position', 'Segmentation')}
+            return
         # camera
         if self.collect_wrist_camera:
             self.left_camera.take_picture()
@@ -368,7 +391,7 @@ class Camera:
     def get_rgba(self) -> dict:
 
         def _get_rgba(camera):
-            camera_rgba = camera.get_picture("Color")
+            camera_rgba = self.read_picture(camera, "Color")
             camera_rgba_img = (camera_rgba * 255).clip(0, 255).astype("uint8")
             return camera_rgba_img
 
@@ -415,7 +438,7 @@ class Camera:
 
         def _get_segmentation(camera, level="mesh"):
             # visual_id is the unique id of each visual shape
-            seg_labels = camera.get_picture("Segmentation")  # [H, W, 4]
+            seg_labels = self.read_picture(camera, "Segmentation")  # [H, W, 4]
             colormap = sorted(set(ImageColor.colormap.values()))
             color_palette = np.array([ImageColor.getrgb(color) for color in colormap], dtype=np.uint8)
             if level == "mesh":
@@ -449,7 +472,7 @@ class Camera:
     def get_depth(self) -> dict:
 
         def _get_depth(camera):
-            position = camera.get_picture("Position")
+            position = self.read_picture(camera, "Position")
             depth = -position[..., 2]
             depth_image = (depth * 1000.0).astype(np.float64)
             return depth_image

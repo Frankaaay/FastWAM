@@ -134,15 +134,15 @@ def source_sha():
     return subprocess.check_output(['git', '-C', str(REPO), 'rev-parse', 'HEAD'], text=True).strip()
 
 
-def native_gt(camera, baseline, focal):
+def native_gt(get_picture, baseline, focal):
     import numpy as np
-    position = camera.get_picture('Position')
+    position = get_picture('Position')
     z = -position[..., 2]
     valid = np.isfinite(position[..., :3]).all(-1) & (z > 0)
     depth = np.where(valid, z, 0).astype(np.float32)
     if not valid.any():
         raise ValueError('Camera has no finite positive depth')
-    labels = camera.get_picture('Segmentation')
+    labels = get_picture('Segmentation')
     disparity = np.zeros_like(depth)
     np.divide(focal * baseline, depth, out=disparity, where=valid)
     return dict(depth_m=depth, valid=valid.astype(np.uint8), disparity_px=disparity,
@@ -186,7 +186,8 @@ class Capture:
         cameras.update({name: camera for name, _, camera, _ in env.cameras.stereo_pairs})
         for name, baseline in PAIRS:
             names = (name, name + '_right')
-            gt = [native_gt(cameras[c], baseline, obs['observation'][c]['intrinsic_cv'][0, 0]) for c in names]
+            gt = [native_gt(lambda key, c=c: env.cameras.read_picture(cameras[c], key),
+                            baseline, obs['observation'][c]['intrinsic_cv'][0, 0]) for c in names]
             stereo_visibility(*gt)
             for c, value in zip(names, gt):
                 obs['observation'][c].update(value)
@@ -295,6 +296,8 @@ def episode(index, output_root=None):
     env = Task(); start = time.monotonic()
     try:
         env.setup_demo(now_ep_num=row['episode'], seed=row['seed'], **options)
+        assert not config['data_type'].get('pointcloud', False)
+        env.cameras.enable_capture_group(env.scene.render_system)
         env.set_path_lst(options)
         setup_seconds = time.monotonic() - start
         scene = env.play_once()
