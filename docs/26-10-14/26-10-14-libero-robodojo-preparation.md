@@ -183,3 +183,9 @@ LIBERO安装63082现已正常完成：官方setup打印No broken requirements fo
 - RoboDojo CUDA12.8精确torch栈安装完成；IsaacLab扩展安装99194仍运行。Assets下载65528仍正常推进，约40%文件数，不能当作40%字节完成。持续目标active；当前最终smoke通过1/5，无正式训练。
 
 RoboTwin runtime依赖140324已成功结束：warp1.4.1→1.13.0、websockets13.1。独立cuRobo构建链167338使用官方v0.7.8/d64c4b0，目标RoboTwin-openwam-baselines-20261014/envs/curobo，编译arch9.0、MAX_JOBS8；随后仅创建三个资产目录symlink到Frank已有assets/RoboTwin-bf44be5，不覆盖原资产。日志robotwin-openwam-curobo.log，尚待构建完成。OpenWAM CPU-offload链139735已完成CPU Adam初始化并进入Training 0/2，暂无通过结论。
+
+## RoboDojo 单环境策略协议桥接
+
+新增tests/serve_robodojo_baseline_bridge.py，仅用于已授权smoke：固定XPolicyLab53c5da5/OpenWAM4d7f642源码合同，复用XPolicyLab官方state→EEF20及EEF20→world动作方法，不调用其模型初始化或dummy路径。通过官方JSON WS predict_once接收完整32步chunk，再由XPolicyLab官方binary WS server提供给真实仿真；拒绝空instruction、多环境以及未reset切换env_idx，检查raw20D和转换动作finite。模型仍由各自独立服务加载本次Wan初始化smoke权重。之所以新增薄桥，是官方OpenWAM4d7f642没有XPolicyLab vendored版本需要的generate_batch，不能混用vendored模型实现。当前本地AST及diff检查通过，远端import/坐标回归和仿真仍待验证。
+
+13:57 OpenWAM LIBERO CPU-offload重试完成两步：loss2.5384（video0.4230/action2.1154）、11.5109（video0.3098/action11.2011）；正在保存checkpoint_step_2.safetensors。未以日志进度代替checkpoint验收或仿真通过。
