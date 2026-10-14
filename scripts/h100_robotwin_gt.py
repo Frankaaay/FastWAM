@@ -245,8 +245,15 @@ def episode(index):
     import yaml
     plan = json.loads((ROOT / 'inputs/plan.json').read_text())
     row = next(r for r in plan['rows'] if r['source_episode_index'] == index)
-    destination = ROOT / 'episodes' / f'{index:04d}'
-    destination.mkdir(parents=True, exist_ok=False)
+    episode_root = ROOT / 'episodes' / f'{index:04d}'
+    episode_root.mkdir(parents=True, exist_ok=True)
+    if (episode_root / 'accepted.json').exists():
+        raise FileExistsError('Episode is already accepted')
+    attempt_number = 0
+    while (episode_root / f'attempt-{attempt_number:02d}').exists():
+        attempt_number += 1
+    destination = episode_root / f'attempt-{attempt_number:02d}'
+    destination.mkdir()
     runtime = ROOT / 'runtime'
     os.chdir(runtime); sys.path.insert(0, str(runtime))
     config = yaml.safe_load((runtime / 'task_config/demo_clean.yml').read_text())
@@ -291,7 +298,7 @@ def episode(index):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
         counts = re.findall(r'^frame=(\d+)$', checked.stdout, re.MULTILINE)
         assert counts and int(counts[-1]) == len(qpos), (camera, counts[-1:])
-    write_json(destination / 'accepted.json', dict(row, path=str(destination / 'episode.hdf5'),
+    write_json(episode_root / 'accepted.json', dict(row, path=str(destination / 'episode.hdf5'),
         source_sha=source_sha(), seconds=time.monotonic()-start, scene_info=scene,
         gt=dict(depth='camera Z in meters float32; invalid=0', segmentation='raw uint32 simulator IDs',
                 disparity='positive fx*baseline/Z in pixels',
@@ -317,9 +324,10 @@ def pool(worker, limit):
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 continue
-            if (ROOT / 'episodes' / f'{index:04d}').exists():
+            if (ROOT / 'episodes' / f'{index:04d}/accepted.json').exists():
                 continue
-            with (logs / f'{index:04d}.log').open('x') as log:
+            log_path = logs / f'{index:04d}-{os.environ["SLURM_JOB_ID"]}.log'
+            with log_path.open('x') as log:
                 try:
                     result = subprocess.run([sys.executable, str(Path(__file__).resolve()), 'episode', '--index', str(index)],
                         stdout=log, stderr=subprocess.STDOUT, timeout=1800)
@@ -330,7 +338,7 @@ def pool(worker, limit):
             if code:
                 failures.append(index)
                 # Fail early on infrastructure or systematic mismatch, preserving all outputs.
-                raise RuntimeError(f'Episode {index} failed; see {logs / f"{index:04d}.log"}')
+                raise RuntimeError(f'Episode {index} failed; see {log_path}')
     write_json(ROOT / f'worker-{worker}-{os.environ["SLURM_JOB_ID"]}.json', dict(failed=failures))
 
 

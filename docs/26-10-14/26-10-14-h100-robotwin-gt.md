@@ -12,3 +12,4 @@
 - 六目GT：float32米制Z、有效mask、float32 fx*b/Z视差、原始uint32 mesh/actor ID；遮挡是nearest-pixel对目深度检验，容差max(2mm,0.5%Z)，视野外单独标记，不冒充精确光线级可见性。保持RGB渲染与相机合同。
 - _base_task.py仅增加显式render_device scene创建，避免SAPIEN旧wrapper忽略选卡。其他调用保留原行为。
 - 静态检查发现_init_task_env_原先无参数调用setup_scene；同步传递render_device，确保选卡实际到达RenderSystem。两个本地GT边界测试通过。每条完成后全量解码六路MP4并核帧数，2500条/50任务各50条/551534帧均齐全才发布ready.json。
+- 每次失败保留独立attempt目录；修复后重新提交只跳过accepted条目，绝不因失败目录存在而漏样本，也不覆盖旧尝试。H800导出经只读stdin读取已有文件，不在H800写入或申请新资源。
