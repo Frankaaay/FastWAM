@@ -195,3 +195,9 @@ RoboTwin runtime依赖140324已成功结束：warp1.4.1→1.13.0、websockets13.
 - e2dd655已推送并同步到远端clean FastWAM clone。桥接首次import缺msgpack_numpy，在空闲FastWAM独立env安装msgpack-numpy0.4.8后通过。robodojo-bridge-contract.log记录官方EEF20→world→EEF20往返atol1e-6、三相机payload以及空instruction/未reset切换env/多env拒绝检查，exit0；这是合同测试而非仿真通过。
 - OpenWAM LIBERO训练链已exit0，完整checkpoint_step_2.safetensors为24813767464bytes、2089tensor keys，未包含metadata独立step计数。训练链139735继续RoboDojo，之后RoboTwin。审计链177433等待训练链结束后逐benchmark验证exit0、保存配置Wan初始化及全部tensor finite，日志openwam-checkpoint-audit.log；尚未产出最终报告。
 - IsaacLab99194已完成。RoboDojo运行依赖链176682按官方install.sh的版本列表repin，之后安装base requirements及固定submodule cuRobo[cu12]，不执行官方脚本的submodule --remote。约束保存在runs根robodojo-official-runtime-constraints.txt，日志robodojo-runtime-curobo.log；仍需处理真实import/render问题。XPolicyLab bridge运行在独立FastWAMenv的websockets16，不与Isaac要求的websockets12混装。
+
+## LingBot-VA 并行准备范围
+
+用户新增LingBot-VA训练准备，明确全部先做Wan baseline、全部通过后再考虑StereoTok。原五组继续，未暂停。已查询官方Robbyant/lingbot-va README：官方提供RoboTwin和LIBERO流程；XPolicyLab已有LingBot_VA RoboDojo适配，使用预编码Wan2.2 latent、独立单env cache。官方post-training入口加载lingbot-va-base，不能将其默认当作本任务要求的原始Wan初始化；需检查权重映射和新增action参数初始化，暂未下载LingBot策略checkpoint。H800独立源码clone PID181361，目标projects/LingBot-VA-baselines-20261014，日志lingbot-va-source-clone.log；当前仍clone中。待用户确认LingBot-VA是否同样覆盖三个benchmark及训练smoke/闭环验收，独立代码检查可先推进。
+
+原五组进展：OpenWAM三组CPU-offload训练均已exit0；审计177433已核验LIBERO全部2089张量finite，其余继续。LIBERO闭环链180042等待训练及checkpoint审计成功后使用官方deploy默认compile/cache、10步去噪，四套各8动作；输出openwam/libero-closed-loop，日志openwam-libero-closed-loop-chain.log。RoboTwin独立cuRobo167338构建完成，已绑定新源码并连接三个既有资产目录。RoboDojo运行依赖176682继续安装。
