@@ -35,6 +35,7 @@ serial()
 start = time.monotonic()
 for _ in range(10): reference = serial()
 serial_seconds = time.monotonic()-start
+repeat = serial()
 systems = sapien.render.RenderSystemGroup([renderer])
 group = systems.create_camera_group(cameras, list(names))
 group.take_picture()
@@ -58,3 +59,19 @@ for j, name in enumerate(names):
                            for a,b in zip(reference,current))
 print(json.dumps(dict(pci=device.pci_string, serial_seconds=serial_seconds,
                       group_seconds=group_seconds, max_absolute_differences=errors)), flush=True)
+
+def compare(a, b):
+    result = {}
+    for j, name in enumerate(names):
+        result[name] = dict(max_abs=max(float(np.max(np.abs(x[j].astype(float)-y[j].astype(float)))) for x,y in zip(a,b)),
+                           unequal=sum(int(np.count_nonzero(x[j]!=y[j])) for x,y in zip(a,b)))
+    result['depth_max_abs'] = max(float(np.max(np.abs(x[1][...,2]-y[1][...,2]))) for x,y in zip(a,b))
+    return result
+print('SERIAL_REPEAT', json.dumps(compare(reference, repeat)), flush=True)
+print('GROUP_COMPARE', json.dumps(compare(reference, current)), flush=True)
+actor.set_pose(sapien.Pose([1,.2,0]))
+cameras[0].set_local_pose(sapien.Pose([0,.04,.02]))
+scene.update_render()
+moving_serial=serial()
+moving_group=grouped()
+print('MOVING_COMPARE',json.dumps(compare(moving_serial,moving_group)),flush=True)
