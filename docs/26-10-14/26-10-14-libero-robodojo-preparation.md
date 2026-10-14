@@ -135,3 +135,22 @@ LIBERO旧/mnt/data/data/h100-jiuquyun/PRETRAIN_DATA/LIBERO目录为空。OpenWAM
 继续核查发现文本条件差异：OpenWAM LIBERO的LeRobotV3Reader._resolve_prompt直接返回strip后的任务文本；RoboDojo会调用format_prompt_for_inference添加固定前缀。旧precompute_text_embeds只读tasks.jsonl且始终包装DEFAULT_PROMPT，不能复用于canonical LIBERO。适配器新增unique_prompts读取固定SHA reader已有元数据；原缓存入口对OpenWAMDataset直接调用该方法，禁止override_instruction覆盖canonical提示词。两项真实方法AST回归（原始LIBERO文本/空文本拒绝）远端通过；动作mask此前4项通过。端到端reader/cache/model尚待独立环境安装后验证。
 
 RoboDojo资产首次下载已因hf-mirror HTTP429失败（Assets/Eval_Layout/.../cover_blocks_35.json）；保留下载断点，不删除文件。需退避并降低请求频率续传。未成功暂停活跃资产进程，因为检查时其已退出；没有误停其他进程。
+
+## 13:18 镜像修复与真实 reader 启动
+
+- FastWAM代码已发布63d6c78，独立远端clone通过fetch、clean检查及ff-only更新；原有实验目录未改。新env的torch/hydra/cv2/h5py/pyarrow/av、OpenWAM reader与FastWAM适配器真实import通过，torch2.7.1+cu128。
+- PyPI慢下载经实测定位：同一sentencepiece wheel首1MiB，腾讯镜像0.14s、阿里云1.686s；清华wheel返回403。只切换索引，不改变版本约束。原四个本任务安装进程定向SIGINT后已退出，断点/缓存保留。腾讯镜像新PID：OpenWAM63078、FastWAM63079（已完成）、Isaac63080、LIBERO官方setup63082。日志在本任务runs根下 <name>-install-mirror.log。
+- OpenWAM训练链35953整个进程组暂时SIGSTOP，防止旧安装PID退出造成过早放行。需在新依赖和FastWAM T5缓存任务完成后SIGCONT；LIBERO渲染链36999仍等待该训练链，不会并发占用CUDA/EGL。
+- FastWAM T5生成链66530使用已发布源码，两个benchmark分别生成512长度缓存。LIBERO真实reader已成功构造：1693eps、273465windows、10fps、multiview、min-max。tokenizer_model_id显式指定Wan2.2-TI2V-5B内相同google/umt5-xxl本地文件；模型仍是Wan初始化。输出cache/five-baselines-20261014/text/<benchmark>，日志fastwam-<benchmark>-text-cache.log；尚未宣称生成完毕。
+- RoboDojo Assets续传PID65528，固定同一HF revision、max_workers=1，失败后60至600秒退避，最多8次；约20%文件位置恢复正常推进。此百分比是文件数而非字节完成度，无完整资产成功结论。
+- 两张GPU尚未开始正式模型反向；五组baseline均未满足最终闭环验收。持续目标保持active，无正式训练。
+
+## 13:23 真实样本与训练进程
+
+- 远端已发布测试文件通过unittest discover：6 tests，0.469s。不是仅AST临时检查。
+- 两个FastWAM真实样本读取通过：video[3,9,384,320]、action及action_is_pad[32,80]、proprio[1,80]、context[512,4096]bf16，所有tensor finite。证据fastwam-real-readers.log。
+- T5缓存完成：LIBERO40条、RoboDojo当前smoke子集1条，均无512长度截断；TEXT_CACHE_READY两组均出现。
+- FastWAM双卡训练链PID70448已启动，使用63d6c78、原accelerate_zero2_ds入口、B2、max_steps2/save2、Wan预训练及Wan派生ActionDiT，未加载策略权重。日志fastwam-training-chain.log与fastwam/<benchmark>/train.log；13:23仍在Wan组件装载，尚无反向/loss/checkpoint通过结论。
+- OpenWAM官方依赖安装完成；初次import因libGLX.so.0不在搜索路径失败。个人已有system-libs/prefix/usr/lib/x86_64-linux-gnu包含此库，显式LD_LIBRARY_PATH后torch/hydra/cv2/h5py/pyarrow/av/deepspeed/transformers/diffusers全import通过，torch2.7.1+cu128、transformers5.19.0。不替换官方opencv版本。
+- 原35953/36999等待链在尚未开始训练/仿真时定向结束，重新提交携带LD_LIBRARY_PATH且绑定新PID的链：OpenWAM72159等待FastWAM70448及LIBERO setup63082；LIBERO环境smoke72160等待63082和72159。日志分别openwam-training-chain-v2.log与libero-render-chain-v2.log。不存在继续恢复35953的待办。
+- LIBERO官方pip安装和IsaacSim包写入CPFS仍进行中；RoboDojo资产低并发续传仍运行。5组闭环验收均未完成，持续处理目标未结束。
