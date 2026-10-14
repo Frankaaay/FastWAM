@@ -191,3 +191,10 @@ Windows初次并发测试触发目标文件并行replace的WinError5，属于Win
 | rotate_qrcode | 85 |
 | stamp_seal | 63 |
 | turn_switch | 29 |
+
+### 18:32 randomized正式启动
+- 1GPU场景门禁dlc1qh7w23kscmsc已Succeeded，SCENE_GATE_EXIT=0、SCENE_REPLAY_PASS：dump_bin_bigbin seed100006/20actors，click_bell seed100000/14actors，put_bottles_dustbin seed100000/17actors，各跨task后同env连续重放2次均通过。门禁1GPU已释放；未绕过专家筛选、稳定性检查或姿态比较。
+- 正式clone /mnt/workdir/frank/projects/FastWAM-C2R-eval-randomized-20261014，精确SHA921bb0c4f598cf858d97b8f6ac64f22e2dc98987，root /mnt/workdir/frank/runs/c2r-stereotok-randomized-final-20261014。50randomized×100全部从头准备/执行，旧randomized不复用。38组mode pipeline、每GPU2worker，固定16GPU ForbiddenQuotaOverSold，闲时59GPU申请上限ForceQuotaOverSold。registry randomized-jobs.json和randomized-final-*.json请求/回执在本机既有目录。
+- 固定8作业：dlc1dptdl7ug7aod、dlc1e9skcr2lonb1、dlc1ejs5qjqprfe3、dlc1etrr4bv3h2di、dlc1etrr4bvu31ic、dlc1fdqxvv4n6uhm、dlc1fdqxvv55f3d6、dlc1fnqj9nh7utb2。独立监督器隐藏进程PID36544，randomized-jobs-supervisor.json/lock及randomized-supervisor.stdout.log/stderr.log；首轮状态18:33:31为固定12Running+4EnvPreparing，闲时12Running+19EnvPreparing+28Queuing，不等于已产出回合。控制器probe dlc1xp0557s324pp；初次额外worker健康/远端registry发布0GPU Job dlc3xps0bc8v8htq。
+- 跟进已更新当前randomized清单/PID/阶段，禁止重复启动或恢复clean。尚无稳态速度，不给全量完成承诺；持续控制器负责已确认终态认领回收和原额度资源补位，聊天跟进核查其健康并处理非抢占故障。
+- 18:34:29初次实际worker检查：94份worker日志、50个活动认领，0已发布完整plans/0rollout回合，result/prepare errors均0，未见Traceback或退出记录；处于50条件专家筛选准备阶段，未将认领数当完成计划。
