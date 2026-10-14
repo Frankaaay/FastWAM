@@ -189,3 +189,9 @@ RoboTwin runtime依赖140324已成功结束：warp1.4.1→1.13.0、websockets13.
 新增tests/serve_robodojo_baseline_bridge.py，仅用于已授权smoke：固定XPolicyLab53c5da5/OpenWAM4d7f642源码合同，复用XPolicyLab官方state→EEF20及EEF20→world动作方法，不调用其模型初始化或dummy路径。通过官方JSON WS predict_once接收完整32步chunk，再由XPolicyLab官方binary WS server提供给真实仿真；拒绝空instruction、多环境以及未reset切换env_idx，检查raw20D和转换动作finite。模型仍由各自独立服务加载本次Wan初始化smoke权重。之所以新增薄桥，是官方OpenWAM4d7f642没有XPolicyLab vendored版本需要的generate_batch，不能混用vendored模型实现。当前本地AST及diff检查通过，远端import/坐标回归和仿真仍待验证。
 
 13:57 OpenWAM LIBERO CPU-offload重试完成两步：loss2.5384（video0.4230/action2.1154）、11.5109（video0.3098/action11.2011）；正在保存checkpoint_step_2.safetensors。未以日志进度代替checkpoint验收或仿真通过。
+
+## 14:02 桥接回归与后续准备
+
+- e2dd655已推送并同步到远端clean FastWAM clone。桥接首次import缺msgpack_numpy，在空闲FastWAM独立env安装msgpack-numpy0.4.8后通过。robodojo-bridge-contract.log记录官方EEF20→world→EEF20往返atol1e-6、三相机payload以及空instruction/未reset切换env/多env拒绝检查，exit0；这是合同测试而非仿真通过。
+- OpenWAM LIBERO训练链已exit0，完整checkpoint_step_2.safetensors为24813767464bytes、2089tensor keys，未包含metadata独立step计数。训练链139735继续RoboDojo，之后RoboTwin。审计链177433等待训练链结束后逐benchmark验证exit0、保存配置Wan初始化及全部tensor finite，日志openwam-checkpoint-audit.log；尚未产出最终报告。
+- IsaacLab99194已完成。RoboDojo运行依赖链176682按官方install.sh的版本列表repin，之后安装base requirements及固定submodule cuRobo[cu12]，不执行官方脚本的submodule --remote。约束保存在runs根robodojo-official-runtime-constraints.txt，日志robodojo-runtime-curobo.log；仍需处理真实import/render问题。XPolicyLab bridge运行在独立FastWAMenv的websockets16，不与Isaac要求的websockets12混装。
