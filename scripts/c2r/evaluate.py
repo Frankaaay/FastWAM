@@ -10,6 +10,9 @@ import sys
 import time
 import traceback
 import uuid
+from copy import deepcopy
+from functools import wraps
+from inspect import signature, Parameter
 
 
 def write_json(path, value):
@@ -51,6 +54,7 @@ def tuples(value):
 def ready_cases(root, cases, episodes=None, prepare=False):
     """Rescan unfinished work so released leases are reclaimed after preemption."""
     pending = list(cases)
+    blocked = []
     deadline = time.monotonic() + 24 * 3600
     while pending:
         ready = []
@@ -61,10 +65,16 @@ def ready_cases(root, cases, episodes=None, prepare=False):
                 pending.remove(case)
                 continue
             has_plan = (root / 'plans' / (key + '.json')).exists()
+            if not has_plan and (root / 'errors' / ('prepare--' + key + '.json')).exists():
+                blocked.append(key)
+                pending.remove(case)
+                continue
             if episodes is not None:
                 rows = [json.loads(p.read_text()) for p in (root / 'results').glob(key + '--*.json')]
                 if any(row.get('error') for row in rows):
-                    raise RuntimeError(f'Rollout failure requires review: {key}')
+                    blocked.append(key)
+                    pending.remove(case)
+                    continue
                 done = {ep['ordinal'] for row in rows for ep in row.get('episodes', [])}
                 if done == set(range(episodes)):
                     write_json(completed_path, dict(episodes=episodes))
@@ -77,12 +87,39 @@ def ready_cases(root, cases, episodes=None, prepare=False):
                 pending.remove(case)
             yield case
         if pending:
-            failures = list((root / 'errors').glob('prepare--*.json'))
-            if failures:
-                raise RuntimeError(f'Expert preparation failed: {failures}')
             if time.monotonic() > deadline:
                 raise TimeoutError('Evaluation did not finish within 24 hours')
             time.sleep(10)
+    if blocked:
+        raise RuntimeError(f'Rollout failures require review: {blocked}')
+
+
+def isolate_mutable_defaults(method):
+    # Ported from ruhu evaluation/aligned20/scene_defaults.py. Keep explicit
+    # arguments explicit, and give each scene fresh copies of native defaults.
+    parameters = signature(method)
+
+    @wraps(method)
+    def call(*args, **kwargs):
+        bound = parameters.bind(*args, **kwargs)
+        for name, parameter in parameters.parameters.items():
+            default = parameter.default
+            if (name not in bound.arguments and default is not Parameter.empty
+                    and isinstance(default, (list, dict, set))):
+                bound.arguments[name] = deepcopy(default)
+        return method(*bound.args, **bound.kwargs)
+
+    return call
+
+
+def isolate_scene_defaults(env):
+    method = env.get_cluttered_table
+    parameters = signature(method).parameters
+    expected = {'xlim': [-.59, .59], 'ylim': [-.34, .34], 'zlim': [.741]}
+    for name, value in expected.items():
+        if parameters[name].default != value:
+            raise RuntimeError('Scene defaults already mutated; use a fresh worker')
+    env.get_cluttered_table = isolate_mutable_defaults(method)
 
 
 def setup_runtime():
@@ -118,7 +155,9 @@ def environment(official, device, task, phase):
                 eval_mode=True, render_freq=0, save_data=False, eval_video_log=False,
                 render_device=device, stereo=dict(enabled=True, head_baseline_m=.06,
                 left_wrist_baseline_m=.02, right_wrist_baseline_m=.02))
-    return official.class_decorator(task), args
+    env = official.class_decorator(task)
+    isolate_scene_defaults(env)
+    return env, args
 
 
 def prepare_case(official, device, case, count):
@@ -312,8 +351,7 @@ def main():
                 record = json.loads(resultpath.read_text()) if resultpath.exists() else dict(
                     **case, offset=offset, episodes=[])
                 if record.get('error'):
-                    errors.append(record['error'])
-                    break
+                    continue
                 chunk = plan['episodes'][offset:offset+manifest['chunk_size']]
                 finished = {ep['ordinal'] for ep in record['episodes']}
                 remaining = [ep for ep in chunk if ep['ordinal'] not in finished]

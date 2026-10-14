@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
 import threading
+import ast
 
 spec = importlib.util.spec_from_file_location('evaluation', Path(__file__).resolve().parents[1] / 'scripts/c2r/evaluate.py')
 evaluation = importlib.util.module_from_spec(spec)
@@ -17,6 +18,41 @@ spec.loader.exec_module(evaluation)
 
 
 class EvaluationTests(unittest.TestCase):
+    def test_native_scene_defaults_are_isolated_across_tasks_and_episodes(self):
+        source = Path(__file__).resolve().parents[1] / 'third_party/RoboTwin/envs/_base_task.py'
+        tree = ast.parse(source.read_text())
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Base_Task')
+        method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == 'get_cluttered_table')
+        namespace = {'np': SimpleNamespace(random=SimpleNamespace(rand=lambda: 0.))}
+        exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), 'exec'), namespace)
+        native = namespace['get_cluttered_table']
+        task = type('Task', (), {'get_cluttered_table': native})
+        for bias in ([.3, 0], [0, 0], [.3, 0]):
+            env = task()
+            env.table_xy_bias = bias
+            env.clean_background_rate = 1
+            evaluation.isolate_scene_defaults(env)
+            for _ in range(4):
+                env.get_cluttered_table()
+                self.assertEqual(native.__defaults__[1], [-.59, .59])
+        contaminated = task()
+        contaminated.table_xy_bias = [.3, 0]
+        contaminated.clean_background_rate = 1
+        contaminated.get_cluttered_table()
+        with self.assertRaises(RuntimeError):
+            evaluation.isolate_scene_defaults(task())
+
+    def test_failed_case_does_not_stop_healthy_case(self):
+        evaluation.write_json(self.root / 'results/b--clean--000.json',
+                              dict(error='scene failed', episodes=[]))
+        cases = [dict(task='b', phase='clean'), dict(task='a', phase='clean')]
+        iterator = evaluation.ready_cases(self.root, cases, episodes=2)
+        self.assertEqual(next(iterator)['task'], 'a')
+        evaluation.write_json(self.root / 'results/a--clean--000.json',
+                              dict(episodes=[dict(ordinal=0), dict(ordinal=1)]))
+        with patch.object(evaluation.time, 'sleep'), self.assertRaisesRegex(RuntimeError, 'b--clean'):
+            next(iterator)
+
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix='c2r-eval-test-'))
         (self.root / 'results').mkdir()

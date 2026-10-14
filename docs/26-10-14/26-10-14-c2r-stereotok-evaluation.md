@@ -107,3 +107,11 @@ Windows初次并发测试触发目标文件并行replace的WinError5，属于Win
 - 13:02:14（CPU读取dlcdaaeizz10t0e4）仍2585；固定两组遥测已约69Gi、GPU80–95%。13:04:14（dlc1a0yhornwxogq）2614有效回合、98plans、无result/prepare error，8f版新增29；不再说新版本尚无产出。日志首批examples：put_bottles_dustbin clean ordinal45 wall297.17/setup36.34/infer101.89s，blocks_ranking_size clean ordinal73 wall315.02/setup36.24/infer107.23s，stack_bowls_three clean ordinal15 wall290.00/setup35.67/infer111.59s。包含冷启动，不能将首回合平均推理时长当稳态。
 - 环境证据：首次Matplotlib字体cache初始化；PyTorch警告/root/.cache/torch/kernels不能创建，内核cache关闭；torch._inductor首次编译warning。证明存在缓存/首次编译开销，但未量化其占全部启动时间，不为此重启正在产出的worker，不改精度。下次必要替换时可定向修复可写cache路径，需验证而非热改运行clone。
 - ETA澄清：此前8–13h只是历史两档吞吐的条件外推，不是新版本实测速率。按剩余7386和61.39/35.32回合/GPU小时，16张全用于rollout约7.52–13.07h；当前固定14rollout+2prepare，若准备不释放则约8.59–14.94h。当前49闲时+14固定=63rollout，若持续可用且恢复历史效率约1.91–3.32h；全部59闲时兑现+14固定=73rollout约1.65–2.86h。这些不含未量化准备尾部、抢占与调度退化，稳态ETA需后续同窗口增量。用户侧可暂按当前闲时持续可用时约2–4h规划，明确为低置信条件估计，不能承诺完成时刻。
+
+### 15:58 按新授权先clean后重建randomized
+- 用户明确授权引入ruhu修复、排查潜在bug、固定16GPU加闲时先完成clean，再重新跑randomized。已暂停旧自动跟进；旧两个残留闲时Job dlc1pa7y17vcx5zb、dlc1uk08az6gmylk已请求停止，待终态确认后复制clean结果。旧结果和计划均保留。
+- 根因归属复核：RoboTwin bf44be51原始源码与FastWAM初始导入2764a1a均有get_cluttered_table默认list原地加bias；不是ruhu新增。ruhu aligned20/scene_defaults.py的两函数实际被sim_runtime.py调用。现将isolate_mutable_defaults/isolate_scene_defaults移入现有evaluate.py（注明来源），在environment创建后统一应用，覆盖准备与rollout；不修改上游共享源码，显式传参保留，默认值已污染则fail closed要求新进程。
+- 真实源码AST最小复现：原始xlim[-.59,.59]两次调用后分别[-.29,.89]、[.01,1.19]，即使clean_background_rate提前返回也累加。新增跨task/连续episode隔离与污染检测测试，9项本地CPU测试全部通过。实际clean配置cluttered_table=false，绕过该问题路径；15:51:06逐条校验完成2971clean/2371randomized，无ordinal重复且seed/instruction匹配plans。randomized旧结果仅保留证据，不进入修复版成绩。
+- 额外修复故障隔离：ready_cases遇到已失败的条件先记录blocked并让其他条件继续；最后仍非零报告失败，不伪造完整性。已失败chunk不重复把其他worker拉退出，当前worker新异常仍记录后退出，防带损坏CUDA/仿真状态继续。准备失败也仅隔离对应条件。正式summary仍要求所有目标回合完整且无error。
+- 针对日志确认的缓存故障，launcher给每worker预建可写kernels/matplotlib目录并设置PYTORCH_KERNEL_CACHE_PATH/MPLCONFIGDIR；不改模型、渲染、数值精度或种子。旧运行clone不热改。
+- 分阶段输出：计划新clean root /mnt/workdir/frank/runs/c2r-stereotok-clean-final-20261014，仅含原50clean cases/冻结plans和有效结果，目标5000；randomized新root在clean严格验收后再创建，50randomized cases从seed100000按原专家筛选规则重建100有效回合，旧random计划不复用。最终分别报告两phase，不把旧random混入。

@@ -38,7 +38,12 @@ def main():
     for gpu in range(args.gpus):
         for worker in range(args.workers_per_gpu):
             slot = f'{gpu}-{worker}'
+            cache = logs / slot
+            for name in ('kernels', 'matplotlib'):
+                (cache / name).mkdir(parents=True, exist_ok=True)
             child_env = dict(env, CUDA_VISIBLE_DEVICES=str(gpu),
+                             PYTORCH_KERNEL_CACHE_PATH=str(cache / 'kernels'),
+                             MPLCONFIGDIR=str(cache / 'matplotlib'),
                              TORCHINDUCTOR_CACHE_DIR=str(logs / slot / 'inductor'),
                              TRITON_CACHE_DIR=str(logs / slot / 'triton'))
             log = (logs / (slot + '.log')).open('x')
