@@ -3,6 +3,7 @@ import json
 import time
 import numpy as np
 import sapien
+import torch
 
 sapien.render.set_camera_shader_dir('rt')
 sapien.render.set_ray_tracing_samples_per_pixel(32)
@@ -37,10 +38,15 @@ serial_seconds = time.monotonic()-start
 systems = sapien.render.RenderSystemGroup([renderer])
 group = systems.create_camera_group(cameras, list(names))
 group.take_picture()
+def grouped():
+    group.take_picture()
+    buffers = [torch.as_tensor(group.get_picture_cuda(name), device='cuda').cpu().numpy().copy() for name in names]
+    return [[buffer[i] for buffer in buffers] for i in range(len(cameras))]
+current = grouped()
+print('GROUP_SHAPES', [[value.shape for value in camera] for camera in current], flush=True)
 start = time.monotonic()
 for _ in range(10):
-    group.take_picture()
-    current = [[camera.get_picture(name).copy() for name in names] for camera in cameras]
+    current = grouped()
 group_seconds = time.monotonic()-start
 errors = {}
 for j, name in enumerate(names):
