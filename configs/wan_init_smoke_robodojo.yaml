@@ -1,0 +1,33 @@
+# OpenWAM canonical reader; FastWAM model and first-frame action inference.
+defaults:
+  - train
+  - override data: openwam_robodojo
+  - override model: fastwam
+  - _self_
+
+model:
+  tokenizer_max_len: 512
+  skip_dit_load_from_pretrain: false
+  action_dit_pretrained_path: ${oc.env:BASELINE_ACTION_DIT}
+  mot_checkpoint_mixed_attn: true
+
+seed: 42
+resume: null
+learning_rate: 1.0e-4
+weight_decay: 0.01
+lr_scheduler_type: cosine
+num_epochs: 5
+batch_size: 2
+gradient_accumulation_steps: 1
+mixed_precision: bf16
+max_grad_norm: 1.0
+num_workers: 8
+max_steps: 2
+save_every: 2
+log_every: 1
+# This trainer's native validation decoder expects its LeRobot processor.
+# Real simulation evaluation is a separate client, not that decoder.
+eval_every: 0
+output_dir: ${oc.env:BASELINE_RUN_ROOT}/fastwam/robodojo/${now:%Y%m%d_%H%M%S}
+wandb:
+  enabled: false

@@ -1,0 +1,11 @@
+train:
+  _target_: fastwam.datasets.openwam_dataset.OpenWAMDataset
+  _recursive_: false
+  benchmark: robodojo
+  dataset_dirs:
+    - ${oc.env:BASELINE_ROBODOJO_DATA}
+  text_embedding_cache_dir: ${oc.env:BASELINE_TEXT_CACHE_ROOT}/robodojo
+  context_len: 512
+  processor:
+    action_output_dim: 80
+    proprio_output_dim: 80

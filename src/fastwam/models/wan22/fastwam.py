@@ -323,11 +323,11 @@ class FastWAM(torch.nn.Module):
 
         action_is_pad = sample.get("action_is_pad", None)
         if action_is_pad is not None:
-            if action_is_pad.ndim != 2:
+            if action_is_pad.ndim not in (2, 3):
                 raise ValueError(
-                    f"`sample['action_is_pad']` must be 2D [B, T], got shape {tuple(action_is_pad.shape)}"
+                    f"`sample['action_is_pad']` must be [B, T] or [B, T, D], got {tuple(action_is_pad.shape)}"
                 )
-            if action_is_pad.shape[0] != batch_size or action_is_pad.shape[1] != action_horizon:
+            if action_is_pad.shape[:2] != action.shape[:2] or (action_is_pad.ndim == 3 and action_is_pad.shape != action.shape):
                 raise ValueError(
                     "`sample['action_is_pad']` shape mismatch: "
                     f"got {tuple(action_is_pad.shape)} vs expected ({batch_size}, {action_horizon})"
@@ -457,6 +457,20 @@ class FastWAM(torch.nn.Module):
         valid_sum = valid.sum(dim=1).clamp(min=1.0)
         return (video_loss_token * valid).sum(dim=1) / valid_sum
 
+    @staticmethod
+    def _compute_action_loss_per_sample(pred_action, target_action, action_is_pad):
+        per_element = F.mse_loss(pred_action.float(), target_action.float(), reduction="none")
+        if action_is_pad is None:
+            return per_element.mean(dim=(1, 2))
+        if action_is_pad.dtype != torch.bool:
+            raise ValueError("action_is_pad must be boolean")
+        valid = (~action_is_pad).to(device=per_element.device, dtype=per_element.dtype)
+        if valid.shape == per_element.shape:
+            return (per_element * valid).sum(dim=(1, 2)) / valid.sum(dim=(1, 2)).clamp(min=1)
+        if valid.shape != per_element.shape[:2]:
+            raise ValueError("action_is_pad must match [B,T] or the full action [B,T,D]")
+        return (per_element.mean(dim=2) * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1)
+
     def training_loss(self, sample, tiled: bool = False):
         inputs = self.build_inputs(sample, tiled=tiled)
         input_latents = inputs["input_latents"]
@@ -559,13 +573,7 @@ class FastWAM(torch.nn.Module):
         )
         loss_video = (loss_video_per_sample * video_weight).mean()
 
-        action_loss_token = F.mse_loss(pred_action.float(), target_action.float(), reduction="none").mean(dim=2) # [B, T]
-        if action_is_pad is not None:
-            valid = (~action_is_pad).to(device=action_loss_token.device, dtype=action_loss_token.dtype)
-            valid_sum = valid.sum(dim=1).clamp(min=1.0)
-            action_loss_per_sample = (action_loss_token * valid).sum(dim=1) / valid_sum
-        else:
-            action_loss_per_sample = action_loss_token.mean(dim=1)
+        action_loss_per_sample = self._compute_action_loss_per_sample(pred_action, target_action, action_is_pad)
 
         action_weight = self.train_action_scheduler.training_weight(timestep_action).to(
             action_loss_per_sample.device, dtype=action_loss_per_sample.dtype
