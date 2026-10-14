@@ -37,3 +37,11 @@
 - 本人单卡准备DSW最后GPU无进程、无其他/mnt/workdir/frank任务，已请求StopInstance；正式DLC独立运行，不依赖DSW或本机聊天保持在线。后续需要检查产物可临时启动该DSW再停止。
 
 复核入口：既有Python环境运行 scripts/c2r/evaluate.py summary --root /mnt/workdir/frank/runs/c2r-stereotok-eval-full-20261014；需等待完整10000结果，summary对seed/instruction/ordinal与plan匹配、重复episode和缺失覆盖均严格校验。每个DLC的workers/<job>/exit.json保存source与各worker退出码；plans保留候选拒绝原因和有效场景RNG，results/logs保留逐回合耗时和成功标记。下一步由跟进任务实时验收并交付逐任务clean/randomized结果。
+
+## 11:12–11:16 有界跟进
+
+- RAM 实时核验仍为 frank。39 个 DLC 一次状态检查：27 Running（24×2 + 3×1 = 51 GPU），12 Queuing（24 GPU）；没有 Failed/Stopped/Succeeded。该状态不代表回合完整性或最终验收。
+- 为读取持久结果，按授权启动自己的单卡 DSW `dsw-dqg0h974kfthja8hs9`。实例停在 EnvPreparing，GetInstanceEvents 的 11:12:14/11:12:34 事件明确为可用 reservation 的 CPU/GPU/memory 不足；SSH 映射仍 Allocating，因此未发出 SSH 命令，也未读取本轮 plans/results/errors/worker exit。
+- 已 StopInstance，随后 GetInstance 确认 Stopped；没有停止、重启或修改任何评估 DLC，也没有更改训练。
+- 有界尝试 `get-pod-logs` 读取首个 DLC `dlcbv6akram9k2jy` 的 20 行日志，仅返回挂载/启动信息。当前 launcher 将逐 worker 日志写到 CPFS，不能用容器启动日志推断回合进展。
+- 本轮无代码或评估合同修改。保留所有成功产物及失败证据；下一次跟进继续核对资源是否允许临时读取，待可访问后检查实际回合、错误与退出码。当前无法更新基于实际吞吐的 ETA。
