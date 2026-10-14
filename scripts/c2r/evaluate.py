@@ -45,7 +45,7 @@ def setup_runtime():
     os.chdir(robotwin)
     sys.path[:0] = [str(robotwin), str(robotwin / 'description/utils'), str(robotwin / 'script')]
     import eval_policy as official
-    device = sapien.render.RenderDevice('cuda:0')
+    device = sapien.Device('cuda:0')
     return official, device
 
 
