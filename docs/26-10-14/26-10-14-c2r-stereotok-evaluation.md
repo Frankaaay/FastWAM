@@ -68,3 +68,14 @@
 - root原因：manifest分进程后没有恢复expert-only任务状态。只读核对ruhu已验证的OpenWAM task_state helper以及本地三个任务play_once/check_success；在evaluate.py rollout setup后按初始物体位姿恢复open_laptop/place_object_scale/put_object_cabinet的arm_tag与cabinet.origin_z，不跑专家动作、不更改种子/指令/成功阈值。
 - 为落实用户动态闲时加减卡要求，现有claim改为Linux内核flock租约，逐回合原子落盘，日志/owner按attempt保留；worker退出自动释放锁，存活worker重新扫描未完成工作。只在独立接续root启用，原目录与失败证据不覆盖。已完成case标记减少CPFS扫描；prepare与rollout同worker循环，避免长prepare阻塞全局或被抢占后永久留下mkdir claim。
 - 本地6个CPU测试：4通过、2个Linux flock测试明确跳过，远端CPFS仍需执行退出释放测试。已有render benchmark扩展指定task/回合数，旧执行候选eager渲染+每次encode prompt，与当前deferred+缓存在同模型/EEF32/场景计划下对照；两phase反转先后顺序观察冷缓存偏置，保存像素/动作/EEF状态一致性和分阶段时间，不用旧qpos协议替代当前科学合同。尚未完成GPU对照，不提前宣称速度或恢复完成。
+## 12:32–12:35 按最新要求启动固定16卡与闲时补位
+
+- 最新明确指令覆盖此前“16卡全闲时”：固定资源16卡打底，剩余闲时补充；随后用户要求立即挂16卡、以7小时为目标。ruhu约14小时只完成1468而非10000回合，不能用8→16卡线性外推7小时全量承诺。保留已验证合同，不把本C2R EEF模型切回旧qpos模型。
+- clean发布SHA 9e1079e88875be2264a36e3a4bd47163b2a689d7；独立clone /mnt/workdir/frank/projects/FastWAM-C2R-eval-resume-20261014，原d91 clone未改。实际CPFS上运行6/6 CPU测试通过，包含跨进程独占与SIGKILL后锁释放；没有仅用Windows跳过结果代替Linux验证。
+- 新接续root /mnt/workdir/frank/runs/c2r-stereotok-eval-resume-20261014。从原root完整保留2420已发布回合，并从中断chunk的EPISODE日志额外恢复162完整回合，总2582；逐条校验ordinal/seed/instruction与对应plan且无冲突。98个已发布plans和manifest逐字节复制；manifest SHA256 09f4e1f201e0f39c21794054f725574225943555fa42e304e24160cb99f2960f。新root/recovery.json记录来源，旧root所有失败、claims、logs、结果均保留。新summary确认2582/10000、完整SR为空，不冒充完成。
+- 同条件诊断4个单卡Job dlcenvqbvuph2c05(click_bell)、dlcexvbpn0jujbv0(open_laptop)、dlcf7ux3fva8jp07(place_object_scale)、dlcfhuih7kl1u90b(put_object_cabinet)。响应用户“现在挂16卡”后提前停止这4个诊断，GetJob全部Stopped，日志保留 /mnt/workdir/frank/runs/c2r-eval-matched-speed-20261014。已获得click_bell clean两回合对照，pixels/actions/EEF states全部相等；排除首次冷启动后的第二回合旧14.2700s、新13.9229s（缩短2.43%），不代表全量优化收益。open_laptop修复后完成首回合且成功，place_object_scale前两回合正常；其余完整A/B和cabinet真实闭环未完成，不能宣称四组通过。DSW独立import诊断SAPIEN2.95s、torch累计6.88s、完整runtime15.61s、policy16.11s；不能凭DLC日志间隔把慢速确定归因CPFS。
+- 固定16GPU(ForbiddenQuotaOverSold/priority4)：7个2GPU pipeline共14卡，另2GPU任务dlct3am8bswxyr95(mode prepare、每卡1worker)补put_bottles_dustbin randomized/put_object_cabinet randomized。准备Job完成后，若仍有未完回合，由跟进补一组2GPU固定pipeline，使固定资源维持16而不超过16。pipeline每卡2worker；独立准备进程不加载模型。主7组：dlc1yfnitndhbous、dlc1yzmpl77txcdi、dlc08jnkbba70q5z、dlc08jnkbvrc8xw9、dlcij8y3n2t40e3f、dlcsiubvnbjg1bjf、dlc12ifpn4kpkbtq。
+- 额外闲时ForceQuotaOverSold/priority4：29组2GPU+1组1GPU，共59卡申请上限；与固定16合计75。不是额外59固定卡。新pipeline时限1440分钟，使用动态flock租约与逐回合保存，仅计算缺失episode。作业不会因为某分片100回合串行等待而垄断整个task。
+- 新38 Job清单/请求在本机既有请求目录 resume-jobs.json、fixed16-resume-*.json、idle-resume-*.json；有界启动快照：固定8作业16卡Running；闲时25作业49卡Running、5作业10卡Queuing。本人准备DSW已GetInstance确认Stopped。全部旧39固定作业仍停止，新诊断4作业已停止；没有额外固定GPU。
+- 0GPU健康读取Job dlc15avk7fmd2ic5负责发布新root/jobs.json并读取plans/results/errors/worker退出，输出分行避免API约4KiB截断；不能仅以Running作为回合完成证据。
+- 自动跟进stereotok已更新为最新固定16+闲时规则并ACTIVE；检查仅接续root/新清单，禁止恢复旧39作业或训练。定向修复异常、只补缺失，统计新增吞吐时扣除2582恢复回合；最终总成本需另加首轮及诊断实际GPU小时，不把恢复复制当新产出。完整A/B尚未结束，后续不能宣称新配置已全量证实更快。
