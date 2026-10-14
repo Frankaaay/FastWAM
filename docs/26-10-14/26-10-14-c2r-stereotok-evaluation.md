@@ -128,3 +128,5 @@ Windows初次并发测试触发目标文件并行replace的WinError5，属于Win
 - CPU修复Job dlc1j9ctu33b0tyg依据本次逐个GetJob终态确认，归档16个失效active到各自retired唯一目录，保存owner及终态证据；15个adjust_bottle、1个scan_object，原4920成功回合和全部失败证据保留。没有按超时抢占活跃worker，没有修改运行clone。
 - 现有launch_eval_h800.py加入本机独立supervise模式：每轮查询DLC状态，0GPU/1CPU控制作业执行安全回收和正式summary；60秒循环间隔（含API/CPU调度延迟），不依赖聊天唤醒。仅JobId一致、token存在且云端明确终态才回收；未知/live不回收。控制器保留提交intent、回执、PID锁和进度，未知提交结果禁止盲重试。固定抢占后按原请求补位，闲时仅ForceQuotaOverSold补位；固定16与闲时<=59断言，非抢占程序失败保留needs_diagnosis，不无界重复崩溃。已替换旧Job身份保留查询，避免遗漏其认领。
 - 控制器依赖这台Windows主机和网络持续在线，不能宣称机器关机仍自动恢复；heartbeat另负责控制器存活/错误检查和阶段切换。GPU评估clone维持原f9cb版本，监督代码独立发布，不热改运行clone。
+- 监督器发布143d738，已启动本机隐藏进程PID33980；本机clean-jobs-supervisor.json/lock和clean-supervisor.stdout.log/stderr.log保存状态，GPU源码不变。控制器首个CPU检查dlc1d5n5zfsnwhux于18:11:40报告4971/5000、errors=[]，证明回收后已新增51回合，剩29；不是仅凭Running判定恢复。自动跟进已ACTIVE并明确核验独立监督器存活、处理非抢占故障、未知提交及阶段交接。
+- 12项本地测试全部通过，包括真实原始默认值回归、确认终态回收/保留活跃未知owner、恢复可认领，以及模拟GetJob/抢占/创建调用验证固定槽替换后仍16GPU且旧Job溯源保留。CPU生产检查已实际运行回收函数并读取正式summary；未将本机模拟测试称为云端抢占端到端测试。

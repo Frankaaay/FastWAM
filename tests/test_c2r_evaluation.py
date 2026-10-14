@@ -22,6 +22,42 @@ launcher_spec.loader.exec_module(launcher)
 
 
 class EvaluationTests(unittest.TestCase):
+    def test_supervisor_replaces_evicted_fixed_slot_without_expanding_budget(self):
+        registry = self.root / 'jobs.json'
+        request = self.root / 'fixed.json'
+        request.write_text(json.dumps(dict(Settings=dict(OversoldType='ForbiddenQuotaOverSold'))))
+        rows = [dict(JobId=f'job{i}', kind='fixed', gpus=2, request_path=str(request)) for i in range(8)]
+        registry.write_text(json.dumps(rows))
+        state = registry.with_name('jobs-supervisor.json')
+        state.write_text(json.dumps(dict(root='/run', clone='/code', probe='probe')))
+        creates = []
+
+        def api(command, **kwargs):
+            action = command[2]
+            if action == 'GetJob':
+                job = command[command.index('--JobId') + 1]
+                response = dict(JobId=job, Status='Running')
+                if job == 'job0':
+                    response.update(Status='Failed', ReasonCode='JobEvicted')
+                if job == 'probe':
+                    response['Status'] = 'Succeeded'
+            elif action == 'get-pod-logs':
+                response = dict(Logs=['SUPERVISOR ' + json.dumps(dict(complete=False, errors=[]))])
+            else:
+                self.assertEqual(action, 'CreateJob')
+                creates.append(command)
+                response = dict(JobId='replacement')
+            return SimpleNamespace(stdout=json.dumps(response))
+
+        with patch.object(launcher.subprocess, 'run', side_effect=api), \
+                patch.object(launcher.time, 'sleep', side_effect=StopIteration), self.assertRaises(StopIteration):
+            launcher.supervise(registry, 'cli')
+        updated = json.loads(registry.read_text())
+        self.assertEqual(len(creates), 1)
+        self.assertEqual(sum(row['gpus'] for row in updated), 16)
+        self.assertEqual(updated[0]['JobId'], 'replacement')
+        self.assertEqual(json.loads(state.read_text())['replaced'][0]['old'], 'job0')
+
     def test_supervisor_retires_only_confirmed_dead_owners(self):
         states = {}
         for name, status in [('live', 'Running'), ('pending', 'Queuing'), ('dead', 'Failed'),
