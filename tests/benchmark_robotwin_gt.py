@@ -17,9 +17,18 @@ ids = tuple(map(int, os.environ.get('BENCH_IDS', '0:16:1:2').split(':')))
 
 
 def run(index):
+    command = [sys.executable, str(repo / 'scripts/h100_robotwin_gt.py'), 'episode',
+               '--index', str(index), '--output-root', str(output)]
+    if os.environ.get('BENCH_SERIAL') == '1':
+        command = [sys.executable, '-c',
+                   f"import os,sys; os.chdir({str(root / 'runtime')!r}); "
+                   f"sys.path.insert(0,{str(root / 'runtime')!r}); "
+                   "from envs.camera.camera import Camera; Camera.enable_capture_group=lambda self,system: None; "
+                   f"sys.path.insert(0,{str(repo / 'scripts')!r}); "
+                   "import h100_robotwin_gt as gt; "
+                   f"gt.episode({index},gt.Path({str(output)!r}))"]
     with (output / f'{index:04d}.log').open('x') as log:
-        subprocess.run([sys.executable, str(repo / 'scripts/h100_robotwin_gt.py'), 'episode',
-                        '--index', str(index), '--output-root', str(output)],
+        subprocess.run(command,
                        stdout=log, stderr=subprocess.STDOUT, check=True, timeout=1800)
     return json.loads((output / 'episodes' / f'{index:04d}/accepted.json').read_text())
 
