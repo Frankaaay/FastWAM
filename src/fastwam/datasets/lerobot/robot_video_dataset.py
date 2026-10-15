@@ -43,6 +43,13 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         concat_multi_camera: str = "horizontal", # "horizontal", "vertical", "robotwin", or None
         override_instruction: Optional[str] = None, # whether to hardcode a specific instruction for all samples, for debugging
     ):
+        if concat_multi_camera == "libero_stereo":
+            keys = [meta["key"] for meta in shape_meta["images"]]
+            if keys != ["image", "wrist_image", "image_right", "wrist_image_right"]:
+                raise ValueError("LIBERO stereo requires ordered external/wrist left then right cameras")
+            for directory in dataset_dirs:
+                if not os.path.isfile(os.path.join(directory, "meta", "stereo_provenance.json")):
+                    raise FileNotFoundError(f"Stereo augmentation is incomplete: {directory}")
         if concat_multi_camera == "robotwin_stereo":
             from ..robotwin_stereo import LEROBOT_LEFT, LEROBOT_RIGHT
             keys = [meta["key"] for meta in shape_meta["images"]]
@@ -59,7 +66,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             val_set_proportion=val_set_proportion,
             is_training_set=is_training_set,
             global_sample_stride=global_sample_stride,
-            strict_images=(concat_multi_camera == "robotwin_stereo"),
+            strict_images=(concat_multi_camera in ("robotwin_stereo", "libero_stereo")),
         )
     
         self.num_frames = num_frames
@@ -167,6 +174,13 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 raise ValueError("Stereo RoboTwin requires six cameras and a 384x320 canvas")
             video_right = compose_mosaic(video[3:])
             video = compose_mosaic(video[:3]).permute(1, 0, 2, 3)
+        elif self.concat_multi_camera == "libero_stereo":
+            if num_cameras != 4 or list(self.video_size) != [224, 448]:
+                raise ValueError("LIBERO stereo requires four cameras and a 224x448 canvas")
+            video_right = torch.cat([video[2], video[3]], dim=-1)
+            video_right = self.normalize_transform(self.crop_transform(self.resize_transform(video_right)))
+            video_right = video_right.permute(1, 0, 2, 3)
+            video = torch.cat([video[0], video[1]], dim=-1)
         elif self.concat_multi_camera == "robotwin":
             if num_cameras != 3:
                 raise ValueError(
@@ -287,7 +301,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         return context, context_mask
 
     def __getitem__(self, idx):
-        if self.concat_multi_camera == "robotwin_stereo":
+        if self.concat_multi_camera in ("robotwin_stereo", "libero_stereo"):
             return self._get(idx)
         try:
             data = self._get(idx)

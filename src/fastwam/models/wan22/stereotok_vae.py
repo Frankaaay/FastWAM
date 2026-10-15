@@ -24,7 +24,7 @@ class StereoTokVAE(nn.Module):
         self.binding = {"format": "stereotok-student-v3", "sha256": digest.hexdigest(),
                         "stereotok_source": "4be840f97694e976714d549a4db2a53705384626",
                         "inference_adapter_source": "783b602d128a43814af32285e60a60f270ec2703",
-                        "canvas": [384, 320], "encode": "default-frozen-native-fp16"}
+                        "encode": "default-frozen-native-fp16"}
         self.model = load_student(str(path)).to(device=device, dtype=torch.float32)
         self.train(False)
 
@@ -49,18 +49,24 @@ class StereoTokVAE(nn.Module):
         if tiled:
             raise ValueError("StereoTok mosaic encoding requires tiled=False")
         if right_videos is None:
-            raise ValueError("StereoTok requires all three synchronized right eyes")
+            raise ValueError("StereoTok requires synchronized right eyes")
         left = torch.stack(list(videos)).to(device=device, dtype=torch.float32)
         right = torch.stack(list(right_videos)).to(device=device, dtype=torch.float32)
-        if left.shape != right.shape or left.ndim != 5 or left.shape[1] != 3 or left.shape[-2:] != (384, 320):
-            raise ValueError("Expected matching [B,3,T,384,320] stereo mosaics")
+        if left.shape != right.shape or left.ndim != 5 or left.shape[1] != 3:
+            raise ValueError("Expected matching [B,3,T,H,W] stereo inputs")
+        height, width = left.shape[-2:]
+        if height % 16 or width % 16 or (left.shape[2] - 1) % 4:
+            raise ValueError("StereoTok requires 16-aligned images and 1+4k frames")
         if not torch.isfinite(left).all() or not torch.isfinite(right).all():
             raise ValueError("Nonfinite stereo pixels")
         if left.abs().max() > 1.001 or right.abs().max() > 1.001:
             raise ValueError("StereoTok pixels must be normalized to [-1,1]")
-        mask = torch.ones(left.shape[0], 2, 384, 320, dtype=torch.bool, device=device)
-        regions = torch.zeros(96, 80, dtype=torch.long, device=device)
-        regions[64:, :40], regions[64:, 40:] = 1, 2
+        mask = torch.ones(left.shape[0], 2, height, width, dtype=torch.bool, device=device)
+        regions = torch.zeros(height // 4, width // 4, dtype=torch.long, device=device)
+        if (height, width) == (384, 320):
+            regions[64:, :40], regions[64:, 40:] = 1, 2
+        elif (height, width) == (224, 448):
+            regions[:, 56:] = 1
         with torch.autocast(device_type=left.device.type, enabled=False):
             # Wan's frozen codec also encodes one sample at a time. Keep the
             # stereo cost volume bounded without changing the policy batch.

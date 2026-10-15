@@ -194,11 +194,14 @@ class TestStereoContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             scope["_to_batched_eval_sample"](sample)
 
-    def test_reject_wrong_student_counter(self):
-        with patch("torch.load", return_value={"format": "stereotok-student-v3", "stage": 2,
-                                              "provenance": {"generator_updates": 5000}}):
-            with self.assertRaisesRegex(ValueError, "u8000"):
-                load_student("unused.pt")
+    def test_reject_unselected_student_before_deserialization(self):
+        with tempfile.NamedTemporaryFile() as checkpoint:
+            checkpoint.write(b"unselected checkpoint")
+            checkpoint.flush()
+            with patch("torch.load") as deserialize:
+                with self.assertRaisesRegex(ValueError, "u15853"):
+                    load_student(checkpoint.name)
+                deserialize.assert_not_called()
 
     def test_recorded_actor_variants_preserve_order_and_reuse(self):
         tree = ast.parse((ROOT / "third_party/RoboTwin/envs/utils/create_actor.py").read_text())
