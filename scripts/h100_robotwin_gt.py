@@ -380,6 +380,7 @@ def pool(worker, limit):
     claims = ROOT / 'claims'; claims.mkdir(exist_ok=True)
     logs = ROOT / 'logs'; logs.mkdir(exist_ok=True)
     failures = []
+    consecutive_failures = 0
     for row in rows:
         index = row['source_episode_index']
         if (ROOT / 'episodes' / f'{index:04d}/accepted.json').exists():
@@ -392,23 +393,38 @@ def pool(worker, limit):
             if (ROOT / 'episodes' / f'{index:04d}/accepted.json').exists():
                 continue
             log_path = logs / f'{index:04d}-{os.environ["SLURM_JOB_ID"]}.log'
-            with log_path.open('x') as log:
-                try:
-                    result = subprocess.run([sys.executable, str(Path(__file__).resolve()), 'episode', '--index', str(index)],
-                        stdout=log, stderr=subprocess.STDOUT, timeout=max(1800, row['length'] * 6 + 300))
-                    code = result.returncode
-                except subprocess.TimeoutExpired:
-                    code = 124
+            for retry in range(2):
+                if retry:
+                    log_path = logs / f'{index:04d}-{os.environ["SLURM_JOB_ID"]}-retry{retry}.log'
+                with log_path.open('x') as log:
+                    try:
+                        result = subprocess.run([sys.executable, str(Path(__file__).resolve()), 'episode', '--index', str(index)],
+                            stdout=log, stderr=subprocess.STDOUT, timeout=max(1800, row['length'] * 6 + 300))
+                        code = result.returncode
+                    except subprocess.TimeoutExpired:
+                        code = 124
+                if code == 0:
+                    break
+                print(json.dumps(dict(index=index, worker=worker, retry=retry, exit_code=code,
+                                      log=str(log_path))), flush=True)
             print(json.dumps(dict(index=index, worker=worker, exit_code=code)), flush=True)
             if code:
                 failures.append(index)
-                # Fail early on infrastructure or systematic mismatch, preserving all outputs.
-                raise RuntimeError(f'Episode {index} failed; see {log_path}')
+                consecutive_failures += 1
+                # Isolate individual failures, but still stop systemic failures promptly.
+                if consecutive_failures >= 3:
+                    raise RuntimeError(f'Three consecutive episodes failed; see {log_path}')
+            else:
+                consecutive_failures = 0
     write_json(ROOT / f'worker-{worker}-{os.environ["SLURM_JOB_ID"]}.json', dict(failed=failures))
 
 
 def finalize():
     plan = json.loads((ROOT / 'inputs/plan.json').read_text())
+    missing = [r['source_episode_index'] for r in plan['rows']
+               if not (ROOT / 'episodes' / f"{r['source_episode_index']:04d}/accepted.json").is_file()]
+    if missing:
+        raise RuntimeError(f'Publication blocked: {len(missing)} episodes not accepted: {missing}')
     accepted = [json.loads((ROOT / 'episodes' / f"{r['source_episode_index']:04d}/accepted.json").read_text())
                 for r in plan['rows']]
     assert len(accepted) == 2500

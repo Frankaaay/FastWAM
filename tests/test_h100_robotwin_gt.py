@@ -1,6 +1,12 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import json
+import os
+import sys
+import tempfile
+from types import SimpleNamespace
+from unittest.mock import patch
 import numpy as np
 
 spec = importlib.util.spec_from_file_location('gt', Path(__file__).resolve().parents[1] / 'scripts/h100_robotwin_gt.py')
@@ -8,6 +14,39 @@ gt = importlib.util.module_from_spec(spec); spec.loader.exec_module(gt)
 
 
 class NativeGT(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'linux', 'Production uses Linux flock')
+    def test_isolated_failure_does_not_stop_next_episode_or_publish(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'inputs').mkdir()
+            (root / 'inputs/plan.json').write_text(json.dumps({'rows': [
+                {'source_episode_index': 11, 'length': 2},
+                {'source_episode_index': 12, 'length': 1}]}))
+            with patch.object(gt, 'ROOT', root), patch.dict(os.environ, SLURM_JOB_ID='test'), \
+                 patch.object(gt.subprocess, 'run', side_effect=[
+                     SimpleNamespace(returncode=1), SimpleNamespace(returncode=1),
+                     SimpleNamespace(returncode=0)]) as run:
+                gt.pool(0, False)
+                self.assertEqual(run.call_count, 3)
+                self.assertEqual(run.call_args.args[0][-1], '12')
+                self.assertEqual(json.loads((root / 'worker-0-test.json').read_text())['failed'], [11])
+                with self.assertRaisesRegex(RuntimeError, 'Publication blocked'):
+                    gt.finalize()
+                self.assertFalse((root / 'ready.json').exists())
+
+    @unittest.skipUnless(sys.platform == 'linux', 'Production uses Linux flock')
+    def test_three_consecutive_failures_stop_systemic_error(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'inputs').mkdir()
+            (root / 'inputs/plan.json').write_text(json.dumps({'rows': [
+                {'source_episode_index': i, 'length': 1} for i in range(4)]}))
+            with patch.object(gt, 'ROOT', root), patch.dict(os.environ, SLURM_JOB_ID='test'), \
+                 patch.object(gt.subprocess, 'run', return_value=SimpleNamespace(returncode=1)) as run:
+                with self.assertRaisesRegex(RuntimeError, 'Three consecutive'):
+                    gt.pool(0, False)
+                self.assertEqual(run.call_count, 6)
+
     def test_depth_and_integer_ids(self):
         class Camera:
             def get_picture(self, key):
