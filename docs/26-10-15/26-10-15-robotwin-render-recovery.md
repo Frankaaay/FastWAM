@@ -5,3 +5,5 @@
 - 本地分支frank/fastwam-stereotok-robotwin，9e5f82c，fetch后与origin一致；保留原有untracked。目标脚本/相机自5510750没有其他改动。
 - 单卡Job19553复现：180帧、seed27、模型048_stapler/base3。120秒调用栈位于camera.py:322 RenderCameraGroup.take_picture，处于play_once抓取动作的take_dense_action；GPU100%。取消已定位的探针后，用tests入口仅禁用group做同轨迹原串行捕获对照，尚不能断言驱动内部具体缺陷。
 - 串行对照19555也出现120秒长等待，调用栈在右目camera.take_picture；因此不能归因为CameraGroup独有问题。增加前30帧开始序号/时间，并把120秒堆栈计时按帧重置，以区分某帧死锁与极慢渲染。保留原捕获质量参数。
+- 明确现场：旧7路MP4均可解码且各21帧；带帧边界Job19557在索引21稳定停止，前21帧6–12秒每帧。资产0–6均无非有限顶点/法线/切线或退化三角面。
+- 定向原因：2273 pad为Black；实测默认RenderMaterial黑色时specular=metallic=transmission=0。camera.rchit的diffuse/specular/transmission概率总和0仍做除法，未选中BSDF后L及attenuation为0；camera.rgen未终止零能量路径，会继续trace零方向。新增仅在首交点GT保存后终止精确零能量路径的guard，保持32SPP/path8/OIDN、场景材质及动作不变。固定原rgen SHA256 c5d4f1e21e1da1b90bcdd2f2124e87ec72fd5191f4434620abbaaf718f2fe75e；复制到本次个人runtime的独立版本目录，不修改安装包，不热改运行环境。尚待实际回放验证。

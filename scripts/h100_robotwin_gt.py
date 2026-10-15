@@ -134,6 +134,34 @@ def source_sha():
     return subprocess.check_output(['git', '-C', str(REPO), 'rev-parse', 'HEAD'], text=True).strip()
 
 
+def ray_shader():
+    """Terminate zero-energy paths after their first-hit GT has been stored."""
+    import fcntl
+    import sapien
+    source = Path(sapien.__file__).parent / 'vulkan_shader/rt'
+    original = (source / 'camera.rgen').read_bytes()
+    assert hashlib.sha256(original).hexdigest() == 'c5d4f1e21e1da1b90bcdd2f2124e87ec72fd5191f4434620abbaaf718f2fe75e'
+    anchor = b'      }\n    }\n    // TODO: implement unterminated ray properly'
+    assert original.count(anchor) == 1
+    patched = original.replace(anchor,
+        b'      }\n      if (all(equal(attenuation, vec3(0.0)))) { break; }\n    }\n'
+        b'    // TODO: implement unterminated ray properly')
+    destination = ROOT / 'runtime/rt-zero-throughput-c5d4f1e21e1d-v1'
+    with (ROOT / 'runtime/ray-shader.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        destination.mkdir(exist_ok=True)
+        for item in sorted(source.iterdir()):
+            assert item.is_file(), item
+            data = patched if item.name == 'camera.rgen' else item.read_bytes()
+            target = destination / item.name
+            if target.exists():
+                assert target.read_bytes() == data, target
+            else:
+                with target.open('xb') as f:
+                    f.write(data)
+    return destination
+
+
 def native_gt(get_picture, baseline, focal):
     import numpy as np
     position = get_picture('Position')
@@ -282,7 +310,12 @@ def episode(index, output_root=None):
     trajectory = pickle.loads((inputs / 'trajectory.pkl').read_bytes())
     capture = Capture(destination, qpos)
     task_cls = getattr(importlib.import_module('envs.' + row['task']), row['task'])
+    shader = ray_shader()
     class Task(task_cls):
+        def setup_scene(self, **kwargs):
+            super().setup_scene(**kwargs)
+            sapien.render.set_camera_shader_dir(str(shader))
+
         def _take_picture(self):
             if self.save_data:
                 capture.append(self)
@@ -329,6 +362,7 @@ def episode(index, output_root=None):
         assert counts and int(counts[-1]) == len(qpos), (camera, counts[-1:])
     write_json(episode_root / 'accepted.json', dict(row, path=str(destination / 'episode.hdf5'),
         source_sha=source_sha(), seconds=time.monotonic()-start, scene_info=scene, device=device_record,
+        ray_shader_sha256=hashlib.sha256((shader / 'camera.rgen').read_bytes()).hexdigest(),
         timings=dict(capture.timings, setup_seconds=setup_seconds,
                      validation_seconds=time.monotonic()-validate_start),
         gt=dict(depth='camera Z in meters float32; invalid=0', segmentation='raw uint32 simulator IDs',
