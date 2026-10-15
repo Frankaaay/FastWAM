@@ -274,3 +274,5 @@ Windows初次并发测试触发目标文件并行replace的WinError5，属于Win
 | rotate_qrcode | 1 |
 | stamp_seal | 1 |
 | turn_switch | 7 |
+
+- 08:14进展：闲时验收dlc1ogu8lntp2lgg Succeeded，WAN_ACCEPTANCE_EXIT0/PASS；click_bell正式首回合成功，59actions/45.36s。后台已提交38个全量Job，registry wan-jobs.json；固定16Queuing，闲时3EnvPreparing+56Queuing，未宣称固定卡已获得。监督器PID24944身份核验正常，首probe dlciulybv3ebcmkq。固定16仍受配额检查阻断，需平台回收research绑定节点上的父配额占用；未越权修改集群或停止他人任务。
