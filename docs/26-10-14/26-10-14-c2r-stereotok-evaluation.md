@@ -215,3 +215,62 @@ Windows初次并发测试触发目标文件并行replace的WinError5，属于Win
 - 使用原镜像/挂载/个人环境，research子配额ForbiddenQuotaOverSold提交1GPU Wan验收Job dlc72eg3vi3kgvqy成功，回执保存在既有请求目录wan-acceptance-receipt.json。先正式读取两phase5000结果/逐任务与worker退出码，再创建 /mnt/workdir/frank/runs/c2r-wan-eval-final-20261014，逐字节复制clean和新randomized全部冻结plans，只替换训练root/checkpoint为优化后Wan dlc1np6brflwbfe1 step10725；同一已发布clean clone921bb0c。严格加载/全部mot和proprio张量有限/确认为Wan单目后，click_bell clean真实1回合保存为正式结果，验收通过才扩固定16+闲时59，原模型/协议不变。
 - Wan监督使用独立本机请求目录frank-c2r-wan-eval-20261014，其中readonly-cpu.json已设合法research子配额，避免监督器再次提交旧父配额；已有Stereo监督器保持停止。尚未将Creating当验收通过。
 - Wan全量38份请求已保存新请求目录wan-launch-plan.json及wan-final-{fixed,idle}-*.json；均research子配额/priority4/rollout，每卡2worker。后台隐藏启动器PID2952，launch-wan-after-acceptance.py逐分钟检查验收，只有Succeeded+WAN_ACCEPTANCE_EXIT0+WAN_ACCEPTANCE_PASS才提交，维护create_intent/回执/wan-jobs.json，提交结束自动启动独立监督器。状态wan-launch-state.json、stdout/stderr；最新验收Queuing、无Pod，不能声称已开跑。自动跟进已改为合法子配额和后台启动状态，不再仅等待父配额权限。
+
+
+### 10月15日08:10 独立CPU验收与Wan排队根因
+- 0GPU Job dlc147nvnv9ad1io Succeeded，正式summary两phase各5000 complete=true/errors=[]；clean3949/5000=78.98%，randomized310/5000=6.20%。100条件各100；clean38/randomized36份已有worker退出记录全0。完整逐任务日志保存wan请求目录stereotok-final-summary-logs.json。
+- ListQuotaWorkloads明确旧验收CheckSelfQuotaFailed；ListNodes显示research绑定4台8GPU节点，1台SchedulingDisabled/Recovering，其余3台GPU均被父配额作业占用，research UsedQuota0不能解释为物理空闲。现有优先级4不保证回收这些占用，未停止他人任务或修改共享配额。
+- 旧验收dlc72eg3vi3kgvqy确认Stopped，旧启动器2952停止。相同代码/合同单卡ForceQuotaOverSold验收dlc1ogu8lntp2lgg已EnvPreparing；启动器改指新gate并隐藏重启PID25836，wan-launch-idle.stdout.log/stderr.log，原脚本与状态归档保留。验收通过后自动提交固定16+闲时59，未将环境准备当验收通过。
+
+| task | randomized成功/100 |
+| --- | ---: |
+| put_bottles_dustbin | 0 |
+| open_microwave | 6 |
+| blocks_ranking_rgb | 2 |
+| blocks_ranking_size | 0 |
+| stack_blocks_three | 0 |
+| stack_bowls_three | 6 |
+| hanging_mug | 0 |
+| stack_bowls_two | 17 |
+| handover_block | 0 |
+| place_cans_plasticbox | 6 |
+| stack_blocks_two | 8 |
+| open_laptop | 5 |
+| place_bread_basket | 8 |
+| place_can_basket | 6 |
+| place_object_basket | 2 |
+| put_object_cabinet | 1 |
+| shake_bottle | 52 |
+| shake_bottle_horizontally | 55 |
+| dump_bin_bigbin | 1 |
+| handover_mic | 0 |
+| place_dual_shoes | 0 |
+| place_bread_skillet | 9 |
+| place_burger_fries | 3 |
+| place_empty_cup | 0 |
+| place_shoe | 8 |
+| scan_object | 6 |
+| adjust_bottle | 0 |
+| beat_block_hammer | 2 |
+| click_alarmclock | 11 |
+| click_bell | 23 |
+| grab_roller | 1 |
+| lift_pot | 0 |
+| move_can_pot | 3 |
+| move_pillbottle_pad | 0 |
+| move_playingcard_away | 1 |
+| move_stapler_pad | 0 |
+| pick_diverse_bottles | 8 |
+| pick_dual_bottles | 15 |
+| place_a2b_left | 1 |
+| place_a2b_right | 1 |
+| place_container_plate | 17 |
+| place_fan | 1 |
+| place_mouse_pad | 0 |
+| place_object_scale | 2 |
+| place_object_stand | 11 |
+| place_phone_stand | 1 |
+| press_stapler | 2 |
+| rotate_qrcode | 1 |
+| stamp_seal | 1 |
+| turn_switch | 7 |
