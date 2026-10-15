@@ -13,7 +13,7 @@ root = Path('/gpfs/jiuquyun/projects/Frank/robotwin-stereo-gt-20261014')
 width = int(os.environ['BENCH_WIDTH']) if 'BENCH_WIDTH' in os.environ else (1, 2, 4)[int(os.environ['SLURM_PROCID'])]
 output = root / 'benchmarks' / os.environ['SLURM_JOB_ID'] / f'concurrency-{width}'
 output.mkdir(parents=True, exist_ok=False)
-ids = (0, 16, 1, 2)
+ids = tuple(map(int, os.environ.get('BENCH_IDS', '0:16:1:2').split(':')))
 
 
 def run(index):

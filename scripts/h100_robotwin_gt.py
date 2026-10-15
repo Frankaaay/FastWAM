@@ -246,6 +246,9 @@ class Capture:
 
 
 def episode(index, output_root=None):
+    import faulthandler
+    faulthandler.enable()
+    faulthandler.dump_traceback_later(120, repeat=True)
     import importlib
     import numpy as np
     import random
@@ -296,17 +299,21 @@ def episode(index, output_root=None):
     env = Task(); start = time.monotonic()
     try:
         env.setup_demo(now_ep_num=row['episode'], seed=row['seed'], **options)
+        print('PHASE setup_complete', flush=True)
         assert not config['data_type'].get('pointcloud', False)
         env.cameras.enable_capture_group(env.scene.render_system)
         env.set_path_lst(options)
         setup_seconds = time.monotonic() - start
+        print('PHASE replay_start', flush=True)
         scene = env.play_once()
+        print('PHASE replay_complete', flush=True)
         assert env.check_success(), 'Task success check failed'
         assert capture.index == len(qpos), (capture.index, len(qpos))
     finally:
         capture.close()
         env.close_env(clear_cache=True)
     from collect_robotwin_missing import verify_raw
+    faulthandler.cancel_dump_traceback_later()
     validate_start = time.monotonic()
     # JPEG vlen arrays are decoded from their byte buffers by the existing validator.
     assert verify_raw(destination / 'episode.hdf5') == len(qpos)
