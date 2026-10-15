@@ -175,8 +175,12 @@ class Capture:
         self.timings = collections.Counter()
 
     def append(self, env):
+        import faulthandler
         import cv2
         import numpy as np
+        faulthandler.dump_traceback_later(120, repeat=True)
+        if self.index < 30:
+            print('CAPTURE_START', self.index, time.monotonic(), flush=True)
         tick = time.monotonic()
         obs = env.get_obs()
         self.timings['observation_seconds'] += time.monotonic() - tick
