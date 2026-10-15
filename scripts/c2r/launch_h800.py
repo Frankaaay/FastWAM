@@ -34,7 +34,7 @@ def main():
         C2R_PREP_DIR=str(prep),C2R_OUTPUT_DIR=str(output),C2R_RUN_NAME=output.name,
         C2R_TEXT_CACHE=str(base/'envs/c2r-text-cache-20261013'),
         C2R_ACTION_INIT=str(base/'checkpoints/fastwam-shared-clean15fps/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt'),
-        STEREOTOK_STUDENT_CKPT=str(base/'checkpoints/stereotok/student-u8000.pt'),
+        STEREOTOK_STUDENT_CKPT=str(base/'checkpoints/stereotok/incoming-u15853/student-u15853.pt'),
         DIFFSYNTH_MODEL_BASE_PATH=str(shared),DIFFSYNTH_SKIP_DOWNLOAD='true',
         WANDB_MODE='online',WANDB_DIR=str(output),WANDB_CACHE_DIR=str(base/'envs/wandb-cache'),
         WANDB_CONFIG_DIR=str(base/'envs/wandb-config'),WANDB_DATA_DIR=str(base/'envs/wandb-data'),
