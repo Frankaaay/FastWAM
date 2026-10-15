@@ -1,22 +1,30 @@
 """Load the existing StereoTok student-v3 deployment format, without teachers."""
 
 from pathlib import Path
+import hashlib
 
 import torch
 
 from .student import GeometryDecoder, LAS2GuidedFusion, make_vae
 
 EXPORT_FORMAT = "stereotok-student-v3"
+SELECTED_SHA256 = "61c6057b49bec9c52f96793a20247d3746978939f0551c37142bdbda6b252eae"
 DECODER_ARCHITECTURE = dict(stereo_version=3, decoder_split="after_middle",
                             depth_decoder="wan_tail", depth_head="causal_subpixel")
 
 
 def load_student(path: str):
+    digest = hashlib.sha256()
+    with Path(path).expanduser().open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    if digest.hexdigest() != SELECTED_SHA256:
+        raise ValueError("This experiment requires the selected u15853 export SHA256")
     payload = torch.load(Path(path).expanduser(), map_location="cpu", weights_only=True)
     if payload.get("format") != EXPORT_FORMAT:
         raise ValueError("Expected a complete stereotok-student-v3 deployment export")
-    if payload.get("stage") != 2 or payload.get("provenance", {}).get("generator_updates") != 8000:
-        raise ValueError("This experiment requires the selected Stage2/u8000 student export")
+    if payload.get("stage") != 2:
+        raise ValueError("This experiment requires a Stage2 student export")
     geometry = payload["geometry"]
     if any(geometry.get(k) != v for k, v in DECODER_ARCHITECTURE.items()):
         raise ValueError("StereoTok decoder architecture mismatch")
