@@ -605,12 +605,6 @@ class Wan22Trainer:
         self.accelerator.save_state(output_dir=state_path)
         if self.accelerator.is_main_process:
             self._save_trainer_state(state_path)
-            # Keep all original weight exports, but only the latest complete resume state.
-            for old in Path(self.state_dir).glob('step_*'):
-                if old != Path(state_path) and old.is_dir() and not old.is_symlink():
-                    for payload in old.rglob('*'):
-                        if payload.is_file() and not payload.is_symlink():
-                            payload.unlink()
         self.accelerator.wait_for_everyone()
 
         return {"weights_path": ckpt_path, "state_path": state_path}
