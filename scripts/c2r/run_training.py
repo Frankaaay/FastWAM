@@ -32,7 +32,7 @@ def main():
     report=json.loads((prep/'prepared.json').read_text())
     cfg.c2r.total_steps=report['total_steps']
     cfg.max_steps=report['total_steps'] if args.steps is None else args.steps
-    cfg.save_every=report['updates_per_epoch']
+    cfg.save_every=2500
     cfg.resume=args.resume
     cfg.c2r.dataset.stereo=args.variant=='stereotok'
     if args.variant=='stereotok':
