@@ -209,11 +209,13 @@ def load_wan22_ti2v_5b_components(
             "Skipping pretrained text encoder/tokenizer load (`load_text_encoder=False`); "
             "training must provide cached `context/context_mask`."
         )
-    if stereotok_checkpoint is None:
-        vae = _load_registered_model(vae_config.path, "wan_video_vae", torch_dtype=torch_dtype, device=device)
-    else:
-        from ..stereotok_vae import StereoTokVAE
-        vae = StereoTokVAE(stereotok_checkpoint, device)
+    # Frozen codecs must not change initialization of downstream trainable heads.
+    with torch.random.fork_rng(devices=[]):
+        if stereotok_checkpoint is None:
+            vae = _load_registered_model(vae_config.path, "wan_video_vae", torch_dtype=torch_dtype, device=device)
+        else:
+            from ..stereotok_vae import StereoTokVAE
+            vae = StereoTokVAE(stereotok_checkpoint, device)
     logger.info("Finished loading Wan2.2-TI2V-5B components in %.2f seconds.", time.time() - start)
     return Wan22LoadedComponents(
         dit=dit,
