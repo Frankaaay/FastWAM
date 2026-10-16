@@ -21,7 +21,7 @@ def main():
     base=Path('/mnt/workdir/frank')
     job=os.environ['DLC_JOB_ID']
     mode='smoke' if args.steps is not None or args.variant=='text' else 'train'
-    output=base/'runs'/f'fastwam-c2r-{args.variant}-{mode}-20261013-{job}'
+    output=base/'runs'/f'fastwam-c2r-{args.variant}-mono-left-{mode}-20261016-{job}'
     output.mkdir(parents=True,exist_ok=False)
     prep=base/'runs/c2r-prep-2500-20261013/prepared'
     shared=base/'checkpoints/fastwam-c2r-shared-20261013'

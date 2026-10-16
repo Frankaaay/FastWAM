@@ -12,7 +12,7 @@ from .stereotok.vae2_2 import latent_scale
 class StereoTokVAE(nn.Module):
     upsampling_factor = 16
     temporal_downsample_factor = 4
-    requires_stereo = True
+    requires_stereo = False
 
     def __init__(self, checkpoint, device):
         super().__init__()
@@ -24,7 +24,7 @@ class StereoTokVAE(nn.Module):
         self.binding = {"format": "stereotok-student-v3", "sha256": digest.hexdigest(),
                         "stereotok_source": "4be840f97694e976714d549a4db2a53705384626",
                         "inference_adapter_source": "783b602d128a43814af32285e60a60f270ec2703",
-                        "canvas": [384, 320], "encode": "default-frozen-native-fp16"}
+                        "canvas": [384, 320], "encode": "default-frozen-native-fp16", "input_mode": "mono-left"}
         self.model = load_student(str(path)).to(device=device, dtype=torch.float32)
         self.train(False)
 
@@ -48,24 +48,16 @@ class StereoTokVAE(nn.Module):
     def encode(self, videos, device, tiled=False, tile_size=None, tile_stride=None, *, right_videos=None):
         if tiled:
             raise ValueError("StereoTok mosaic encoding requires tiled=False")
-        if right_videos is None:
-            raise ValueError("StereoTok requires all three synchronized right eyes")
+        if right_videos is not None:
+            raise ValueError("Mono-left experiment must not receive right eyes")
         left = videos if isinstance(videos, torch.Tensor) else torch.stack(list(videos))
-        right = right_videos if isinstance(right_videos, torch.Tensor) else torch.stack(list(right_videos))
         left = left.to(device=device, dtype=torch.float32)
-        right = right.to(device=device, dtype=torch.float32)
-        if left.shape != right.shape or left.ndim != 5 or left.shape[1] != 3 or left.shape[-2:] != (384, 320):
-            raise ValueError("Expected matching [B,3,T,384,320] stereo mosaics")
-        if not torch.isfinite(left).all() or not torch.isfinite(right).all():
-            raise ValueError("Nonfinite stereo pixels")
-        if left.abs().max() > 1.001 or right.abs().max() > 1.001:
-            raise ValueError("StereoTok pixels must be normalized to [-1,1]")
-        mask = torch.ones(left.shape[0], 2, 384, 320, dtype=torch.bool, device=device)
-        regions = torch.zeros(96, 80, dtype=torch.long, device=device)
-        regions[64:, :40], regions[64:, 40:] = 1, 2
+        if left.ndim != 5 or left.shape[1] != 3 or left.shape[-2:] != (384, 320):
+            raise ValueError("Expected [B,3,T,384,320] left-eye mosaics")
+        if not torch.isfinite(left).all() or left.abs().max() > 1.001:
+            raise ValueError("StereoTok pixels must be finite and normalized to [-1,1]")
         with torch.autocast(device_type=left.device.type, enabled=False):
-            mean, _ = self.model.encode_posterior(left, right, mask,
-                self.model.fusion.max_disparity, camera_regions=regions)
+            mean, _ = self.model.encode_posterior(left)
             shift, scale = latent_scale(left.device)
             return (mean.float() - shift.view(1, 48, 1, 1, 1)) * scale.view(1, 48, 1, 1, 1)
 

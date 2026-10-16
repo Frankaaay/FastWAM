@@ -34,7 +34,7 @@ def main():
     cfg.max_steps=report['total_steps'] if args.steps is None else args.steps
     cfg.save_every=report['updates_per_epoch']
     cfg.resume=args.resume
-    cfg.c2r.dataset.stereo=args.variant=='stereotok'
+    cfg.c2r.dataset.stereo=False
     if args.variant=='stereotok':
         cfg.model.stereotok_checkpoint=os.environ['STEREOTOK_STUDENT_CKPT']
     out=Path(cfg.output_dir)
