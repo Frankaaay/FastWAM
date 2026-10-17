@@ -7,6 +7,7 @@ import numpy as np
 from omegaconf import OmegaConf
 from hydra.utils import instantiate
 import torch
+from fastwam.models.wan22.stereotok_vae import StereoTokVAE
 from .data import observation_state, compose_observation, eef_to_native
 from .vendor.openwam.multiview import format_prompt_for_inference
 from .vendor.openwam.normalize import Normalizer
@@ -33,11 +34,15 @@ class C2RPolicy:
         self.normalizer=Normalizer('min_max',stats={k:np.asarray(stats[k],dtype=np.float32) for k in ('min','max')})
         self.pending=deque()
         self.inference_seconds=[]
+        self._prompt = None
+        self._context = None
+    def should_request_observation(self):
+        return not self.pending
     def step(self,env,observation):
         if not self.pending:
             if observation is None: raise ValueError('Fresh observation required for replanning')
             image=compose_observation(observation)
-            image=torch.from_numpy(np.asarray(image).copy()).permute(2,0,1)[None].to(self.model.device,self.model.torch_dtype)/127.5-1
+            image=torch.from_numpy(np.asarray(image).copy()).permute(2,0,1)[None].to(self.model.device,torch.float32 if isinstance(self.model.vae, StereoTokVAE) else self.model.torch_dtype)/127.5-1
             extra = {}
             if getattr(self.model.vae, "requires_stereo", False):
                 right = compose_observation(observation, right=True)
@@ -46,7 +51,11 @@ class C2RPolicy:
             state=torch.from_numpy(self.normalizer.normalize(observation_state(observation)))[None]
             torch.cuda.synchronize();start=time.perf_counter()
             with torch.no_grad():
-                result=self.model.infer_action(prompt=format_prompt_for_inference(env.get_instruction()),input_image=image,
+                prompt = format_prompt_for_inference(env.get_instruction())
+                if prompt != self._prompt:
+                    self._context = self.model.encode_prompt(prompt)
+                    self._prompt = prompt
+                result=self.model.infer_action(prompt=None,context=self._context[0],context_mask=self._context[1],input_image=image,
                     action_horizon=32,proprio=state,num_inference_steps=10,sigma_shift=5.0,text_cfg_scale=1.0,
                     negative_prompt='',seed=self.inference_seed,rand_device='cpu',tiled=False,**extra)
             torch.cuda.synchronize();self.inference_seconds.append(time.perf_counter()-start)

@@ -1,0 +1,228 @@
+"""Evaluation coverage, duplicate detection, and fine-grained claim contracts."""
+import importlib.util
+import json
+from pathlib import Path
+import tempfile
+import unittest
+import sys
+import subprocess
+from types import SimpleNamespace
+from unittest.mock import patch
+from concurrent.futures import ThreadPoolExecutor
+import threading
+import ast
+
+spec = importlib.util.spec_from_file_location('evaluation', Path(__file__).resolve().parents[1] / 'scripts/c2r/evaluate.py')
+evaluation = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(evaluation)
+launcher_spec = importlib.util.spec_from_file_location(
+    'launcher', Path(__file__).resolve().parents[1] / 'scripts/c2r/launch_eval_h800.py')
+launcher = importlib.util.module_from_spec(launcher_spec)
+launcher_spec.loader.exec_module(launcher)
+
+
+class EvaluationTests(unittest.TestCase):
+    def test_supervisor_replaces_evicted_fixed_slot_without_expanding_budget(self):
+        registry = self.root / 'jobs.json'
+        request = self.root / 'fixed.json'
+        request.write_text(json.dumps(dict(Settings=dict(OversoldType='ForbiddenQuotaOverSold'))))
+        rows = [dict(JobId=f'job{i}', kind='fixed', gpus=2, request_path=str(request)) for i in range(8)]
+        registry.write_text(json.dumps(rows))
+        state = registry.with_name('jobs-supervisor.json')
+        state.write_text(json.dumps(dict(root='/run', clone='/code', probe='probe')))
+        creates = []
+
+        def api(command, **kwargs):
+            action = command[2]
+            if action == 'GetJob':
+                job = command[command.index('--JobId') + 1]
+                response = dict(JobId=job, Status='Running')
+                if job == 'job0':
+                    response.update(Status='Failed', ReasonCode='JobEvicted')
+                if job == 'probe':
+                    response['Status'] = 'Succeeded'
+            elif action == 'get-pod-logs':
+                response = dict(Logs=['SUPERVISOR ' + json.dumps(dict(complete=False, errors=[]))])
+            else:
+                self.assertEqual(action, 'CreateJob')
+                creates.append(command)
+                response = dict(JobId='replacement')
+            return SimpleNamespace(stdout=json.dumps(response))
+
+        with patch.object(launcher.subprocess, 'run', side_effect=api), \
+                patch.object(launcher.time, 'sleep', side_effect=StopIteration), self.assertRaises(StopIteration):
+            launcher.supervise(registry, 'cli')
+        updated = json.loads(registry.read_text())
+        self.assertEqual(len(creates), 1)
+        self.assertEqual(sum(row['gpus'] for row in updated), 16)
+        self.assertEqual(updated[0]['JobId'], 'replacement')
+        self.assertEqual(json.loads(state.read_text())['replaced'][0]['old'], 'job0')
+
+    def test_supervisor_retires_only_confirmed_dead_owners(self):
+        states = {}
+        for name, status in [('live', 'Running'), ('pending', 'Queuing'), ('dead', 'Failed'),
+                             ('stopped', 'Stopped'), ('done', 'Succeeded'), ('unknown', None)]:
+            evaluation.write_json(self.root / 'claims' / name / 'active/owner.json',
+                                  dict(job=name, token=name, pid=1))
+            if status:
+                states[name] = dict(JobId=name, Status=status)
+        retired = launcher.retire_terminal_claims(self.root, states)
+        self.assertEqual(set(retired), {'dead', 'stopped', 'done'})
+        for name in ('live', 'pending', 'unknown'):
+            self.assertTrue((self.root / 'claims' / name / 'active/owner.json').exists())
+        for name in retired:
+            archive = next((self.root / 'claims' / name).glob('retired-*'))
+            self.assertTrue((archive / 'owner.json').exists())
+            self.assertTrue((archive / 'retirement.json').exists())
+            with evaluation.claim(self.root, name) as acquired:
+                self.assertTrue(acquired)
+        self.assertEqual(launcher.retire_terminal_claims(self.root, states), [])
+
+    def test_supervisor_rejects_missing_token_and_mismatched_identity(self):
+        evaluation.write_json(self.root / 'claims/no-token/active/owner.json', dict(job='a'))
+        evaluation.write_json(self.root / 'claims/wrong-id/active/owner.json', dict(job='a', token='x'))
+        self.assertEqual(launcher.retire_terminal_claims(
+            self.root, {'a': dict(JobId='b', Status='Failed')}), [])
+
+    def test_native_scene_defaults_are_isolated_across_tasks_and_episodes(self):
+        source = Path(__file__).resolve().parents[1] / 'third_party/RoboTwin/envs/_base_task.py'
+        tree = ast.parse(source.read_text())
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Base_Task')
+        method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == 'get_cluttered_table')
+        namespace = {'np': SimpleNamespace(random=SimpleNamespace(rand=lambda: 0.))}
+        exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), 'exec'), namespace)
+        native = namespace['get_cluttered_table']
+        task = type('Task', (), {'get_cluttered_table': native})
+        for bias in ([.3, 0], [0, 0], [.3, 0]):
+            env = task()
+            env.table_xy_bias = bias
+            env.clean_background_rate = 1
+            evaluation.isolate_scene_defaults(env)
+            for _ in range(4):
+                env.get_cluttered_table()
+                self.assertEqual(native.__defaults__[1], [-.59, .59])
+        contaminated = task()
+        contaminated.table_xy_bias = [.3, 0]
+        contaminated.clean_background_rate = 1
+        contaminated.get_cluttered_table()
+        with self.assertRaises(RuntimeError):
+            evaluation.isolate_scene_defaults(task())
+
+    def test_failed_case_does_not_stop_healthy_case(self):
+        evaluation.write_json(self.root / 'results/b--clean--000.json',
+                              dict(error='scene failed', episodes=[]))
+        cases = [dict(task='b', phase='clean'), dict(task='a', phase='clean')]
+        iterator = evaluation.ready_cases(self.root, cases, episodes=2)
+        self.assertEqual(next(iterator)['task'], 'a')
+        evaluation.write_json(self.root / 'results/a--clean--000.json',
+                              dict(episodes=[dict(ordinal=0), dict(ordinal=1)]))
+        with patch.object(evaluation.time, 'sleep'), self.assertRaisesRegex(RuntimeError, 'b--clean'):
+            next(iterator)
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix='c2r-eval-test-'))
+        (self.root / 'results').mkdir()
+        self.manifest = dict(episodes=2, cases=[dict(task='a', phase='clean')])
+        evaluation.write_json(self.root / 'plans/a--clean.json', dict(episodes=[
+            dict(ordinal=i, seed=100000+i, instruction='test') for i in range(2)]))
+
+    def test_claim_has_single_owner_and_releases(self):
+        with evaluation.claim(self.root, 'a--0') as owned:
+            self.assertTrue(owned)
+            with evaluation.claim(self.root, 'a--0') as other:
+                self.assertFalse(other)
+        with evaluation.claim(self.root, 'a--0') as reclaimed:
+            self.assertTrue(reclaimed)
+
+    def test_killed_owner_requires_confirmed_termination_before_reclaim(self):
+        child = subprocess.Popen([sys.executable, '-c',
+            "import importlib.util,sys,time,pathlib; s=importlib.util.spec_from_file_location('e',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); c=m.claim(pathlib.Path(sys.argv[2]),'killed'); assert c.__enter__(); print('locked',flush=True); time.sleep(60)",
+            str(Path(evaluation.__file__)), str(self.root)], stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(child.stdout.readline().strip(), 'locked')
+            with evaluation.claim(self.root, 'killed') as other:
+                self.assertFalse(other)
+        finally:
+            child.kill()
+            child.wait()
+            child.stdout.close()
+        with evaluation.claim(self.root, 'killed') as other:
+            self.assertFalse(other)
+        # The supervisor has observed process termination; retain its evidence.
+        active = self.root / 'claims/killed/active'
+        self.assertEqual(json.loads((active / 'owner.json').read_text())['pid'], child.pid)
+        active.rename(active.with_name('retired-confirmed-dead'))
+        with evaluation.claim(self.root, 'killed') as reclaimed:
+            self.assertTrue(reclaimed)
+
+    def test_task_state_uses_initial_scene_and_refreshes_each_episode(self):
+        env = SimpleNamespace(object=SimpleNamespace(get_pose=lambda: SimpleNamespace(p=[.2, 0., .8])))
+        module = SimpleNamespace(ArmTag=str)
+        with patch.dict(sys.modules, {type(env).__module__: module}):
+            evaluation.initialize_task_state('put_object_cabinet', env)
+            self.assertEqual((env.arm_tag, env.origin_z), ('right', .8))
+            env.object.get_pose = lambda: SimpleNamespace(p=[-.2, 0., .9])
+            evaluation.initialize_task_state('put_object_cabinet', env)
+            self.assertEqual((env.arm_tag, env.origin_z), ('left', .9))
+
+    def test_scheduler_revisits_incomplete_work(self):
+        cases = [dict(task='a', phase='clean')]
+        iterator = evaluation.ready_cases(self.root, cases, episodes=2)
+        self.assertEqual(next(iterator), cases[0])
+        with patch.object(evaluation.time, 'sleep'):
+            self.assertEqual(next(iterator), cases[0])
+            evaluation.write_json(self.root / 'results/a--clean--000.json',
+                                  dict(episodes=[dict(ordinal=0), dict(ordinal=1)]))
+            with self.assertRaises(StopIteration):
+                next(iterator)
+
+    def test_atomic_writes_with_equal_pids_have_distinct_temporary_files(self):
+        barrier = threading.Barrier(8)
+        original = Path.write_text
+        original_replace = Path.replace
+        replace_lock = threading.Lock()
+        def synchronized(path, *args, **kwargs):
+            result = original(path, *args, **kwargs)
+            barrier.wait(timeout=10)
+            return result
+        def replace(path, target):
+            # Windows denies simultaneous replacements of an open destination.
+            # Serialize only rename there; all temporary writes still collide
+            # under the old PID-only implementation before this barrier.
+            if sys.platform == 'win32':
+                with replace_lock:
+                    return original_replace(path, target)
+            return original_replace(path, target)
+        destination = self.root / 'complete.json'
+        with patch.object(Path, 'write_text', synchronized), patch.object(Path, 'replace', replace):
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                list(pool.map(lambda i: evaluation.write_json(destination, dict(value=i)), range(8)))
+        self.assertIn(json.loads(destination.read_text())['value'], range(8))
+
+    def test_ready_cases_do_not_wait_for_first_case(self):
+        cases = [dict(task='slow', phase='clean'), dict(task='a', phase='clean')]
+        iterator = evaluation.ready_cases(self.root, cases)
+        self.assertEqual(next(iterator)['task'], 'a')
+        evaluation.write_json(self.root / 'plans/slow--clean.json', dict(episodes=[]))
+        self.assertEqual(next(iterator)['task'], 'slow')
+        with self.assertRaises(StopIteration):
+            next(iterator)
+
+    def test_no_partial_score_and_exact_coverage(self):
+        def save(name, ordinal, success):
+            evaluation.write_json(self.root / 'results' / name,
+                dict(task='a', phase='clean', episodes=[dict(ordinal=ordinal, seed=100000+ordinal,
+                     instruction='test', success=success)]))
+        save('0.json', 0, True)
+        self.assertIsNone(evaluation.summarize(self.root, self.manifest)['overall']['clean'])
+        save('1.json', 1, False)
+        result = evaluation.summarize(self.root, self.manifest)
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['overall']['clean'], .5)
+        save('duplicate.json', 1, False)
+        with self.assertRaises(ValueError):
+            evaluation.summarize(self.root, self.manifest)
+
+
+if __name__ == '__main__':
+    unittest.main()
