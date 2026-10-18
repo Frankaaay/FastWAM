@@ -615,8 +615,25 @@ class Wan22Trainer:
         state_path = os.path.join(self.state_dir, step_tag)
         ensure_dir(state_path)
         self.accelerator.save_state(output_dir=state_path)
+        self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process:
             self._save_trainer_state(state_path)
+            # Only completed weight/state pairs count toward the rolling window.
+            completed = sorted(
+                (p for p in Path(self.state_dir).glob("step_*")
+                 if p.is_dir() and not p.is_symlink()
+                 and (p / "trainer_state.json").is_file()
+                 and (Path(self.weights_dir) / (p.name + ".pt")).is_file()),
+                key=lambda p: int(p.name.removeprefix("step_")),
+            )
+            for old in completed[:-2]:
+                for payload in sorted(old.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+                    if payload.is_file() or payload.is_symlink():
+                        payload.unlink()
+                    elif payload.is_dir():
+                        payload.rmdir()
+                old.rmdir()
+                (Path(self.weights_dir) / (old.name + ".pt")).unlink()
         self.accelerator.wait_for_everyone()
 
         return {"weights_path": ckpt_path, "state_path": state_path}
