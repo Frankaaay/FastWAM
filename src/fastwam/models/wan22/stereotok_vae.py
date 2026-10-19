@@ -14,8 +14,11 @@ class StereoTokVAE(nn.Module):
     temporal_downsample_factor = 4
     requires_stereo = True
 
-    def __init__(self, checkpoint, device):
+    def __init__(self, checkpoint, device, input_mode="stereo"):
         super().__init__()
+        if input_mode not in ("stereo", "mono-left"):
+            raise ValueError(f"Unsupported StereoTok input mode: {input_mode}")
+        self.requires_stereo = input_mode == "stereo"
         path = Path(checkpoint).expanduser().resolve(strict=True)
         digest = hashlib.sha256()
         with path.open("rb") as stream:
@@ -24,7 +27,7 @@ class StereoTokVAE(nn.Module):
         self.binding = {"format": "stereotok-student-v3", "sha256": digest.hexdigest(),
                         "stereotok_source": "4be840f97694e976714d549a4db2a53705384626",
                         "inference_adapter_source": "783b602d128a43814af32285e60a60f270ec2703",
-                        "encode": "default-frozen-native-fp16"}
+                        "encode": "default-frozen-native-fp16", "input_mode": input_mode}
         self.model = load_student(str(path)).to(device=device, dtype=torch.float32)
         self.train(False)
 
@@ -48,6 +51,21 @@ class StereoTokVAE(nn.Module):
     def encode(self, videos, device, tiled=False, tile_size=None, tile_stride=None, *, right_videos=None):
         if tiled:
             raise ValueError("StereoTok mosaic encoding requires tiled=False")
+        if not self.requires_stereo:
+            if right_videos is not None:
+                raise ValueError("Mono-left StereoTok must not receive right eyes")
+            left = videos if isinstance(videos, torch.Tensor) else torch.stack(list(videos))
+            left = left.to(device=device, dtype=torch.float32)
+            if left.ndim != 5 or left.shape[1] != 3:
+                raise ValueError("Expected [B,3,T,H,W] mono inputs")
+            if any(n % 16 for n in left.shape[-2:]) or left.shape[2] < 1 or (left.shape[2] - 1) % 4:
+                raise ValueError("StereoTok requires 16-aligned images and 1+4k frames")
+            if not torch.isfinite(left).all() or left.abs().max() > 1.001:
+                raise ValueError("StereoTok pixels must be finite and normalized to [-1,1]")
+            with torch.autocast(device_type=left.device.type, enabled=False):
+                mean = torch.cat([self.model.encode_posterior(chunk)[0] for chunk in left.split(8)])
+                shift, scale = latent_scale(left.device)
+                return (mean.float() - shift.view(1, 48, 1, 1, 1)) * scale.view(1, 48, 1, 1, 1)
         if right_videos is None:
             raise ValueError("StereoTok requires synchronized right eyes")
         left = torch.stack(list(videos)).to(device=device, dtype=torch.float32)

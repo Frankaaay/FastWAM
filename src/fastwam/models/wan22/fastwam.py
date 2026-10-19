@@ -112,6 +112,7 @@ class FastWAM(torch.nn.Module):
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
         stereotok_checkpoint: str | None = None,
+        stereotok_input_mode: str = "stereo",
     ):
         if video_dit_config is None:
             raise ValueError("`video_dit_config` is required for FastWAM.from_wan22_pretrained().")
@@ -129,6 +130,7 @@ class FastWAM(torch.nn.Module):
             skip_dit_load_from_pretrain=skip_dit_load_from_pretrain,
             load_text_encoder=load_text_encoder,
             stereotok_checkpoint=stereotok_checkpoint,
+            stereotok_input_mode=stereotok_input_mode,
         )
 
         video_expert = components.dit

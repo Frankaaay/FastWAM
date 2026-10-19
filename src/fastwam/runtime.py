@@ -92,6 +92,7 @@ def create_fastwam(
     model_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
     stereotok_checkpoint: str | None = None,
+    stereotok_input_mode: str = "stereo",
 ):
     from .models.wan22.fastwam import FastWAM
 
@@ -158,6 +159,7 @@ def create_fastwam(
         loss_lambda_video=float(loss.get("lambda_video", 1.0)),
         loss_lambda_action=float(loss.get("lambda_action", 1.0)),
         stereotok_checkpoint=stereotok_checkpoint,
+        stereotok_input_mode=stereotok_input_mode,
     )
 
 

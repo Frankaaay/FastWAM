@@ -25,6 +25,37 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class TestStereoContracts(unittest.TestCase):
+    def test_mono_codec_uses_only_left_and_bounds_internal_batch(self):
+        class Student(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.batches = []
+
+            def encode_posterior(self, left):
+                self.batches.append(len(left))
+                mean = left[:, :1, ::4, ::16, ::16].expand(-1, 48, -1, -1, -1)
+                return mean, torch.zeros_like(mean)
+
+        with tempfile.TemporaryDirectory() as directory, patch(
+                "fastwam.models.wan22.stereotok_vae.load_student", return_value=Student()):
+            checkpoint = Path(directory) / 'student.pt'
+            checkpoint.write_bytes(b'test')
+            codec = StereoTokVAE(checkpoint, "cpu", input_mode="mono-left")
+        left = torch.rand(9, 3, 5, 32, 32)
+        result = codec.encode(left, "cpu")
+        shift, scale = latent_scale("cpu")
+        expected = (left[:, :1, ::4, ::16, ::16] - shift.view(1, 48, 1, 1, 1)) * scale.view(1, 48, 1, 1, 1)
+        torch.testing.assert_close(result, expected)
+        self.assertEqual(codec.model.batches, [8, 1])
+        self.assertFalse(codec.requires_stereo)
+        self.assertEqual(codec.binding["input_mode"], "mono-left")
+        with self.assertRaisesRegex(ValueError, "right eyes"):
+            codec.encode(left, "cpu", right_videos=left)
+        with self.assertRaises(ValueError):
+            codec.encode(left[:, :, :2], "cpu")
+        with self.assertRaises(ValueError):
+            StereoTokVAE("unused", "cpu", input_mode="typo")
+
     def test_training_seed_controls_initialization_before_trainer(self):
         seed_scope = {}
         exec(compile((ROOT / "src/fastwam/utils/pytorch_utils.py").read_text(),

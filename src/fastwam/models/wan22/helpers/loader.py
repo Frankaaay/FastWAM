@@ -149,8 +149,13 @@ def load_wan22_ti2v_5b_components(
     skip_dit_load_from_pretrain: bool = False,
     load_text_encoder: bool = True,
     stereotok_checkpoint: str | None = None,
+    stereotok_input_mode: str = "stereo",
 ):
     logger.info("Loading Wan2.2-TI2V-5B components...")
+    if stereotok_input_mode not in ("stereo", "mono-left"):
+        raise ValueError(f"Unsupported StereoTok input mode: {stereotok_input_mode}")
+    if stereotok_checkpoint is None and stereotok_input_mode != "stereo":
+        raise ValueError("A StereoTok input mode requires its checkpoint")
     start = time.time()
 
     if dit_config is None:
@@ -215,7 +220,7 @@ def load_wan22_ti2v_5b_components(
             vae = _load_registered_model(vae_config.path, "wan_video_vae", torch_dtype=torch_dtype, device=device)
         else:
             from ..stereotok_vae import StereoTokVAE
-            vae = StereoTokVAE(stereotok_checkpoint, device)
+            vae = StereoTokVAE(stereotok_checkpoint, device, input_mode=stereotok_input_mode)
     logger.info("Finished loading Wan2.2-TI2V-5B components in %.2f seconds.", time.time() - start)
     return Wan22LoadedComponents(
         dit=dit,
