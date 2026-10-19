@@ -140,8 +140,12 @@ class TestStereoContracts(unittest.TestCase):
         self.assertEqual(codec.model.last[1][64, 40].item(), 2)
         codec.model.batches = []
         batched = codec.encode(left.expand(2, -1, -1, -1, -1), "cpu", right_videos=right.expand(2, -1, -1, -1, -1))
-        self.assertEqual(codec.model.batches, [1, 1])
+        self.assertEqual(codec.model.batches, [2])
         torch.testing.assert_close(batched, encoded.expand(2, -1, -1, -1, -1))
+        codec.model.batches = []
+        tailed = codec.encode(left.expand(9, -1, -1, -1, -1), "cpu", right_videos=right.expand(9, -1, -1, -1, -1))
+        self.assertEqual(codec.model.batches, [8, 1])
+        torch.testing.assert_close(tailed, encoded.expand(9, -1, -1, -1, -1))
         with self.assertRaises(ValueError):
             codec.encode(left, "cpu")
         with self.assertRaises(ValueError):

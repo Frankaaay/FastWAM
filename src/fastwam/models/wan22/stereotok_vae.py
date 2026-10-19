@@ -68,12 +68,11 @@ class StereoTokVAE(nn.Module):
         elif (height, width) == (224, 448):
             regions[:, 56:] = 1
         with torch.autocast(device_type=left.device.type, enabled=False):
-            # Wan's frozen codec also encodes one sample at a time. Keep the
-            # stereo cost volume bounded without changing the policy batch.
+            # Bound the inference workspace without changing the policy batch.
             means = []
-            for index in range(len(left)):
-                mean, _ = self.model.encode_posterior(left[index:index + 1], right[index:index + 1],
-                    mask[index:index + 1], self.model.fusion.max_disparity, camera_regions=regions)
+            for index in range(0, len(left), 8):
+                mean, _ = self.model.encode_posterior(left[index:index + 8], right[index:index + 8],
+                    mask[index:index + 8], self.model.fusion.max_disparity, camera_regions=regions)
                 means.append(mean)
             mean = torch.cat(means)
             shift, scale = latent_scale(left.device)
