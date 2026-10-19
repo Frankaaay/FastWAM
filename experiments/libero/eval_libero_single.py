@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
@@ -115,7 +116,10 @@ def _resolve_dataset_stats_path(cfg: DictConfig) -> Path:
 
 
 def _load_model_checkpoint(model: torch.nn.Module, ckpt: str) -> None:
-    model.load_checkpoint(ckpt)
+    payload = model.load_checkpoint(ckpt)
+    model.mot.load_state_dict(payload["mot"], strict=True)
+    if model.proprio_encoder is not None:
+        model.proprio_encoder.load_state_dict(payload["proprio_encoder"], strict=True)
     logging.info("Loaded checkpoint via model.load_checkpoint: %s", ckpt)
     return
 
@@ -181,6 +185,72 @@ def _normalize_proprio(
     return state_batch["state"][state_key]
 
 
+@lru_cache(maxsize=8)
+def _paired_libero_data(dataset_dirs: tuple[str, ...]) -> bool:
+    paired = []
+    for directory in dataset_dirs:
+        path = Path(directory) / "meta" / "stereo_provenance.json"
+        if path.exists():
+            provenance = json.loads(path.read_text())
+            if provenance.get("pairing") != "fresh-left+fresh-right":
+                raise ValueError(f"Unknown LIBERO data convention: {path}")
+            paired.append(True)
+        else:
+            paired.append(False)
+    if any(paired) and not all(paired):
+        raise ValueError("Mixed original and paired LIBERO data conventions")
+    return bool(paired) and all(paired)
+
+
+def _render_stereo_observations(env, obs: dict) -> None:
+    """Render calibrated right views at the current state without stepping physics.
+
+    Match the paired exporter: translate along each camera's local +X by
+    6 cm (agentview) / 2 cm (wrist), preserving its orientation and intrinsics.
+    Restore the original cameras before the next simulator observation.
+    """
+    import mujoco
+    import robosuite.macros as macros
+
+    model, data = env.sim.model._model, env.sim.data._data
+    for camera, baseline in (("agentview", 0.06), ("robot0_eye_in_hand", 0.02)):
+        cid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, camera)
+        if cid < 0 or model.cam_mode[cid] != mujoco.mjtCamLight.mjCAMLIGHT_FIXED:
+            raise ValueError(f"Expected fixed paired LIBERO camera: {camera}")
+        original_pos = model.cam_pos[cid].copy()
+        rotation = np.empty(9)
+        mujoco.mju_quat2Mat(rotation, model.cam_quat[cid])
+        h, w = obs[camera + "_image"].shape[:2]
+        try:
+            model.cam_pos[cid] = original_pos + baseline * rotation.reshape(3, 3)[:, 0]
+            mujoco.mj_camlight(model, data)
+            image = env.sim.render(width=w, height=h, camera_name=camera).copy()
+            obs[camera + "_right_image"] = np.ascontiguousarray(
+                image[::-1] if macros.IMAGE_CONVENTION == "opencv" else image
+            )
+        finally:
+            model.cam_pos[cid] = original_pos
+            mujoco.mj_camlight(model, data)
+
+
+def _eval_images(obs: dict, cfg: DictConfig) -> dict:
+    if not _paired_libero_data(tuple(cfg.data.train.dataset_dirs)):
+        return get_libero_image(obs)
+    import robosuite.macros as macros
+
+    if macros.IMAGE_CONVENTION not in ("opengl", "opencv"):
+        raise ValueError(f"Unknown simulator image convention: {macros.IMAGE_CONVENTION}")
+    images = {"image": obs["agentview_image"], "wrist_image": obs["robot0_eye_in_hand_image"]}
+    if cfg.data.train.get("concat_multi_camera") == "libero_stereo":
+        for key, camera in (("image_right", "agentview"), ("wrist_image_right", "robot0_eye_in_hand")):
+            if camera + "_right_image" in obs:
+                images[key] = obs[camera + "_right_image"]
+    return {
+        key: np.ascontiguousarray(value[::-1] if macros.IMAGE_CONVENTION == "opengl" else value)
+        for key, value in images.items()
+    }
+
+
 def _obs_to_model_input(
     obs: dict,
     cfg: DictConfig,
@@ -190,8 +260,37 @@ def _obs_to_model_input(
     device: str,
     dtype: torch.dtype,
 ):
-    imgs = get_libero_image(obs)
+    imgs = _eval_images(obs, cfg)
     image_meta = processor.shape_meta["images"]
+    if _paired_libero_data(tuple(cfg.data.train.dataset_dirs)):
+        # Use the training processor's deterministic resize and camera order.
+        cameras = []
+        for meta in image_meta[:processor.num_output_cameras]:
+            image = torch.from_numpy(imgs[meta["key"]]).permute(2, 0, 1).unsqueeze(0)
+            transforms = processor.val_transforms
+            if isinstance(transforms, (dict, DictConfig)):
+                transforms = transforms[meta["key"]]
+            for transform in transforms:
+                image = transform(image)
+            cameras.append(image)
+        concatenation = cfg.data.train.concat_multi_camera
+        if concatenation == "libero_stereo":
+            if len(cameras) != 4 or (height, width) != (224, 448):
+                raise ValueError("LIBERO stereo requires four cameras and a 224x448 canvas")
+            pair = tuple(
+                (torch.cat(cameras[start:start + 2], dim=-1) * 2.0 - 1.0).to(device=device, dtype=dtype)
+                for start in (0, 2)
+            )
+            if any(tuple(x.shape[-2:]) != (height, width) for x in pair):
+                raise ValueError("Paired LIBERO stereo image shape mismatch")
+            return pair, _normalize_proprio(_extract_sim_state(obs), processor), {k: imgs[k] for k in ("image", "wrist_image")}
+        if concatenation not in ("horizontal", "vertical"):
+            raise ValueError(f"Unsupported paired LIBERO camera layout: {concatenation}")
+        x = torch.cat(cameras, dim=-1 if concatenation == "horizontal" else -2)
+        if tuple(x.shape[-2:]) != (height, width):
+            raise ValueError(f"Paired LIBERO image shape mismatch: {tuple(x.shape)}")
+        x = (x * 2.0 - 1.0).to(device=device, dtype=dtype)
+        return x, _normalize_proprio(_extract_sim_state(obs), processor), imgs
     if len(image_meta) < int(processor.num_output_cameras):
         raise ValueError(
             f"shape_meta.images has {len(image_meta)} entries, "
@@ -403,6 +502,8 @@ def _predict_action_chunk(
         "rand_device": str(cfg.EVALUATION.get("rand_device", "cpu")),
         "tiled": bool(cfg.EVALUATION.get("tiled", False)),
     }
+    if isinstance(image, tuple):
+        infer_kwargs["input_image"], infer_kwargs["input_image_right"] = image
     visualize_future_video = bool(cfg.EVALUATION.get("visualize_future_video", False))
     predicted_future_frames = None
     if visualize_future_video:
@@ -420,10 +521,11 @@ def _predict_action_chunk(
 
     action = _denormalize_action(action, processor)[0]  # [T, D]
 
-    # The dataloader flips the sign of the gripper action to align with other datasets
-    # (0 = close, 1 = open), so flip it back (-1 = open, +1 = close) before executing the action
-    action[..., -1] = action[..., -1] * 2 - 1
-    action = invert_gripper_action(action)
+    # Original converted data uses 0=close, 1=open. Paired exports preserve
+    # simulator actions (-1=open, +1=close) and must not be inverted again.
+    if not _paired_libero_data(tuple(cfg.data.train.dataset_dirs)):
+        action[..., -1] = action[..., -1] * 2 - 1
+        action = invert_gripper_action(action)
     if bool(cfg.EVALUATION.get("binarize_gripper", False)):
         action[..., -1] = np.sign(action[..., -1])
     return action, imgs, predicted_future_frames
@@ -488,6 +590,8 @@ def run_single_episode(
             continue
 
         if len(pending_actions) == 0:
+            if cfg.data.train.get("concat_multi_camera") == "libero_stereo":
+                _render_stereo_observations(env, obs)
             action_chunk, imgs, predicted_future_frames = _predict_action_chunk(
                 obs=obs,
                 task_description=task_description,
@@ -516,7 +620,7 @@ def run_single_episode(
                 pending_actions = action_chunk[:replan_steps].tolist()
             replay_images.append(imgs.copy())
         else:
-            imgs = get_libero_image(obs)
+            imgs = _eval_images(obs, cfg)
             replay_images.append(imgs.copy())
 
         obs, _, done, _ = env.step(pending_actions.pop(0))
@@ -595,7 +699,18 @@ def run_single_task(
     input_h: int,
     model_device: str,
 ) -> dict:
-    env, task_description = get_libero_env(task, LIBERO_ENV_RESOLUTION, cfg.get("seed"))
+    resolution = LIBERO_ENV_RESOLUTION
+    if _paired_libero_data(tuple(cfg.data.train.dataset_dirs)):
+        sizes = set()
+        for directory in cfg.data.train.dataset_dirs:
+            features = json.loads((Path(directory) / "meta" / "info.json").read_text())["features"]
+            for meta in processor.shape_meta["images"][:processor.num_output_cameras]:
+                shape = features[f"observation.images.{meta['key']}"]["shape"]
+                sizes.add(tuple(shape[:2]))
+        if len(sizes) != 1 or next(iter(sizes))[0] != next(iter(sizes))[1]:
+            raise ValueError(f"Inconsistent paired LIBERO render sizes: {sizes}")
+        resolution = next(iter(sizes))[0]
+    env, task_description = get_libero_env(task, resolution, cfg.get("seed"))
     visualize_future_video = bool(cfg.EVALUATION.get("visualize_future_video", False))
     results = {
         "successes": 0,
