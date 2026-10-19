@@ -25,6 +25,30 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class TestStereoContracts(unittest.TestCase):
+    def test_mono_latents_match_policy_dtype_in_training_and_inference(self):
+        tree = ast.parse((ROOT / "src/fastwam/models/wan22/fastwam.py").read_text())
+        model = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "FastWAM")
+        methods = [node for node in model.body if isinstance(node, ast.FunctionDef) and node.name in
+                   ("_encode_video_latents", "_encode_input_image_latents_tensor")]
+        scope = {"torch": torch}
+        exec(compile(ast.Module(body=methods, type_ignores=[]), "fastwam.py", "exec"), scope)
+        class MonoCodec:
+            requires_stereo = False
+
+            def encode(self, videos, **kwargs):
+                self.kwargs = kwargs
+                return torch.ones(1, 48, 1, 2, 2, dtype=torch.float32)
+
+        codec = MonoCodec()
+        policy = types.SimpleNamespace(vae=codec, device="cpu", torch_dtype=torch.bfloat16)
+        for method in methods:
+            video = torch.zeros(1, 3, 1, 32, 32) if method.name == "_encode_video_latents" else torch.zeros(1, 3, 32, 32)
+            latents = scope[method.name](policy, video)
+            self.assertEqual(latents.dtype, torch.bfloat16)
+            self.assertNotIn("right_videos", codec.kwargs)
+            # Reproduce the downstream BF16 linear boundary that previously failed.
+            self.assertTrue(torch.isfinite(nn.Linear(48, 4).to(torch.bfloat16)(latents[:, :, 0, 0, 0])).all())
+
     def test_mono_codec_uses_only_left_and_bounds_internal_batch(self):
         class Student(nn.Module):
             def __init__(self):

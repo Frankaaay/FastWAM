@@ -254,7 +254,7 @@ class FastWAM(torch.nn.Module):
             tile_stride=tile_stride,
             **stereo_kwargs,
         )
-        return z.to(dtype=self.torch_dtype) if stereo_kwargs else z
+        return z.to(dtype=self.torch_dtype)
 
     @torch.no_grad()
     def _encode_input_image_latents_tensor(self, input_image: torch.Tensor, tiled=False, tile_size=(30, 52), tile_stride=(15, 26), input_image_right=None):
@@ -275,7 +275,7 @@ class FastWAM(torch.nn.Module):
         z = self.vae.encode([image], device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride, **stereo_kwargs)
         if isinstance(z, list):
             z = z[0].unsqueeze(0)
-        return z.to(dtype=self.torch_dtype) if stereo_kwargs else z
+        return z.to(dtype=self.torch_dtype)
 
     def _decode_latents(self, latents, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)):
         video_tensor = self.vae.decode(latents, device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
