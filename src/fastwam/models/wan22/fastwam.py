@@ -1130,7 +1130,14 @@ class FastWAM(torch.nn.Module):
 
     def load_checkpoint(self, path, optimizer=None):
         payload = torch.load(path, map_location="cpu")
-        if payload.get("tokenizer") != getattr(self.vae, "binding", None):
+        tokenizer_binding = payload.get("tokenizer")
+        # Before mono-left support, student-v3 checkpoints were always stereo
+        # and did not serialize input_mode. Preserve every other binding check.
+        if (isinstance(tokenizer_binding, dict)
+                and tokenizer_binding.get("format") == "stereotok-student-v3"
+                and "input_mode" not in tokenizer_binding):
+            tokenizer_binding = {**tokenizer_binding, "input_mode": "stereo"}
+        if tokenizer_binding != getattr(self.vae, "binding", None):
             raise ValueError("Policy/tokenizer checkpoint binding mismatch")
         if "mot" in payload:
             self.mot.load_state_dict(payload["mot"], strict=False)

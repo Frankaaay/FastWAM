@@ -25,6 +25,26 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class TestStereoContracts(unittest.TestCase):
+    def test_legacy_stereo_binding_preserves_hash_and_mode_checks(self):
+        tree = ast.parse((ROOT / "src/fastwam/models/wan22/fastwam.py").read_text())
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "FastWAM")
+        method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "load_checkpoint")
+        scope = {"torch": torch, "logger": logging.getLogger(__name__)}
+        exec(compile(ast.Module(body=[method], type_ignores=[]), "fastwam.py", "exec"), scope)
+        old = {"format": "stereotok-student-v3", "sha256": "same-weight",
+               "encode": "default-frozen-native-fp16"}
+        policy = types.SimpleNamespace(vae=types.SimpleNamespace(binding={**old, "input_mode": "stereo"}),
+                                       mot=nn.Linear(2, 2), proprio_encoder=None)
+        payload = {"tokenizer": old, "mot": policy.mot.state_dict()}
+        with patch.object(torch, "load", return_value=payload):
+            scope["load_checkpoint"](policy, "unused.pt")
+            self.assertNotIn("input_mode", payload["tokenizer"])
+            for changed in ({**old, "input_mode": "mono-left"},
+                            {**old, "input_mode": "stereo", "sha256": "other-weight"}):
+                policy.vae.binding = changed
+                with self.assertRaisesRegex(ValueError, "binding mismatch"):
+                    scope["load_checkpoint"](policy, "unused.pt")
+
     def test_mono_latents_match_policy_dtype_in_training_and_inference(self):
         tree = ast.parse((ROOT / "src/fastwam/models/wan22/fastwam.py").read_text())
         model = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "FastWAM")
