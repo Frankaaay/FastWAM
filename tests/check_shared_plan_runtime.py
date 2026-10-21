@@ -53,7 +53,9 @@ def main():
                 digest.update(json.dumps([name, list(rgb.shape), str(rgb.dtype)]).encode())
                 digest.update(np.ascontiguousarray(rgb).tobytes())
                 cameras[name] = hashlib.sha256(np.ascontiguousarray(rgb).tobytes()).hexdigest()
-            assert len(cameras) == 6, cameras
+            assert set(cameras) == {'front_camera', 'head_camera', 'head_camera_right',
+                                    'left_camera', 'left_camera_right',
+                                    'right_camera', 'right_camera_right'}, cameras
             record = dict(model=manifest['model'], phase=phase, seed=episode['seed'],
                           instruction=episode['instruction'], scene=evaluation.initial_scene_digest(env),
                           observation=digest.hexdigest(), cameras=cameras, step_limit=env.step_lim)
