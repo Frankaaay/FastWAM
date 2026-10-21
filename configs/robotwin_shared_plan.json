@@ -1,0 +1,611 @@
+{
+  "cases": [
+    {
+      "phase": "clean",
+      "step_limit": 1700,
+      "task": "put_bottles_dustbin"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 1500,
+      "task": "open_microwave"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 1200,
+      "task": "blocks_ranking_rgb"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 1200,
+      "task": "blocks_ranking_size"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 1200,
+      "task": "stack_blocks_three"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 1200,
+      "task": "stack_bowls_three"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 900,
+      "task": "hanging_mug"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 900,
+      "task": "stack_bowls_two"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 800,
+      "task": "handover_block"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 800,
+      "task": "place_cans_plasticbox"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 800,
+      "task": "stack_blocks_two"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 700,
+      "task": "open_laptop"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 700,
+      "task": "place_bread_basket"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 700,
+      "task": "place_can_basket"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 700,
+      "task": "place_object_basket"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 700,
+      "task": "put_object_cabinet"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 700,
+      "task": "shake_bottle"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 700,
+      "task": "shake_bottle_horizontally"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 600,
+      "task": "dump_bin_bigbin"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 600,
+      "task": "handover_mic"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 600,
+      "task": "place_dual_shoes"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 500,
+      "task": "place_bread_skillet"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 500,
+      "task": "place_burger_fries"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 500,
+      "task": "place_empty_cup"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 500,
+      "task": "place_shoe"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 500,
+      "task": "scan_object"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "adjust_bottle"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "beat_block_hammer"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "click_alarmclock"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "click_bell"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "grab_roller"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "lift_pot"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "move_can_pot"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "move_pillbottle_pad"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "move_playingcard_away"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "move_stapler_pad"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "pick_diverse_bottles"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "pick_dual_bottles"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "place_a2b_left"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "place_a2b_right"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "place_container_plate"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "place_fan"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "place_mouse_pad"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "place_object_scale"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "place_object_stand"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "place_phone_stand"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "press_stapler"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "rotate_qrcode"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "stamp_seal"
+    },
+    {
+      "phase": "clean",
+      "step_limit": 400,
+      "task": "turn_switch"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 1700,
+      "task": "put_bottles_dustbin"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 1500,
+      "task": "open_microwave"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 1200,
+      "task": "blocks_ranking_rgb"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 1200,
+      "task": "blocks_ranking_size"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 1200,
+      "task": "stack_blocks_three"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 1200,
+      "task": "stack_bowls_three"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 900,
+      "task": "hanging_mug"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 900,
+      "task": "stack_bowls_two"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 800,
+      "task": "handover_block"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 800,
+      "task": "place_cans_plasticbox"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 800,
+      "task": "stack_blocks_two"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 700,
+      "task": "open_laptop"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 700,
+      "task": "place_bread_basket"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 700,
+      "task": "place_can_basket"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 700,
+      "task": "place_object_basket"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 700,
+      "task": "put_object_cabinet"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 700,
+      "task": "shake_bottle"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 700,
+      "task": "shake_bottle_horizontally"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 600,
+      "task": "dump_bin_bigbin"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 600,
+      "task": "handover_mic"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 600,
+      "task": "place_dual_shoes"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 500,
+      "task": "place_bread_skillet"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 500,
+      "task": "place_burger_fries"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 500,
+      "task": "place_empty_cup"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 500,
+      "task": "place_shoe"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 500,
+      "task": "scan_object"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "adjust_bottle"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "beat_block_hammer"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "click_alarmclock"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "click_bell"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "grab_roller"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "lift_pot"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "move_can_pot"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "move_pillbottle_pad"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "move_playingcard_away"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "move_stapler_pad"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "pick_diverse_bottles"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "pick_dual_bottles"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "place_a2b_left"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "place_a2b_right"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "place_container_plate"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "place_fan"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "place_mouse_pad"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "place_object_scale"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "place_object_stand"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "place_phone_stand"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "press_stapler"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "rotate_qrcode"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "stamp_seal"
+    },
+    {
+      "phase": "randomized",
+      "step_limit": 400,
+      "task": "turn_switch"
+    }
+  ],
+  "episodes": 100,
+  "files": {
+    "adjust_bottle--clean.json": "2138b21df4673d4dd893faa638005336b8b82d06832b4326fc063b5fcba43322",
+    "adjust_bottle--randomized.json": "fec2a7ae60d9350e2dbde0997e0b748f8fef545ed02cfe139157403706e073fb",
+    "beat_block_hammer--clean.json": "96343b1a1089081e658a6804ca6ebb1f983048dd3d406c84d67574032c7f251b",
+    "beat_block_hammer--randomized.json": "fb21bd64cf3ed60a92a5daf808cfb97f527d9eaf6d8453c34e35264b40ba2cc6",
+    "blocks_ranking_rgb--clean.json": "d34ce1bde1c8c7962bf6080f24aac314681a865994af42cdf8e4bc3d5d1319b4",
+    "blocks_ranking_rgb--randomized.json": "8be6c7532f499fa8bb7ba6c16c7db058e2ba23dd0d4682b7aea5695e7c3df12f",
+    "blocks_ranking_size--clean.json": "97b82d20b59809662b9ac75c4bfdaff9d1b0813c414bd02eeaf63906a3533260",
+    "blocks_ranking_size--randomized.json": "b7c82cd77dfe1203fcdf00024b31749fd16f141f703ec86676861c34057ebcd1",
+    "click_alarmclock--clean.json": "3d3f00b2b4184bbce26afe5b0c85db64f3db6531338c84b6fa000769944810a7",
+    "click_alarmclock--randomized.json": "044fab5a4d4a7fd416a269beb824df0570d43da874542d2867460e05bb2a0e42",
+    "click_bell--clean.json": "3f1794db1b9dbf70e15e7272c386801e040ed1135d1f35a1a1b0a9a9586b551b",
+    "click_bell--randomized.json": "5b5da4c3408a335d629a5766c5a7e10b3e9ecb1463159508e1a346ed5a093399",
+    "dump_bin_bigbin--clean.json": "cfa0a58b5db9776d0e5e80640c21001a6255df33c8d993a1f2976f11a4e7ac7a",
+    "dump_bin_bigbin--randomized.json": "b3a40893f048806adcf3a1217f44fc4e9d844e8dd207c8e3f676fa33a1ca4f34",
+    "grab_roller--clean.json": "40f263b3fdc19774e2b17e18293fef2db112160b9e622879582a2261a1a4fb31",
+    "grab_roller--randomized.json": "11cc6462d75742bf2c8ad05b1a6d94bd7a477dde1c918b72423c5b78ab514161",
+    "handover_block--clean.json": "d3be9b0986ec840c728ec4b0fd7caff9a556c7ad6a78aa39fc2f0b0bddb92f0e",
+    "handover_block--randomized.json": "482acf2938434f3b5cd9d0e6a3007cf2ba5242bb78f011bba70e95f6c151dd35",
+    "handover_mic--clean.json": "3b4e3b716099f1c511304a0b154d135286b4d1e10d67423854ed77285584ea70",
+    "handover_mic--randomized.json": "01bf21c286b36b43564d312938360e0cffa09585cf242593ad6c38f0790dbe68",
+    "hanging_mug--clean.json": "cfd916f83d734bfbae6ee4b9876487de8a46ff1f35018ccc99a28d070734cd56",
+    "hanging_mug--randomized.json": "1d7cfc5f20d1e617ca3dea45200d9d02d1c324b5dd1e35c290edaf1ae3a71cde",
+    "lift_pot--clean.json": "e306dd1dd9cf3be363521b6c57fb70572aa5c6c9f86094b14e50160396c01331",
+    "lift_pot--randomized.json": "007fc6a03908bdbb90446e26e4d02c39520d348695c39829680614164bb45400",
+    "move_can_pot--clean.json": "fb5165ee3b96004a28bdc6c83acef27336fd3d34b9c688fe7d0aecdabb4cafb5",
+    "move_can_pot--randomized.json": "03dcbf07383d48c356d27285fa1429b87d707565350e5e9f353458d631d1a587",
+    "move_pillbottle_pad--clean.json": "187cafb98d4ddc87d5228cbfdd1b05a3fa338a0afef426c6a620b7af0f961872",
+    "move_pillbottle_pad--randomized.json": "9944eb57291f4445bebc4ec9ab2482f1df7153b6ed8541d8071ed79aed0f9869",
+    "move_playingcard_away--clean.json": "c8e080b2669102dea420c7da4307f89614af1f01c9cc271ab7f51cb4c9aa10bb",
+    "move_playingcard_away--randomized.json": "6bf58255c281a293b0744e2e670b6752c8c7b4e81f060719b5fa8fda3776ffe6",
+    "move_stapler_pad--clean.json": "03fea4ff501aa5e9c80ec7f64505f2101a8bf9b80a76c81f04ec21915fd31dc5",
+    "move_stapler_pad--randomized.json": "7e38fffd48753af33d310fb975860c622cea8f199fb25e22464d281da78306e8",
+    "open_laptop--clean.json": "b77eab45e9a0751421de7e007a1d1c93a1ba40a05ed195eda048885c6bcb6f1c",
+    "open_laptop--randomized.json": "98dac95b0f0d39bfc6972d7b079b5efd7f9cc3e67cd1377f34fdbc4b01ea43f6",
+    "open_microwave--clean.json": "4f94fa3d7ced4f493dd3e1703b0fbdf5a9978254ba7a14fc5a0db4c53c477104",
+    "open_microwave--randomized.json": "28e4f5f2116fe9d42287088f19d163cd953616d52eac94ab44aa9a941a71a856",
+    "pick_diverse_bottles--clean.json": "728e3dfc64fec859ff20a9c385bce294bdf9efa8855291558e547717a80e801e",
+    "pick_diverse_bottles--randomized.json": "138311336b6b00ec0035d7884a070766f1ddd4b9bb3bc4d301e1d1cbd083c07c",
+    "pick_dual_bottles--clean.json": "8b6ccc97ed0eaa3073a0737dae83de300ef74aa3cb6f68fd3d1e45dde4502f6f",
+    "pick_dual_bottles--randomized.json": "2bec991cc59156a4ebf9b6e60c6a2f9bb68677b1e88acf0608b035bbfc9eb5fb",
+    "place_a2b_left--clean.json": "4c2e2722738724a64ee19a89bc3fb78ed188abb97ffd642d9432378dee71eb22",
+    "place_a2b_left--randomized.json": "e08f89975d682610f47ab8b762215ddf840ad38271239a97cc4dddc6a2e8d021",
+    "place_a2b_right--clean.json": "2e308d69664c25e1c6c74bee8b63617f159754d83b9e706b69091cf1856a72da",
+    "place_a2b_right--randomized.json": "3d5b9d71603a5b38d630e5aa2b3e3b8e50f360ea152706c763e12fb987a5106c",
+    "place_bread_basket--clean.json": "93542f6b3fcc020c33a119236ce729d382de1b55ecd7be8c85e6b7b444f5501e",
+    "place_bread_basket--randomized.json": "cc258039f9dde72c36ce61c298beb72409a6be1d370c35c2ea76d29e2c447ffe",
+    "place_bread_skillet--clean.json": "b3b7c6e7ce69b13e0805d8ff4078bccfea351b2f336af691288257081935834d",
+    "place_bread_skillet--randomized.json": "6fc45506cbc1d90a352243c312805efb3a093d07a5aae87729e9ff1d42a18d0e",
+    "place_burger_fries--clean.json": "2b03810f10cfedba9a88c713a499a82e70c07a0a1e7f44888f096063587d4a4c",
+    "place_burger_fries--randomized.json": "a94643e8922b45a58548cac26fea664afc714f31e84baeb52f0d97470bd3ee60",
+    "place_can_basket--clean.json": "b15831f53152d8c521b050799fa412244ca528c1c2d16e87eda5ed902b547e93",
+    "place_can_basket--randomized.json": "4bf6b537abb72de603bd22fb77bfc66d95da7210be4885f8390edbf38feb6b2e",
+    "place_cans_plasticbox--clean.json": "dd707203f4f5201a3725e6caf79916299de2240d046660891da93e1fbdbfeefe",
+    "place_cans_plasticbox--randomized.json": "b50ee723f7e01419236145c51acb0571e5ead455bda7b904ca1d698438c1d6b6",
+    "place_container_plate--clean.json": "c8bd0a5188c18b1627bb0dbc7f9571f3acf97b9f8c863ceaf8868997f2c60431",
+    "place_container_plate--randomized.json": "5c98abd7e3f1aed54ecfe953a3e3960c8eedc7d1713fa1c8c0eb1ccca44f9968",
+    "place_dual_shoes--clean.json": "b7567ceba0380101e8d1993c24d957ab701435c941d57b2893b74348f48163bc",
+    "place_dual_shoes--randomized.json": "d72c8745b47b6cda611cf7d649314823ef458ee576db524b5471f17b1fdb6362",
+    "place_empty_cup--clean.json": "ab3cf2a99bdf85c41263773ab65390fa28b4f8c7b871a9407097012d2d08630b",
+    "place_empty_cup--randomized.json": "ffeb67a91429d958150d13db8bd173335d85ee52612cf1c9d42abf0ce73a3de9",
+    "place_fan--clean.json": "1747118347c2d18b07f58ae56e0207b94b4ba97d9d78bdb9a31c408b18c527a5",
+    "place_fan--randomized.json": "12a8546e8fd702290485969de6fdfbcad413c0b019a5a7cb6e451248a3890ee1",
+    "place_mouse_pad--clean.json": "b15d7c79650c7e3b2226a910a852d23b220079d70436a428d8d27c7b91dbecf0",
+    "place_mouse_pad--randomized.json": "c368bc661a0f9ead01f6b594cbcec1cbdc121f30291cc9ecda2cb0dfc264f402",
+    "place_object_basket--clean.json": "ffb0606761a4a867401a6cf9977b7d5cc8b7eb398f6ba583e41f332057cddf70",
+    "place_object_basket--randomized.json": "218fdd8cdc280abc27b29e86f29854c42602de814e9950f3b137e28b448a1368",
+    "place_object_scale--clean.json": "e4b16a2d7c685db92aaae7e2c5cb650e396958019273bbb6b922606297790e1a",
+    "place_object_scale--randomized.json": "394e271e434de04b76571ad2239bd9edaf01a43d85aa999892795fea6fe02be2",
+    "place_object_stand--clean.json": "a1976a73c1e5bc8165a93bb9c29d1008adcc3dc151ee2471b2d96f38ce4bf46c",
+    "place_object_stand--randomized.json": "e0f757ac798d82918d173945c307be02118a9a2c360722fad51f92f6d8ba9908",
+    "place_phone_stand--clean.json": "82cb7db6e9bdf5f8db59c39a5ccff694e13c5a6bdae6a9627b92ca47de583c69",
+    "place_phone_stand--randomized.json": "888cb93559a67c063a51e7a0d4eb38bb318452c8b79c0ec6edccbe32d8346fb8",
+    "place_shoe--clean.json": "a8e650164b960dfcbdf60feaeeaadc2b029a1830ae1bf6e4ef03bb55e6f35ed7",
+    "place_shoe--randomized.json": "9b289ebc36a3d8e8ea46c3fddf02f4dd60867cbda06c3d4226bf7fb616a2dddc",
+    "press_stapler--clean.json": "62050174c53f397341460d9c95aeb5cb5d40e77d53b56eb5009ea9d9e583f5bb",
+    "press_stapler--randomized.json": "43a7b67b0a3ce60b1cc7173a757b9d6cfd0ef0f23909badf4b128de791fc0b8b",
+    "put_bottles_dustbin--clean.json": "6218167f39964689d721170f19a03b02717c0e875f1059cf2fb6bb5712cf2aab",
+    "put_bottles_dustbin--randomized.json": "998d311f5615f8018cbd5311f311ada5d51787810a2a5cbbc06be1971923b49c",
+    "put_object_cabinet--clean.json": "1e277b91f991b98dcf90164ed063877ca8a4cfc54899d6fe8d7f0a1ca01b3c3d",
+    "put_object_cabinet--randomized.json": "2b530ce6f41158b44538007fff79552f580eb097e227c8a0ca1f06df22c5c901",
+    "rotate_qrcode--clean.json": "4c2daaea2fb35393b6693740b14015c45c2574ae3c545e4f5363f0d69a352cc8",
+    "rotate_qrcode--randomized.json": "d6da8390a20e5a328cf0a74aa016e33f165842916c2fe27b02296b15c2039120",
+    "scan_object--clean.json": "de312b506686c618e732294c9f5e50940eeb20c5887a07f60ae03124d66b046b",
+    "scan_object--randomized.json": "61299253ace45423e771f0f80aa6b3a45e4bcdfc39b5d5c1d40a982d2a38c32a",
+    "shake_bottle--clean.json": "03fac45a1b308b5a175ca155aa6b3e1c7ea964f23f3fa408535f3f19172975a0",
+    "shake_bottle--randomized.json": "c02bcf0d53d78b8bc1b6d8104009f7a083a218a539de3b556b48bf2d9d76a872",
+    "shake_bottle_horizontally--clean.json": "ebf9530f74c3581a764e4ea388e26b19f3d91e6671ea36c26947ee99bee4b8d4",
+    "shake_bottle_horizontally--randomized.json": "2b8c36308c3203fff5c165a5f3ba78e0063b4539aafcf96b58222663b8184f4c",
+    "stack_blocks_three--clean.json": "8d8c9c09cebf423ec17c5752dda6d0e09c1c7fda0e11858eff461d158de0910e",
+    "stack_blocks_three--randomized.json": "78384e1c8a3dc224ac57bbc2d55bd9173d344466940c09249057d503fe80339b",
+    "stack_blocks_two--clean.json": "e6230f38e7f0d06e93571705dabba5bc514883ea9599e183fff3596b15970da6",
+    "stack_blocks_two--randomized.json": "2d17ee5c719abf72597c15068a8c60955540d6771f4239a722fbe48e5511ac7e",
+    "stack_bowls_three--clean.json": "132a758dad1d4c2402f4ad2ae0616a3eae355555db64e6cf5536932f0f20f532",
+    "stack_bowls_three--randomized.json": "37043f7c77d5f2178fdf1cf56ccbe86ee7029b5562c68765a30e424b1db74dab",
+    "stack_bowls_two--clean.json": "e9193ce5ef0b1659e6fb086450c31f3b2d87309c5522181fd22d54e91cef0a1c",
+    "stack_bowls_two--randomized.json": "3b88189551fefe8054c7dfc8f56469307a66ca4baf7140ed3dcda66a93488473",
+    "stamp_seal--clean.json": "2bf0026ad027c8d5a8e3d802693d1608a66a059fdac0891aca034bd7e8761f20",
+    "stamp_seal--randomized.json": "64af9121e6928b25d6ffa1b4aa18cf0464499be0f3cd9d44f0c7474b4ad22a9c",
+    "turn_switch--clean.json": "603dadfb3b46727d9ecafca5393487e402c869aaed6790b6d1406b5334856853",
+    "turn_switch--randomized.json": "9231e38a30abe6a4d15925f34c0a070edfcbb31627e53da14353a2d0ef517b9f"
+  },
+  "instruction_type": "unseen",
+  "plan_root": "/mnt/workdir/frank/runs/c2r-stereotok-mono-eval-final-20261017/plans",
+  "robotwin_git_tree": "4aaf93e9cafe7dd09ba0d57139b56b6225821b61",
+  "version": 1
+}

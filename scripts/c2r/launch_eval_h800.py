@@ -161,7 +161,7 @@ def main():
         return
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', type=Path, required=True)
-    parser.add_argument('--mode', choices=['prepare', 'rollout', 'pipeline'], required=True)
+    parser.add_argument('--mode', choices=['rollout'], default='rollout')
     parser.add_argument('--gpus', type=int, required=True)
     parser.add_argument('--workers-per-gpu', type=int, required=True)
     parser.add_argument('--source-sha', required=True)

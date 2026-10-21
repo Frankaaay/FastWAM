@@ -1,5 +1,6 @@
 """Frozen RoboTwin seed plans and dynamically claimed C2R rollout chunks."""
 import argparse
+import hashlib
 import contextlib
 import importlib
 import json
@@ -10,9 +11,122 @@ import sys
 import time
 import traceback
 import uuid
+import subprocess
 from copy import deepcopy
 from functools import wraps
 from inspect import signature, Parameter
+
+SHARED_PLAN_SHA256 = '42ba67ecad191a5910a0c783569509eeaede422819db5cb6e792915e6743f84e'
+
+
+def shared_plan_lock():
+    path = Path(__file__).resolve().parents[2] / 'configs/robotwin_shared_plan.json'
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != SHARED_PLAN_SHA256:
+        raise ValueError('Shared RoboTwin plan lock was changed')
+    return json.loads(data)
+
+
+def load_shared_plans(manifest):
+    lock = shared_plan_lock()
+    if manifest['episodes'] != lock['episodes']:
+        raise ValueError('Shared plan requires 100 episodes per task')
+    expected = {(c['task'], c['phase']): c for c in lock['cases']}
+    selected = [(c['task'], c['phase']) for c in manifest['cases']]
+    if not selected or len(set(selected)) != len(selected):
+        raise ValueError('Empty or duplicate evaluation cases')
+    phases = {phase for _, phase in selected}
+    if set(selected) != {key for key in expected if key[1] in phases}:
+        raise ValueError('Every selected phase must cover all 50 frozen tasks')
+    plans = {}
+    for case in manifest['cases']:
+        if case != expected.get((case['task'], case['phase'])):
+            raise ValueError('Task, phase or step limit differs from frozen plan')
+        key = case['task'] + '--' + case['phase']
+        data = (Path(lock['plan_root']) / (key + '.json')).read_bytes()
+        if hashlib.sha256(data).hexdigest() != lock['files'][key + '.json']:
+            raise ValueError('Frozen episode plan hash mismatch: ' + key)
+        plan = json.loads(data)
+        if (plan['task'], plan['phase']) != (case['task'], case['phase']):
+            raise ValueError('Frozen plan identity mismatch: ' + key)
+        if [e['ordinal'] for e in plan['episodes']] != list(range(100)):
+            raise ValueError('Frozen plan coverage mismatch: ' + key)
+        plans[key] = plan
+    return plans
+
+
+def validate_shared_results(root, plans, run_sha256):
+    seen = set()
+    for path in (root / 'results').glob('*.json'):
+        record = json.loads(path.read_text())
+        if record.get('shared_plan_sha256') != SHARED_PLAN_SHA256:
+            raise ValueError('Result belongs to another evaluation protocol: ' + str(path))
+        if record.get('run_sha256') != run_sha256:
+            raise ValueError('Result belongs to another model/checkpoint configuration')
+        key = record['task'] + '--' + record['phase']
+        if key not in plans:
+            raise ValueError('Unexpected result case: ' + key)
+        for episode in record['episodes']:
+            ordinal = episode['ordinal']
+            if type(ordinal) is not int or not 0 <= ordinal < 100 or (key, ordinal) in seen:
+                raise ValueError('Invalid or duplicate result ordinal')
+            seen.add((key, ordinal))
+            expected = plans[key]['episodes'][ordinal]
+            if any(episode[k] != expected[k] for k in ('seed', 'instruction')):
+                raise ValueError('Result seed/instruction differs from shared plan')
+            if not episode.get('initial_scene_sha256') or type(episode['success']) is not bool:
+                raise ValueError('Result lacks scene identity or boolean success')
+
+
+def make_policy(manifest):
+    kind = manifest['model']
+    if kind == 'fastwam':
+        from fastwam_c2r.policy import C2RPolicy
+        return C2RPolicy(manifest['checkpoint'], manifest['training_root'])
+    if kind == 'openwam':
+        from benchmarks.robotwin.openwam2robotwin_interface import SharedPlanPolicy
+    elif kind == 'lingbot':
+        from XPolicyLab.policy.LingBot_VA.lingbot_va.evaluation.robotwin.shared_plan_policy import SharedPlanPolicy
+    else:
+        raise ValueError('Unknown shared-plan model: ' + kind)
+    return SharedPlanPolicy(**manifest['policy'])
+
+
+class EnvironmentRng:
+    """Keep scene Python/NumPy RNG independent of policy/client implementation."""
+    def __init__(self, env):
+        import numpy as np
+        self._env = env
+        self._python = random.getstate()
+        self._numpy = np.random.get_state()
+
+    def __getattr__(self, name):
+        value = getattr(self._env, name)
+        if not callable(value):
+            return value
+        def call(*args, **kwargs):
+            import numpy as np
+            outside = random.getstate(), np.random.get_state()
+            random.setstate(self._python)
+            np.random.set_state(self._numpy)
+            try:
+                return value(*args, **kwargs)
+            finally:
+                self._python, self._numpy = random.getstate(), np.random.get_state()
+                random.setstate(outside[0])
+                np.random.set_state(outside[1])
+        return call
+
+
+def initial_scene_digest(env):
+    actors = []
+    for actor in env.scene.get_all_actors():
+        pose = actor.get_pose()
+        actors.append(dict(name=actor.get_name(), p=pose.p.tolist(), q=pose.q.tolist()))
+    actors.sort(key=lambda x: (x['name'], x['p'], x['q']))
+    value = dict(actors=actors, table_z_bias=float(env.table_z_bias),
+                 step_limit=int(env.step_lim), instruction=env.get_instruction())
+    return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
 def write_json(path, value):
@@ -61,9 +175,6 @@ def ready_cases(root, cases, episodes=None, prepare=False):
         for case in list(pending):
             key = case['task'] + '--' + case['phase']
             completed_path = root / 'completed' / (key + '.json')
-            if episodes is not None and completed_path.exists():
-                pending.remove(case)
-                continue
             has_plan = (root / 'plans' / (key + '.json')).exists()
             if not has_plan and (root / 'errors' / ('prepare--' + key + '.json')).exists():
                 blocked.append(key)
@@ -123,6 +234,13 @@ def isolate_scene_defaults(env):
 
 
 def setup_runtime():
+    repo = Path(__file__).resolve().parents[2]
+    tree = subprocess.check_output(['git', '-C', str(repo), 'rev-parse',
+                                    'HEAD:third_party/RoboTwin'], text=True).strip()
+    dirty = subprocess.check_output(['git', '-C', str(repo), 'status', '--porcelain',
+                                     '--', 'third_party/RoboTwin'], text=True).strip()
+    if tree != shared_plan_lock()['robotwin_git_tree'] or dirty:
+        raise ValueError('RoboTwin environment differs from the frozen FastWAM baseline')
     import sapien
     import torch
     torch.set_num_threads(1)
@@ -232,26 +350,46 @@ def rollout_case(official, device, model, case, episodes, on_episode=None):
         state = episode['numpy_after_instruction']
         np.random.set_state((state[0], np.asarray(state[1], dtype=np.uint32), *state[2:]))
         env.set_instruction(episode['instruction'])
+        if env.step_lim != case['step_limit']:
+            raise ValueError('Environment step limit differs from frozen plan')
+        scene_digest = initial_scene_digest(env)
+        scoped_env = EnvironmentRng(env)
         model.reset()
         observations = 0
+        initial_observation_sha256 = None
         setup_seconds = time.time() - start
         observation_seconds = 0.
         action_seconds = 0.
         while env.take_action_cnt < env.step_lim:
             tick = time.perf_counter()
-            obs = env.get_obs() if model.should_request_observation() else None
+            obs = scoped_env.get_obs() if model.should_request_observation() else None
+            if initial_observation_sha256 is None:
+                if obs is None:
+                    raise ValueError('Every policy must request the frozen initial observation')
+                digest = hashlib.sha256()
+                cameras = [(name, value['rgb']) for name, value in sorted(obs['observation'].items()) if 'rgb' in value]
+                if not cameras:
+                    raise ValueError('Initial observation contains no camera images')
+                for name, rgb in cameras:
+                    digest.update(json.dumps([name, list(rgb.shape), str(rgb.dtype)]).encode())
+                    digest.update(np.ascontiguousarray(rgb).tobytes())
+                initial_observation_sha256 = digest.hexdigest()
             observation_seconds += time.perf_counter() - tick
             observations += int(obs is not None)
             tick = time.perf_counter()
-            model.step(env, obs)
+            model.step(scoped_env, obs)
+            if scoped_env.step_lim != case['step_limit']:
+                raise ValueError('Policy attempted to change the shared step limit')
             action_seconds += time.perf_counter() - tick
             if env.eval_success:
                 break
         result = dict(ordinal=episode['ordinal'], seed=episode['seed'], instruction=episode['instruction'],
                       success=bool(env.eval_success), actions=env.take_action_cnt, observations=observations,
+                      initial_scene_sha256=scene_digest,
+                      initial_observation_sha256=initial_observation_sha256,
                       inference_seconds=sum(model.inference_seconds), setup_seconds=setup_seconds,
                       observation_seconds=observation_seconds, action_seconds=action_seconds, seconds=time.time()-start)
-        env.close_env(clear_cache=((episode['ordinal'] + 2) % config['clear_cache_freq'] == 0))
+        scoped_env.close_env(clear_cache=((episode['ordinal'] + 2) % config['clear_cache_freq'] == 0))
         results.append(result)
         if on_episode is not None:
             on_episode(result)
@@ -276,7 +414,8 @@ def summarize(root, manifest):
         values = [r for r in rows if (r['task'], r['phase']) == (case['task'], case['phase'])]
         expected = {}
         if values:
-            plan = json.loads((root / 'plans' / (case['task'] + '--' + case['phase'] + '.json')).read_text())
+            plan_root = Path(shared_plan_lock()['plan_root']) if manifest.get('shared_plan_sha256') else root / 'plans'
+            plan = json.loads((plan_root / (case['task'] + '--' + case['phase'] + '.json')).read_text())
             expected = {ep['ordinal']: ep for ep in plan['episodes']}
         for value in values:
             episode = expected[value['ordinal']]
@@ -293,17 +432,34 @@ def summarize(root, manifest):
     result = dict(completed_episodes=len(rows), required_episodes=len(manifest['cases'])*manifest['episodes'],
                   complete=all(v['success_rate'] is not None for v in per_case) and not errors,
                   overall=overall, per_case=per_case, errors=errors)
+    if manifest.get('shared_plan_sha256'):
+        result['shared_plan_sha256'] = manifest['shared_plan_sha256']
     write_json(root / 'summary.json', result)
     return result
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('mode', choices=['prepare', 'rollout', 'pipeline', 'summary'])
+    parser.add_argument('mode', choices=['rollout', 'summary'])
     parser.add_argument('--root', type=Path, required=True)
     args = parser.parse_args()
     root = args.root.resolve()
     manifest = json.loads((root / 'manifest.json').read_text())
+    if manifest.get('model') not in ('fastwam', 'openwam', 'lingbot'):
+        raise ValueError('manifest.json must explicitly name fastwam, openwam or lingbot')
+    plans = load_shared_plans(manifest)
+    if manifest.get('shared_plan_sha256') not in (None, SHARED_PLAN_SHA256):
+        raise ValueError('Output manifest uses another shared plan')
+    manifest['shared_plan_sha256'] = SHARED_PLAN_SHA256
+    if type(manifest['chunk_size']) is not int or not 1 <= manifest['chunk_size'] <= 100:
+        raise ValueError('Invalid evaluation chunk size')
+    run_sha256 = hashlib.sha256(json.dumps(manifest, sort_keys=True, allow_nan=False).encode()).hexdigest()
+    binding = dict(shared_plan_sha256=SHARED_PLAN_SHA256, run_sha256=run_sha256, manifest=manifest)
+    binding_path = root / 'shared-plan-binding.json'
+    if binding_path.exists() and json.loads(binding_path.read_text()) != binding:
+        raise ValueError('Output directory is already bound to another model/configuration')
+    validate_shared_results(root, plans, run_sha256)
+    write_json(binding_path, binding)
     if args.mode == 'summary':
         import fcntl
         with (root / 'aggregate.lock').open('a') as lock:
@@ -313,30 +469,10 @@ def main():
     official, device = setup_runtime()
     model = None
     errors = []
-    cases = manifest['cases'] if args.mode == 'prepare' else ready_cases(
-        root, manifest['cases'], manifest['episodes'], prepare=args.mode == 'pipeline')
+    cases = ready_cases(root, manifest['cases'], manifest['episodes'], prepare=True)
     for case in cases:
         key = case['task'] + '--' + case['phase']
-        if args.mode == 'prepare' or not (root / 'plans' / (key + '.json')).exists():
-            if (root / 'plans' / (key + '.json')).exists():
-                continue
-            with claim(root, 'prepare--' + key) as acquired:
-                if not acquired or (root / 'plans' / (key + '.json')).exists():
-                    continue
-                logpath = root / 'logs' / (f'prepare--{key}--{time.time_ns()}.log')
-                logpath.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    with logpath.open('x') as log, contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
-                        plan = prepare_case(official, device, case, manifest['episodes'])
-                    write_json(root / 'plans' / (key + '.json'), plan)
-                except Exception:
-                    error = traceback.format_exc()
-                    write_json(root / 'errors' / ('prepare--' + key + '.json'), dict(error=error))
-                    errors.append(error)
-                    print(error, flush=True)
-            if args.mode == 'prepare' or not (root / 'plans' / (key + '.json')).exists():
-                continue
-        plan = json.loads((root / 'plans' / (key + '.json')).read_text())
+        plan = plans[key]
         for offset in range(0, manifest['episodes'], manifest['chunk_size']):
             chunkkey = key + f'--{offset:03d}'
             resultpath = root / 'results' / (chunkkey + '.json')
@@ -349,7 +485,8 @@ def main():
                 if not acquired:
                     continue
                 record = json.loads(resultpath.read_text()) if resultpath.exists() else dict(
-                    **case, offset=offset, episodes=[])
+                    **case, offset=offset, episodes=[], shared_plan_sha256=SHARED_PLAN_SHA256,
+                    run_sha256=run_sha256)
                 if record.get('error'):
                     continue
                 chunk = plan['episodes'][offset:offset+manifest['chunk_size']]
@@ -367,8 +504,7 @@ def main():
                 try:
                     with logpath.open('x') as log, contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
                         if model is None:
-                            from fastwam_c2r.policy import C2RPolicy
-                            model = C2RPolicy(manifest['checkpoint'], manifest['training_root'])
+                            model = make_policy(manifest)
                         rollout_case(official, device, model, case, remaining, on_episode=save_episode)
                 except Exception:
                     record['error'] = traceback.format_exc()
