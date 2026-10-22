@@ -53,3 +53,13 @@ v3 `dlcn743yjn7fefha` 已Failed。FastWAM已成功导入/checkout a029455并通�
 ## 真实场景相机检查修复
 
 v4已成功进入真实SAPIEN，首个Clean场景返回7路RGB：6路策略双目加front_camera。测试误断言6路导致停止；改为核验精确7个相机键，保留全部RGB指纹。没有改环境、相机、模型输入或验收一致性要求。修复仅tests/check_shared_plan_runtime.py，AST解析通过。
+
+## 场景验收通过；模型客户端依赖修复
+
+v5 `dlcpfj4ejh7plz1z` 实际输出 REAL_SCENE_IDENTITY_PASSED_3_ROUTES_2_PHASES：adjust_bottle ordinal0的Clean/Randomized在3次独立进程初始化中，seed、instruction、scene、全部7路RGB及step limit逐项完全一致。Clean scene=2eb93b3fd4fa26a8eb141acfefbf84a5cca0261e2676628905b2f00d195df110，RGB=1c01a1de49c7b2050ce1c7689531e1ac068859043aad8c432ca8dfbf1946946a；Randomized scene=6be639c8ebf1f9d704d9fd9c6f55580b64251da4ccef1e4b2dfb2eefa1c36c97，RGB=947e749180b639339ce2d76bb9831366b20f872788a7a25bd3ad031979143cee。三个init.json已写入远端任务输出目录。此部分尚未加载模型。
+
+后续真实客户端导入在LingBot缺websockets时报错。v6仅配置独立client-deps目录，链接既有OpenWAM CPython3.12环境的websockets/msgpack两个传输包；不将整个其他site-packages加入PYTHONPATH，不改Torch/SAPIEN和正在使用的环境。导入后打印实际Torch/SAPIEN路径及传输包版本。v6 `dlcem1rm391wybl6` 已提交；直接复用已通过的初始化证据，继续三个真实checkpoint串行调用，保持1卡闲时。请求/脚本前缀shared-runtime-models-v6。模型联调尚未通过，不得把初始化通过写成全部完成。
+
+## 最终状态更新（2026-10-22）
+
+共享plan真实联调已通过：FastWAM Wan、OpenWAM StereoTok、LingBot StereoTok在Clean/Randomized代表场景完成真实策略执行，三模型初始场景/七路RGB/seed/指令/step_limit完全一致。LingBot额外修复KV dtype边界和完整多组流式反馈，9项回归通过、每phase实际48动作；最后作业dlckkotu3pv3ga54 Succeeded。汇总产物/mnt/workdir/frank/runs/shared-robotwin-acceptance-20261021/accepted-models.json。实际代码FastWAM a8a62f8、OpenWAM 11abfa5、XPolicyLab b8164454。完整证据见StereoTok仓库docs/26-10-22/26-10-22-robotwin-shared-plan-acceptance.md。此前待运行/失败段落是过程历史；本结论仅代表场景与连续接口验收，不是全量分数。
