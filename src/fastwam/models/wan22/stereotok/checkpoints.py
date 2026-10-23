@@ -18,8 +18,8 @@ def load_student(path: str):
     with Path(path).expanduser().open("rb") as stream:
         for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
             digest.update(block)
-    if digest.hexdigest() != SELECTED_SHA256:
-        raise ValueError("This experiment requires the selected u15853 export SHA256")
+    if digest.hexdigest() not in (SELECTED_SHA256, "722511a4622860ed5061cd871171e5ebd4ada7ea8066b71141d401878e6cf588"):
+        raise ValueError("This experiment requires an admitted u8000 or u15853 export SHA256")
     payload = torch.load(Path(path).expanduser(), map_location="cpu", weights_only=True)
     if payload.get("format") != EXPORT_FORMAT:
         raise ValueError("Expected a complete stereotok-student-v3 deployment export")
