@@ -146,6 +146,11 @@ class Wan22Trainer:
             mode=self.cfg.wandb.mode,
             dir=self.output_dir,
         )
+        if self.cfg.wandb.mode == "online" and self.wandb_run.settings.mode != "online":
+            raise RuntimeError("Online W&B initialization did not succeed")
+        expected_run = os.environ.get("WANDB_RUN_ID")
+        if expected_run and self.wandb_run.id != expected_run:
+            raise RuntimeError("W&B run identity changed")
         logger.info(
             "Initialized wandb run: workspace=%s project=%s name=%s",
             self.cfg.wandb.workspace,
@@ -696,10 +701,9 @@ class Wan22Trainer:
                 continue
 
             with self.accelerator.accumulate(self.model):
-                train_model = self.model if hasattr(self.model, "training_loss") else self.accelerator.unwrap_model(self.model)
-
                 with self.accelerator.autocast():
-                    loss, loss_dict = train_model.training_loss(sample)
+                    # Keep DeepSpeed's forward hooks, including accumulation scaling.
+                    loss, loss_dict = self.model(sample)
                 self.accelerator.backward(loss)
 
                 if self.accelerator.sync_gradients:

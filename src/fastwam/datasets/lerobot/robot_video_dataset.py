@@ -124,6 +124,21 @@ class RobotVideoDataset(torch.utils.data.Dataset):
 
             processor.set_normalizer_from_stats(dataset_stats)
             self.lerobot_dataset.set_processor(processor)
+
+        # Decode only frames consumed by the policy. State/action queries retain
+        # their original dense timestamps and horizon.
+        if self.action_video_freq_ratio > 1 and not self.skip_padding_as_possible:
+            selected = self.video_sample_indices
+            for dataset in self.lerobot_dataset.multi_dataset._datasets:
+                for meta in self.lerobot_dataset.image_meta:
+                    key = meta["lerobot_key"]
+                    dataset.delta_timestamps[key] = [dataset.delta_timestamps[key][i] for i in selected]
+                    dataset.delta_indices[key] = [dataset.delta_indices[key][i] for i in selected]
+            if processor is not None:
+                if processor.num_obs_steps != self.num_frames:
+                    raise ValueError("Processor observation count must match the dense video window")
+                processor._image_num_obs_steps = len(selected)
+            self.video_sample_indices = list(range(len(selected)))
         
     def __len__(self):
         return len(self.lerobot_dataset)
