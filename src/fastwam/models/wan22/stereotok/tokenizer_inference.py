@@ -89,10 +89,15 @@ class FrozenTokenizerInference:
             fusion.matcher.forward, fullgraph=True, dynamic=False,
             options={"triton.cudagraphs": False, "layout_optimization": False,
                      "emulate_precision_casts": True}))
-        self.model.encoder.forward = torch.compile(
+        compiled_encoder = torch.compile(
             self.model.encoder.forward, fullgraph=True, dynamic=False,
             options={"triton.cudagraphs": False, "layout_optimization": False,
                      "max_autotune": False})
+        # Temporal slices inherit the full episode's channel stride. Normalize
+        # this layout before Dynamo guards so episode length cannot exhaust its cache.
+        def encode_chunk(x, **kwargs):
+            return compiled_encoder(x.contiguous(), **kwargs)
+        self.model.encoder.forward = encode_chunk
 
     @torch.compiler.disable(recursive=False)
     @torch.inference_mode(False)
