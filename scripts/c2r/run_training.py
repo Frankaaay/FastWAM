@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--initialization',required=True,help='Shared proprio initialization published by the Wan run')
     parser.add_argument('--steps',type=int,help='Smoke-only stop limit; retains the full five-epoch LR schedule')
     parser.add_argument('--resume')
+    parser.add_argument('--input-mode', choices=['stereo','mono-left'], default='stereo')
     args=parser.parse_args()
     setup_logging(log_level='INFO')
     from einops._torch_specific import allow_ops_in_compiled_graph
@@ -34,9 +35,10 @@ def main():
     cfg.max_steps=report['total_steps'] if args.steps is None else args.steps
     cfg.save_every=2500
     cfg.resume=args.resume
-    cfg.c2r.dataset.stereo=args.variant=='stereotok'
+    cfg.c2r.dataset.stereo=args.variant=='stereotok' and args.input_mode=='stereo'
     if args.variant=='stereotok':
         cfg.model.stereotok_checkpoint=os.environ['STEREOTOK_STUDENT_CKPT']
+        cfg.model.stereotok_input_mode=args.input_mode
     out=Path(cfg.output_dir)
     if args.resume:
         if not (Path(args.resume)/'c2r_complete.json').is_file():

@@ -4,6 +4,7 @@ from pathlib import Path
 import random
 import tempfile
 import unittest
+import ast
 import cv2
 import h5py
 import numpy as np
@@ -61,4 +62,61 @@ class MatchedDataTests(unittest.TestCase):
         self.assertEqual(len(order),768);self.assertEqual(len(set(order)),513);self.assertEqual(order[513:],order[:255])
         sampler.set_resume_batch_offset(4);self.assertEqual(list(sampler),order[256:])
         sampler.clear_resume_batch_offset();sampler.set_epoch(1);self.assertNotEqual(list(sampler),order)
+class CheckpointTests(unittest.TestCase):
+    def test_mono_stereo_input_contract_and_frozen_precision(self):
+        import hashlib
+        path=Path(__file__).resolve().parents[1]/'src/fastwam/models/wan22/stereotok_vae.py'
+        tree=ast.parse(path.read_text());tree.body=[n for n in tree.body if isinstance(n,ast.ClassDef)]
+        class Codec(torch.nn.Module):
+            def __init__(self):
+                super().__init__();self.weight=torch.nn.Parameter(torch.ones(1));self.fusion=type('Fusion',(),{'max_disparity':112})()
+            def encode_posterior(self,left,*args,**kw):
+                self.right=args[0] if args else None
+                return torch.zeros(len(left),48,1,2,2),None
+        scope=dict(torch=torch,nn=torch.nn,Path=Path,hashlib=hashlib,load_student=lambda _:Codec(),
+                   latent_scale=lambda _: (torch.zeros(48),torch.ones(48)))
+        exec(compile(tree,str(path),'exec'),scope)
+        out=Path(tempfile.mkdtemp(prefix='codec-mode-'))/'metadata.pt';torch.save({'format':'stereotok-wan-training-v1'},out)
+        image=torch.zeros(1,3,1,32,32)
+        mono=scope['StereoTokVAE'](out,'cpu',input_mode='mono-left')
+        stereo=scope['StereoTokVAE'](out,'cpu',input_mode='stereo')
+        torch.testing.assert_close(mono.encode(image,'cpu'),stereo.encode(image,'cpu',right_videos=image))
+        self.assertIsNone(mono.model.right);self.assertIsNotNone(stereo.model.right)
+        with self.assertRaises(ValueError):mono.encode(image,'cpu',right_videos=image)
+        with self.assertRaises(ValueError):stereo.encode(image,'cpu')
+        mono.train().to(dtype=torch.bfloat16)
+        self.assertFalse(mono.training);self.assertFalse(mono.model.weight.requires_grad)
+        self.assertEqual(mono.model.weight.dtype,torch.float32)
+        self.assertNotEqual(mono.binding,stereo.binding)
+
+    def test_stage3_keeps_inference_weights_and_rejects_missing_keys(self):
+        # Exercise the production loader with tiny modules, without LAS/GPU dependencies.
+        path=Path(__file__).resolve().parents[1]/'src/fastwam/models/wan22/stereotok/checkpoints.py'
+        tree=ast.parse(path.read_text())
+        tree.body=[n for n in tree.body if not isinstance(n,(ast.Import,ast.ImportFrom))]
+        class VAE(torch.nn.Module):
+            def __init__(self):
+                super().__init__();self.encoder=torch.nn.Linear(2,2);self.decoder=torch.nn.Linear(2,2)
+        scope=dict(torch=torch,Path=Path,make_vae=VAE,
+                   LAS2GuidedFusion=lambda *a,**k:torch.nn.Linear(2,2),
+                   GeometryDecoder=lambda *a:torch.nn.Linear(2,2))
+        exec(compile(tree,str(path),'exec'),scope)
+        model=VAE();model.fusion=torch.nn.Linear(2,2);model.decoder.geometry_branch=torch.nn.Linear(2,2)
+        geometry=dict(scope['DECODER_ARCHITECTURE'],encoder_geometry={'mode':'early'},fusion_repeats=[0,0],max_disparity=112)
+        weights={'vae.'+k:v for k,v in model.state_dict().items()}
+        weights['vae.semantic_head.layers.0.weight']=torch.ones(2,2)
+        weights['vae.latent_geometry_head.layers.0.weight']=torch.ones(2,2)
+        payload=dict(format='stereotok-wan-training-v1',architecture='stereo-v3',config=dict(stage=3,geometry=geometry),state_dict=weights)
+        out=Path(tempfile.mkdtemp(prefix='c2r-stage3-'))/'test.pt'
+        torch.save(payload,out)
+        actual=scope['load_student'](str(out))
+        for key,value in model.state_dict().items():torch.testing.assert_close(actual.state_dict()[key],value,rtol=0,atol=0)
+        self.assertFalse(any(p.requires_grad for p in actual.parameters()))
+        out=out.with_name('missing.pt')
+        del weights['vae.encoder.weight'];torch.save(payload,out)
+        with self.assertRaises(RuntimeError):scope['load_student'](str(out))
+        out=out.with_name('stage1.pt')
+        payload['config']['stage']=1;torch.save(payload,out)
+        with self.assertRaisesRegex(ValueError,'Stage2 or Stage3'):scope['load_student'](str(out))
+
 if __name__=='__main__':unittest.main()

@@ -13,7 +13,12 @@ def main():
     parser.add_argument('--source-sha',required=True)
     parser.add_argument('--steps',type=int)
     parser.add_argument('--resume')
+    parser.add_argument('--checkpoint', default=os.environ.get('STEREOTOK_STUDENT_CKPT'))
+    parser.add_argument('--input-mode', choices=['stereo','mono-left'], default='stereo')
+    parser.add_argument('--output-dir')
     args=parser.parse_args()
+    if args.variant=='stereotok' and not args.checkpoint:
+        parser.error('--checkpoint is required for StereoTok')
     repo=Path(__file__).resolve().parents[2]
     actual=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
     if actual!=args.source_sha or subprocess.check_output(['git','-C',str(repo),'status','--porcelain'],text=True).strip():
@@ -21,7 +26,7 @@ def main():
     base=Path('/mnt/workdir/frank')
     job=os.environ['DLC_JOB_ID']
     mode='smoke' if args.steps is not None or args.variant=='text' else 'train'
-    output=base/'runs'/f'fastwam-c2r-{args.variant}-{mode}-20261013-{job}'
+    output=Path(args.output_dir) if args.output_dir else base/'runs'/f'fastwam-c2r-{args.variant}-{args.input_mode}-{mode}-{job}'
     output.mkdir(parents=True,exist_ok=False)
     prep=base/'runs/c2r-prep-2500-20261013/prepared'
     shared=base/'checkpoints/fastwam-c2r-shared-20261013'
@@ -34,7 +39,7 @@ def main():
         C2R_PREP_DIR=str(prep),C2R_OUTPUT_DIR=str(output),C2R_RUN_NAME=output.name,
         C2R_TEXT_CACHE=str(base/'envs/c2r-text-cache-20261013'),
         C2R_ACTION_INIT=str(base/'checkpoints/fastwam-shared-clean15fps/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt'),
-        STEREOTOK_STUDENT_CKPT=str(base/'checkpoints/stereotok/incoming-u15853/student-u15853.pt'),
+        STEREOTOK_STUDENT_CKPT=args.checkpoint or '',
         DIFFSYNTH_MODEL_BASE_PATH=str(shared),DIFFSYNTH_SKIP_DOWNLOAD='true',
         WANDB_MODE='online',WANDB_DIR=str(output),WANDB_CACHE_DIR=str(base/'envs/wandb-cache'),
         WANDB_CONFIG_DIR=str(base/'envs/wandb-config'),WANDB_DATA_DIR=str(base/'envs/wandb-data'),
@@ -49,7 +54,7 @@ def main():
         cmd=[str(py),'-m','accelerate.commands.launch','--config_file',str(repo/'scripts/accelerate_configs/accelerate_zero2_ds.yaml'),
             '--deepspeed_config_file',str(repo/'configs/c2r/ds_zero2.json'),'--num_machines','1','--num_processes','8',
             str(repo/'scripts/c2r/run_training.py'),'--config',str(repo/'configs/c2r/train.yaml'),
-            '--variant',args.variant,'--initialization',str(prep/'common-initialization-v2.pt')]
+            '--variant',args.variant,'--input-mode',args.input_mode,'--initialization',str(prep/'common-initialization-v2.pt')]
         if args.steps is not None:cmd+=['--steps',str(args.steps)]
         if args.resume:cmd+=['--resume',args.resume]
     (output/'launch.json').write_text(json.dumps(dict(source_sha=actual,command=cmd,variant=args.variant),indent=2)+'\n')

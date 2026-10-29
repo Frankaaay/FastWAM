@@ -116,6 +116,7 @@ class FastWAM(torch.nn.Module):
         loss_lambda_action: float = 1.0,
         compile_training_denoise: bool = False,
         stereotok_checkpoint: str | None = None,
+        stereotok_input_mode: str = "stereo",
     ):
         if video_dit_config is None:
             raise ValueError("`video_dit_config` is required for FastWAM.from_wan22_pretrained().")
@@ -133,6 +134,7 @@ class FastWAM(torch.nn.Module):
             skip_dit_load_from_pretrain=skip_dit_load_from_pretrain,
             load_text_encoder=load_text_encoder,
             stereotok_checkpoint=stereotok_checkpoint,
+            stereotok_input_mode=stereotok_input_mode,
         )
 
         video_expert = components.dit
@@ -1222,7 +1224,7 @@ class FastWAM(torch.nn.Module):
         }
         if self.proprio_encoder is not None:
             payload["proprio_encoder"] = self.proprio_encoder.state_dict()
-        if getattr(self.vae, "requires_stereo", False):
+        if hasattr(self.vae, "binding"):
             payload["tokenizer"] = self.vae.binding
         if optimizer is not None:
             payload["optimizer"] = optimizer.state_dict()
