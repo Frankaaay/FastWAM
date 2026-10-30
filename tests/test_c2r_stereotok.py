@@ -63,6 +63,42 @@ class MatchedDataTests(unittest.TestCase):
         sampler.set_resume_batch_offset(4);self.assertEqual(list(sampler),order[256:])
         sampler.clear_resume_batch_offset();sampler.set_epoch(1);self.assertNotEqual(list(sampler),order)
 class CheckpointTests(unittest.TestCase):
+    def test_policy_codec_dispatch_for_mono_stereo_and_wan(self):
+        import types
+        from unittest.mock import patch
+        path=Path(__file__).resolve().parents[1]/'src/fastwam/models/wan22/fastwam.py'
+        cls=next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.ClassDef) and n.name=='FastWAM')
+        methods=[n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name in
+                 {'_encode_video_latents','_encode_input_image_latents_tensor'}]
+        scope={'torch':torch}
+        exec(compile(ast.Module(body=methods,type_ignores=[]),str(path),'exec'),scope)
+        video=torch.zeros(1,3,5,32,32)
+        for mode in ('mono-left','stereo',None):
+            calls=[]
+            def encode(x,device,tiled=False,right_videos=None):
+                calls.append(right_videos)
+                if mode=='stereo' and right_videos is None:raise ValueError('missing right')
+                if mode=='mono-left' and right_videos is not None:raise ValueError('unexpected right')
+                return torch.zeros(1,48,x.shape[2],2,2)
+            codec=types.SimpleNamespace(requires_stereo=mode=='stereo',encode=encode)
+            if mode is not None:codec.binding={'input_mode':mode}
+            else:
+                codec.scale='native-scale'
+                codec.model=types.SimpleNamespace(encode=lambda x,scale: torch.ones(1,48,x.shape[2],2,2))
+            policy=types.SimpleNamespace(vae=codec,device='cpu',torch_dtype=torch.bfloat16)
+            for name,method in scope.items():
+                if name.startswith('_encode_'):setattr(policy,name,types.MethodType(method,policy))
+            right=video if mode=='stereo' else None
+            with patch.object(torch,'compile',side_effect=lambda fn,**kw:fn):
+                latent=policy._encode_video_latents(video,right_video=right)
+                image_latent=policy._encode_input_image_latents_tensor(video[:,:,0],input_image_right=None if right is None else right[:,:,0])
+            self.assertEqual(tuple(image_latent.shape),(1,48,1,2,2))
+            if mode is not None:
+                self.assertEqual(latent.dtype,torch.bfloat16)
+                self.assertEqual(len(calls),2)
+                with self.assertRaises(ValueError):policy._encode_video_latents(video,right_video=None if mode=='stereo' else video)
+            else:self.assertEqual(len(calls),0)
+
     def test_mono_stereo_input_contract_and_frozen_precision(self):
         import hashlib
         path=Path(__file__).resolve().parents[1]/'src/fastwam/models/wan22/stereotok_vae.py'

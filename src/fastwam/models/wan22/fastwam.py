@@ -250,7 +250,7 @@ class FastWAM(torch.nn.Module):
 
     @torch.no_grad()
     def _encode_video_latents(self, video_tensor, tiled=False, tile_size=(30, 52), tile_stride=(15, 26), right_video=None):
-        if getattr(self.vae, "requires_stereo", False):
+        if getattr(self.vae, "binding", None) is not None:
             return self.vae.encode(video_tensor, self.device, tiled=tiled, right_videos=right_video).to(self.torch_dtype)
         if tiled:
             raise NotImplementedError("Batched VAE encoding does not support tiled encoding.")
@@ -267,12 +267,12 @@ class FastWAM(torch.nn.Module):
 
     @torch.no_grad()
     def _encode_input_image_latents_tensor(self, input_image: torch.Tensor, tiled=False, tile_size=(30, 52), tile_stride=(15, 26), input_image_right=None):
-        if getattr(self.vae, "requires_stereo", False):
-            if input_image_right is None or input_image_right.shape != input_image.shape:
+        if getattr(self.vae, "binding", None) is not None:
+            if getattr(self.vae, "requires_stereo", False) and (input_image_right is None or input_image_right.shape != input_image.shape):
                 raise ValueError("StereoTok requires a matching right-eye mosaic")
             left = input_image.unsqueeze(0) if input_image.ndim == 3 else input_image
-            right = input_image_right.unsqueeze(0) if input_image_right.ndim == 3 else input_image_right
-            return self._encode_video_latents(left.unsqueeze(2), tiled=tiled, right_video=right.unsqueeze(2))
+            right = input_image_right.unsqueeze(0) if input_image_right is not None and input_image_right.ndim == 3 else input_image_right
+            return self._encode_video_latents(left.unsqueeze(2), tiled=tiled, right_video=right.unsqueeze(2) if right is not None else None)
         if input_image.ndim == 3:
             input_image = input_image.unsqueeze(0)
         if input_image.ndim != 4 or input_image.shape[0] != 1 or input_image.shape[1] != 3:
@@ -348,7 +348,7 @@ class FastWAM(torch.nn.Module):
                     f"got {tuple(image_is_pad.shape)} vs expected ({batch_size}, {num_frames})"
                 )
         
-        codec_dtype = torch.float32 if getattr(self.vae, "requires_stereo", False) else self.torch_dtype
+        codec_dtype = torch.float32 if getattr(self.vae, "binding", None) is not None else self.torch_dtype
         input_video = video.to(device=self.device, dtype=codec_dtype, non_blocking=True)
         input_latents = self._encode_video_latents(input_video, tiled=tiled, right_video=sample.get("video_right"))
         context = sample.get("context")
@@ -879,7 +879,7 @@ class FastWAM(torch.nn.Module):
             dtype=torch.float32,
         ).to(device=self.device, dtype=self.torch_dtype)
 
-        codec_dtype = torch.float32 if getattr(self.vae, "requires_stereo", False) else self.torch_dtype
+        codec_dtype = torch.float32 if getattr(self.vae, "binding", None) is not None else self.torch_dtype
         input_image = input_image.to(device=self.device, dtype=codec_dtype)
         first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled, input_image_right=input_image_right)
         latents_video[:, :, 0:1] = first_frame_latents.clone()
@@ -1048,7 +1048,7 @@ class FastWAM(torch.nn.Module):
             dtype=torch.float32,
         ).to(device=self.device, dtype=self.torch_dtype)
 
-        codec_dtype = torch.float32 if getattr(self.vae, "requires_stereo", False) else self.torch_dtype
+        codec_dtype = torch.float32 if getattr(self.vae, "binding", None) is not None else self.torch_dtype
         input_image = input_image.to(device=self.device, dtype=codec_dtype)
         first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled, input_image_right=input_image_right)
         fuse_flag = bool(getattr(self.video_expert, "fuse_vae_embedding_in_latents", False))
