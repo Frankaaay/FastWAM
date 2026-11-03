@@ -5,12 +5,24 @@
 #include "denoiser.h"
 #include "svulkan2/core/context.h"
 #include <cstdio>
+#include <dlfcn.h>
 #include <stdexcept>
+
+// Test-only selector: compare old/new paths with the same warmed model instance.
+static bool reference_path = false;
+extern "C" void oidn_host_sync_reference(bool enabled) { reference_path = enabled; }
 
 namespace svulkan2::renderer {
 
 void DenoiserOidn::denoise(core::Image &color, core::Image *albedo,
                            core::Image *normal) {
+  if (reference_path) {
+    using Original = void (*)(DenoiserOidn *, core::Image &, core::Image *, core::Image *);
+    static auto original = reinterpret_cast<Original>(dlsym(
+        RTLD_NEXT, "_ZN8svulkan28renderer12DenoiserOidn7denoiseERNS_4core5ImageEPS3_S5_"));
+    if (!original) throw std::runtime_error("Original OIDN denoiser symbol missing");
+    return original(this, color, albedo, normal);
+  }
   if (color.getFormat() != vk::Format::eR32G32B32A32Sfloat ||
       (albedo && albedo->getFormat() != vk::Format::eR32G32B32A32Sfloat) ||
       (normal && normal->getFormat() != vk::Format::eR32G32B32A32Sfloat)) {
