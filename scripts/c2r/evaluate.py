@@ -137,6 +137,25 @@ def write_json(path, value):
     tmp.replace(path)
 
 
+_progress_at = 0.
+_progress_stage = None
+
+
+def heartbeat(stage, *, force=False, **details):
+    """Report real worker progress; repeated idle scans are not progress."""
+    global _progress_at, _progress_stage
+    target = os.environ.get('C2R_PROGRESS_PATH')
+    if not target:
+        return
+    now = time.monotonic()
+    if stage == 'waiting' and _progress_stage == stage:
+        return
+    if not force and now - _progress_at < 5:
+        return
+    write_json(target, dict(pid=os.getpid(), time=time.time(), stage=stage, **details))
+    _progress_at, _progress_stage = now, stage
+
+
 @contextlib.contextmanager
 def claim(root, key):
     """Server-side mkdir exclusion across independently mounted DLC containers.
@@ -344,6 +363,7 @@ def rollout_case(official, device, model, case, episodes, on_episode=None):
     for episode in episodes:
         start = time.time()
         random.setstate(tuples(episode['python_before_scene']))
+        heartbeat('scene_setup', force=True, task=case['task'], ordinal=episode['ordinal'])
         env.setup_demo(now_ep_num=episode['ordinal'], seed=episode['seed'], is_test=True, **config)
         initialize_task_state(case['task'], env)
         random.setstate(tuples(episode['python_after_instruction']))
@@ -362,6 +382,7 @@ def rollout_case(official, device, model, case, episodes, on_episode=None):
         action_seconds = 0.
         while env.take_action_cnt < env.step_lim:
             tick = time.perf_counter()
+            heartbeat('observation', task=case['task'], ordinal=episode['ordinal'], action=env.take_action_cnt)
             obs = scoped_env.get_obs() if model.should_request_observation() else None
             if initial_observation_sha256 is None:
                 if obs is None:
@@ -377,7 +398,9 @@ def rollout_case(official, device, model, case, episodes, on_episode=None):
             observation_seconds += time.perf_counter() - tick
             observations += int(obs is not None)
             tick = time.perf_counter()
+            heartbeat('action', task=case['task'], ordinal=episode['ordinal'], action=env.take_action_cnt)
             model.step(scoped_env, obs)
+            heartbeat('action_done', task=case['task'], ordinal=episode['ordinal'], action=env.take_action_cnt)
             if scoped_env.step_lim != case['step_limit']:
                 raise ValueError('Policy attempted to change the shared step limit')
             action_seconds += time.perf_counter() - tick
@@ -466,11 +489,13 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX)
             print(json.dumps(summarize(root, manifest), indent=2))
         return
+    heartbeat('runtime_setup', force=True)
     official, device = setup_runtime()
     model = None
     errors = []
     cases = ready_cases(root, manifest['cases'], manifest['episodes'], prepare=True)
     for case in cases:
+        heartbeat('waiting')
         key = case['task'] + '--' + case['phase']
         plan = plans[key]
         for offset in range(0, manifest['episodes'], manifest['chunk_size']):
@@ -501,9 +526,11 @@ def main():
                 def save_episode(ep):
                     record['episodes'].append(ep)
                     write_json(resultpath, record)
+                    heartbeat('episode_saved', force=True, task=case['task'], ordinal=ep['ordinal'])
                 try:
                     with logpath.open('x') as log, contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
                         if model is None:
+                            heartbeat('model_loading', force=True, task=case['task'])
                             model = make_policy(manifest)
                         rollout_case(official, device, model, case, remaining, on_episode=save_episode)
                 except Exception:

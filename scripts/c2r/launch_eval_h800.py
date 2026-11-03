@@ -9,6 +9,7 @@ import time
 import base64
 import inspect
 import uuid
+import signal
 
 
 def retire_terminal_claims(root, states):
@@ -151,6 +152,50 @@ def supervise(registry, cli):
         time.sleep(60)
 
 
+def stalled_workers(children, logs, started, now):
+    """Startup gets 15 minutes; a rollout must advance within five minutes."""
+    active, waiting, failures = [], [], []
+    for child, _, slot in children:
+        code = child.poll()
+        if code is not None:
+            if code:
+                failures.append(dict(slot=slot, exit_code=code))
+            continue
+        path = logs / (slot + '.progress.json')
+        progress = json.loads(path.read_text()) if path.exists() else dict(time=started, stage='startup')
+        age = now - progress['time']
+        if progress['stage'] == 'waiting':
+            waiting.append((slot, age, progress))
+            continue
+        active.append(slot)
+        limit = 900 if progress['stage'] in ('startup', 'runtime_setup', 'model_loading') else 300
+        if age > limit:
+            failures.append(dict(slot=slot, stalled_seconds=age, progress=progress))
+    if waiting and not active and min(v[1] for v in waiting) > 300:
+        failures.append(dict(reason='No runnable work or live worker progress', waiting=waiting))
+    return failures
+
+
+def stop_workers(children):
+    # Workers own process groups, including any compiler descendants.
+    for child, _, _ in children:
+        if child.poll() is None:
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+    deadline = time.monotonic() + 10
+    for child, _, _ in children:
+        try:
+            child.wait(timeout=max(0., deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.wait(timeout=10)
+
+
 def main():
     if '--supervise' in sys.argv:
         parser = argparse.ArgumentParser()
@@ -185,30 +230,39 @@ def main():
                WANDB_MODE='disabled', DIFFSYNTH_SKIP_DOWNLOAD='true')
     started = time.time()
     children = []
-    for gpu in range(args.gpus):
-        for worker in range(args.workers_per_gpu):
-            slot = f'{gpu}-{worker}'
-            cache = logs / slot
-            for name in ('kernels', 'matplotlib'):
-                (cache / name).mkdir(parents=True, exist_ok=True)
-            child_env = dict(env, CUDA_VISIBLE_DEVICES=str(gpu),
-                             PYTORCH_KERNEL_CACHE_PATH=str(cache / 'kernels'),
-                             MPLCONFIGDIR=str(cache / 'matplotlib'),
-                             TORCHINDUCTOR_CACHE_DIR=str(logs / slot / 'inductor'),
-                             TRITON_CACHE_DIR=str(logs / slot / 'triton'))
-            log = (logs / (slot + '.log')).open('x')
-            cmd = [str(py), str(repo / 'scripts/c2r/evaluate.py'), args.mode, '--root', str(args.root)]
-            child = subprocess.Popen(cmd, env=child_env, cwd=repo, stdout=log, stderr=subprocess.STDOUT)
-            children.append((child, log, slot))
-    while any(child.poll() is None for child, _, _ in children):
-        probe = subprocess.run(['nvidia-smi', '--query-gpu=index,memory.used,utilization.gpu',
-                                '--format=csv,noheader,nounits'], capture_output=True, text=True)
-        with (logs / 'gpu.jsonl').open('a') as stream:
-            stream.write(json.dumps(dict(time=time.time(), gpu=probe.stdout.strip())) + '\n')
-        time.sleep(10)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    try:
+        for gpu in range(args.gpus):
+            for worker in range(args.workers_per_gpu):
+                slot = f'{gpu}-{worker}'
+                cache = logs / slot
+                for name in ('kernels', 'matplotlib'):
+                    (cache / name).mkdir(parents=True, exist_ok=True)
+                child_env = dict(env, CUDA_VISIBLE_DEVICES=str(gpu),
+                                 C2R_PROGRESS_PATH=str(logs / (slot + '.progress.json')),
+                                 PYTORCH_KERNEL_CACHE_PATH=str(cache / 'kernels'),
+                                 MPLCONFIGDIR=str(cache / 'matplotlib'),
+                                 TORCHINDUCTOR_CACHE_DIR=str(logs / slot / 'inductor'),
+                                 TRITON_CACHE_DIR=str(logs / slot / 'triton'))
+                log = (logs / (slot + '.log')).open('x')
+                cmd = [str(py), str(repo / 'scripts/c2r/evaluate.py'), args.mode, '--root', str(args.root)]
+                child = subprocess.Popen(cmd, env=child_env, cwd=repo, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                children.append((child, log, slot))
+        while any(child.poll() is None for child, _, _ in children):
+            failures = stalled_workers(children, logs, started, time.time())
+            if failures:
+                (logs / 'watchdog-failure.json').write_text(json.dumps(dict(time=time.time(), failures=failures), indent=2))
+                raise RuntimeError('Evaluation stopped after missing progress: ' + str(failures))
+            probe = subprocess.run(['nvidia-smi', '--query-gpu=index,memory.used,utilization.gpu',
+                                    '--format=csv,noheader,nounits'], capture_output=True, text=True, timeout=20)
+            with (logs / 'gpu.jsonl').open('a') as stream:
+                stream.write(json.dumps(dict(time=time.time(), gpu=probe.stdout.strip())) + '\n')
+            time.sleep(10)
+    finally:
+        stop_workers(children)
+        for _, log, _ in children:
+            log.close()
     codes = {slot: child.wait() for child, _, slot in children}
-    for _, log, _ in children:
-        log.close()
     (logs / 'exit.json').write_text(json.dumps(dict(codes=codes, seconds=time.time()-started, source_sha=sha)))
     if args.mode in ('rollout', 'pipeline'):
         with (logs / 'summary.log').open('x') as log:

@@ -22,6 +22,58 @@ launcher_spec.loader.exec_module(launcher)
 
 
 class EvaluationTests(unittest.TestCase):
+    def test_watchdog_allows_slow_start_but_bounds_it(self):
+        child = SimpleNamespace(poll=lambda: None)
+        self.assertEqual(launcher.stalled_workers([(child, None, '0')], self.root, 0, 899), [])
+        self.assertEqual(len(launcher.stalled_workers([(child, None, '0')], self.root, 0, 901)), 1)
+
+    def test_watchdog_detects_native_hang_even_while_another_worker_advances(self):
+        child = SimpleNamespace(poll=lambda: None)
+        evaluation.write_json(self.root/'0.progress.json', dict(time=10, stage='observation', action=32))
+        evaluation.write_json(self.root/'1.progress.json', dict(time=400, stage='action_done', action=100))
+        found = launcher.stalled_workers([(child, None, '0'), (child, None, '1')], self.root, 0, 401)
+        self.assertEqual([v['slot'] for v in found], ['0'])
+        self.assertEqual(found[0]['progress']['action'], 32)
+
+    def test_watchdog_does_not_confuse_waiters_with_live_slow_episodes(self):
+        child = SimpleNamespace(poll=lambda: None)
+        evaluation.write_json(self.root/'0.progress.json', dict(time=0, stage='waiting'))
+        evaluation.write_json(self.root/'1.progress.json', dict(time=400, stage='action_done'))
+        self.assertEqual(launcher.stalled_workers([(child, None, '0'), (child, None, '1')], self.root, 0, 401), [])
+        found = launcher.stalled_workers([(child, None, '0')], self.root, 0, 401)
+        self.assertEqual(len(found), 1)
+
+    def test_watchdog_stops_on_failed_worker_without_waiting_for_others(self):
+        dead = SimpleNamespace(poll=lambda: 2)
+        self.assertEqual(launcher.stalled_workers([(dead, None, '0')], self.root, 0, 1),
+                         [dict(slot='0', exit_code=2)])
+
+    def test_idle_heartbeat_does_not_hide_no_progress(self):
+        target = self.root/'progress.json'
+        with patch.dict(evaluation.os.environ, C2R_PROGRESS_PATH=str(target)), \
+                patch.object(evaluation, '_progress_at', 0), patch.object(evaluation, '_progress_stage', None), \
+                patch.object(evaluation.time, 'monotonic', side_effect=[10, 20]), \
+                patch.object(evaluation.time, 'time', return_value=10):
+            evaluation.heartbeat('waiting')
+            before = target.read_bytes()
+            evaluation.heartbeat('waiting')
+            self.assertEqual(target.read_bytes(), before)
+
+    @unittest.skipUnless(sys.platform == 'linux', 'POSIX process groups')
+    def test_watchdog_terminates_real_child_and_preserves_partial_result(self):
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'], start_new_session=True)
+        result = self.root/'partial.json'
+        result.write_text('{"episodes":[{"ordinal":3,"success":true}]}')
+        before = result.read_bytes()
+        try:
+            launcher.stop_workers([(child, None, '0')])
+            self.assertIsNotNone(child.poll())
+            self.assertEqual(result.read_bytes(), before)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+
     def test_supervisor_replaces_evicted_fixed_slot_without_expanding_budget(self):
         registry = self.root / 'jobs.json'
         request = self.root / 'fixed.json'
