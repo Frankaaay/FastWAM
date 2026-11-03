@@ -260,8 +260,24 @@ def setup_runtime():
                                      '--', 'third_party/RoboTwin'], text=True).strip()
     if tree != shared_plan_lock()['robotwin_git_tree'] or dirty:
         raise ValueError('RoboTwin environment differs from the frozen FastWAM baseline')
-    import sapien
     import torch
+    # Import Torch before the native interposer; early LD_PRELOAD breaks its
+    # checkpoint reader. Load before SAPIEN binds the denoiser's virtual table.
+    if library := os.environ.get('C2R_OIDN_SYNC_LIBRARY'):
+        import ctypes
+        import importlib.util
+        sapien_dir = Path(importlib.util.find_spec('sapien').origin).parent
+        vulkan = sapien_dir.parent / 'sapien.libs/libsvulkan2.so'
+        with vulkan.open('rb') as stream:
+            digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+        if digest != '685c7e733b1385bf2c5385ddac0c1ff43b62692dd39bbefb0e14a9a0aec561dc':
+            raise RuntimeError('OIDN synchronization repair requires the pinned SAPIEN ABI')
+        oidn = sapien_dir / 'oidn_library'
+        ctypes.CDLL(str(oidn / 'libOpenImageDenoise_core.so.2.0.1'), ctypes.RTLD_LOCAL)
+        ctypes.CDLL(str(oidn / 'libOpenImageDenoise.so.2.0.1'), ctypes.RTLD_LOCAL)
+        ctypes.CDLL(str(Path(library).resolve(strict=True)), ctypes.RTLD_GLOBAL)
+        print('OIDN_HOST_SYNC_LOADED', library, flush=True)
+    import sapien
     torch.set_num_threads(1)
     torch.backends.cudnn.enabled = True
     torch.backends.cudnn.allow_tf32 = False
