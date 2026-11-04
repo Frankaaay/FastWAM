@@ -12,3 +12,6 @@
 - 请求：本机 `C:/Users/Frank/AppData/Local/AliyunCLI/h800-requests/fastwam-eval-speed-20261104-profile01.json`。远端 clean clone `/mnt/workdir/frank/projects/fastwam-eval-speed-20261104`；复用既有资产和 task_config 符号链接，未更改源资产。
 - 命令：既有 `fastwam-stereotok-eval-cu128-20261009/bin/python -u tests/h800_fastwam_eval_speed.py /mnt/workdir/frank/runs/fastwam-eval-speed-20261104/profile01`。日志 `/mnt/workdir/frank/runs/fastwam-eval-speed-20261104/profile01.log`，结果同名目录。尚无本轮速度提升证据。
 - profile01 持续初始化且只有 SAPIEN 提示，没有 episode；为定位停滞，停止本次诊断，给实验脚本添加标准 logging 和每 120 秒栈转储，再用同样的单卡配置重试。未改变生产推理逻辑。
+- profile02 `dlc1eclukr82122d`，SHA `c9027d5f03263d35274b38dc48945ecc43b73156`。模型组件加载 112.79 秒，栈定位 StereoTok checkpoint 读取/校验。Clean click_bell 60 动作成功；Random 静态 54 动作成功。profile 含首次编译和额外开销，不作为加速比分母。
+- 观察到 Random 静态场景初始化中的 40 次 `gc.collect` 合计约 26.9 秒；推理仅 0.965 秒。先验证 `gc.freeze()` 将长期驻留模型对象移出重复 GC 遍历的候选方案，保留每次原生 GC 调用，新场景对象仍正常回收；配对结束 unfreeze。仅实验脚本实现，不修改冻结 RoboTwin 树。
+- 配对新增模型输入/输出哈希、目标函数定时、CUDA 分配内存记录，恢复相同 Torch/环境 RNG，先做同进程 warmup；最终速度以无 cProfile 的 baseline/candidate 为准。

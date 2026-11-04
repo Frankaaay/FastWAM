@@ -2,6 +2,7 @@
 import argparse
 import cProfile
 import faulthandler
+import gc
 import hashlib
 import importlib.util
 import json
@@ -21,6 +22,10 @@ MANIFEST = BASE/'runs/fastwam-robotwin-stage3-u8000-mono-clean-eval-h100-2026110
 
 def digest(value):
     import numpy as np
+    if hasattr(value, 'detach'):
+        import torch
+        a = value.detach().contiguous().cpu()
+        return hashlib.sha256(str((tuple(a.shape), str(a.dtype))).encode()+a.view(torch.uint8).numpy().tobytes()).hexdigest()
     if isinstance(value, np.ndarray):
         return hashlib.sha256(str((value.shape, str(value.dtype))).encode()+value.tobytes()).hexdigest()
     if isinstance(value, dict):
@@ -58,9 +63,36 @@ def main(args):
     original_environment = e.environment
     rows = {}
 
+    def timed(name, fn):
+        def call(*a, **kw):
+            start = time.perf_counter()
+            try:
+                return fn(*a, **kw)
+            finally:
+                row = rows['timings'].setdefault(name, [0, 0.])
+                row[0] += 1
+                row[1] += time.perf_counter()-start
+        return call
+
+    infer = policy.model.infer_action
+    def infer_traced(*a, **kw):
+        inputs = digest(kw)
+        result = infer(*a, **kw)
+        rows['inference'].append(dict(inputs=inputs, outputs=digest(result)))
+        return result
+    policy.model.infer_action = infer_traced
+
     def environment(*a):
         env, config = original_environment(*a)
         get_obs, take = env.get_obs, env.take_action
+        setup = env.setup_demo
+        def setup_traced(*a, **kw):
+            result = setup(*a, **kw)
+            for name in ['_entity_qf', 'left_plan_path', 'right_plan_path', 'set_gripper', 'set_arm_joints']:
+                setattr(env.robot, name, timed(name, getattr(env.robot, name)))
+            return result
+        env.setup_demo = setup_traced
+        env._update_render = timed('_update_render', env._update_render)
         def observe():
             start = time.perf_counter()
             value = get_obs()
@@ -82,29 +114,59 @@ def main(args):
     cases = [('clean','click_bell',0), ('randomized','click_bell',0), ('randomized','click_bell',19)]
     if args.long:
         cases = [('clean','open_microwave',99), ('randomized','open_microwave',1)]
-    for phase, task, ordinal in cases:
+    collect = gc.collect
+    for index, (phase, task, ordinal) in enumerate(cases):
         key = f'{phase}-{task}-{ordinal}'
-        rows = dict(observations=[], actions=[])
         case = next(c for c in lock['cases'] if c['phase']==phase and c['task']==task)
         episode = plans[task+'--'+phase]['episodes'][ordinal]
-        profile = cProfile.Profile()
-        torch.cuda.synchronize()
-        if args.variant == 'profile': profile.enable()
-        result = e.rollout_case(official, device, policy, case, [episode])[0]
-        if args.variant == 'profile':
-            profile.disable()
-            profile.dump_stats(str(root/(key+'.prof')))
-            with (root/(key+'-profile.txt')).open('w') as f:
-                pstats.Stats(profile, stream=f).sort_stats('cumulative').print_stats(65)
-        (root/(key+'.json')).write_text(json.dumps(dict(result=result, **rows)))
-        print('COMPLETE', key, json.dumps(result), flush=True)
+        rng = (torch.get_rng_state(), torch.cuda.get_rng_state(), random.getstate(), np.random.get_state())
+        variants = ['warmup', 'baseline', 'candidate'] if index == 0 else ['baseline','candidate']
+        if args.variant != 'paired': variants = [args.variant]
+        reference = None
+        for variant in variants:
+            rows = dict(observations=[], actions=[], inference=[], timings={})
+            torch.set_rng_state(rng[0]); torch.cuda.set_rng_state(rng[1])
+            random.setstate(rng[2]); np.random.set_state(rng[3])
+            policy._prompt = policy._context = None
+            gc.unfreeze()
+            collect()
+            if variant == 'candidate': gc.freeze()
+            gc.collect = timed('gc.collect', collect)
+            profile = cProfile.Profile()
+            torch.cuda.synchronize()
+            try:
+                if variant == 'profile': profile.enable()
+                result = e.rollout_case(official, device, policy, case, [episode])[0]
+            finally:
+                if variant == 'profile': profile.disable()
+                gc.collect = collect
+                gc.unfreeze()
+            if variant == 'profile':
+                profile.dump_stats(str(root/(key+'.prof')))
+                with (root/(key+'-profile.txt')).open('w') as f:
+                    pstats.Stats(profile, stream=f).sort_stats('cumulative').print_stats(65)
+            record = dict(result=result, memory_allocated=torch.cuda.memory_allocated(), **rows)
+            (root/(key+'-'+variant+'.json')).write_text(json.dumps(record))
+            print('COMPLETE', key, variant, json.dumps(result), json.dumps(rows['timings']), flush=True)
+            if variant == 'baseline': reference = record
+            if variant == 'candidate':
+                for field in ['seed','instruction','success','actions','observations','initial_scene_sha256','initial_observation_sha256']:
+                    assert reference['result'][field] == result[field], field
+                for field in ['actions','observations','inference']:
+                    a, b = [[{k:v for k,v in row.items() if k != 'seconds'} for row in rec[field]] for rec in [reference, record]]
+                    assert a == b, field
+                summary = dict(passed=True, case=key, baseline=reference['result'], candidate=result,
+                               baseline_timings=reference['timings'], candidate_timings=rows['timings'],
+                               speedup=reference['result']['seconds']/result['seconds'])
+                (root/(key+'-comparison.json')).write_text(json.dumps(summary, indent=2))
+                print('PARITY_PASS', json.dumps(summary), flush=True)
     faulthandler.cancel_dump_traceback_later()
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('output', type=Path)
-    parser.add_argument('--variant', choices=['profile','baseline'], default='profile')
+    parser.add_argument('--variant', choices=['profile','baseline','paired'], default='profile')
     parser.add_argument('--long', action='store_true')
     args = parser.parse_args()
     main(args)
