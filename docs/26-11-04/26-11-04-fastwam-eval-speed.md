@@ -8,4 +8,7 @@
 - 初步代码事实：已有动作队列和提示词缓存。仿真控制每个物理步内多个 setter 重复调用两臂被动力计算；是否重要及可优化须通过 profiling 和逐帧精确验证。
 - 诊断入口 `tests/h800_fastwam_eval_speed.py`，复用冻结 evaluator，记录完整观测哈希、动作、双臂 qpos/qvel、环境 RNG，并输出 cProfile；profile 耗时不当作最终加速比。
 - 样本：Clean click_bell 0、Random click_bell 0 和 19；后续长轨迹 Clean open_microwave 99、Random open_microwave 1。
-- 当前尚未提交 GPU 作业，尚无本轮速度提升证据。
+- 首轮 profile 作业 `dlchbwrgrolc42p3`，代码 SHA `3489570d8c5aaad3424e2393407f0ca6057096de`，已 Running 且日志出现 SAPIEN 初始化。单 GPU / 12 CPU / 128 GiB / 32 GiB SHM，最长 180 分钟。
+- 请求：本机 `C:/Users/Frank/AppData/Local/AliyunCLI/h800-requests/fastwam-eval-speed-20261104-profile01.json`。远端 clean clone `/mnt/workdir/frank/projects/fastwam-eval-speed-20261104`；复用既有资产和 task_config 符号链接，未更改源资产。
+- 命令：既有 `fastwam-stereotok-eval-cu128-20261009/bin/python -u tests/h800_fastwam_eval_speed.py /mnt/workdir/frank/runs/fastwam-eval-speed-20261104/profile01`。日志 `/mnt/workdir/frank/runs/fastwam-eval-speed-20261104/profile01.log`，结果同名目录。尚无本轮速度提升证据。
+- profile01 持续初始化且只有 SAPIEN 提示，没有 episode；为定位停滞，停止本次诊断，给实验脚本添加标准 logging 和每 120 秒栈转储，再用同样的单卡配置重试。未改变生产推理逻辑。

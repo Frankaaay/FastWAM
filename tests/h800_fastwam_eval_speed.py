@@ -1,9 +1,11 @@
 """Single-GPU frozen FastWAM rollout profiling and exact trace comparison."""
 import argparse
 import cProfile
+import faulthandler
 import hashlib
 import importlib.util
 import json
+import logging
 import os
 from pathlib import Path
 import pstats
@@ -31,6 +33,8 @@ def digest(value):
 
 
 def main(args):
+    faulthandler.dump_traceback_later(120, repeat=True)
+    logging.basicConfig(level=logging.INFO)
     import numpy as np
     spec = importlib.util.spec_from_file_location('frozen_eval', REPO/'scripts/c2r/evaluate.py')
     e = importlib.util.module_from_spec(spec)
@@ -46,7 +50,9 @@ def main(args):
     contract = dict(gpu=gpu, checkpoint=manifest['checkpoint'], training_root=manifest['training_root'],
                     sha=subprocess.check_output(['git','-C',str(REPO),'rev-parse','HEAD'],text=True).strip(), variant=args.variant)
     (root/'contract.json').write_text(json.dumps(contract, indent=2))
+    print('MODEL_LOADING', flush=True)
     policy = C2RPolicy(manifest['checkpoint'], manifest['training_root'])
+    print('MODEL_READY', flush=True)
     lock = e.shared_plan_lock()
     plans = e.load_shared_plans(dict(episodes=100, cases=lock['cases']))
     original_environment = e.environment
@@ -92,6 +98,7 @@ def main(args):
                 pstats.Stats(profile, stream=f).sort_stats('cumulative').print_stats(65)
         (root/(key+'.json')).write_text(json.dumps(dict(result=result, **rows)))
         print('COMPLETE', key, json.dumps(result), flush=True)
+    faulthandler.cancel_dump_traceback_later()
 
 
 if __name__ == '__main__':
