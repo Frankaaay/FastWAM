@@ -38,6 +38,7 @@ def digest(value):
 
 
 def main(args):
+    faulthandler.enable()
     faulthandler.dump_traceback_later(120, repeat=True)
     logging.basicConfig(level=logging.INFO)
     import numpy as np
@@ -58,6 +59,7 @@ def main(args):
     print('MODEL_LOADING', flush=True)
     policy = C2RPolicy(manifest['checkpoint'], manifest['training_root'])
     print('MODEL_READY', flush=True)
+    faulthandler.cancel_dump_traceback_later()
     lock = e.shared_plan_lock()
     plans = e.load_shared_plans(dict(episodes=100, cases=lock['cases']))
     original_environment = e.environment
