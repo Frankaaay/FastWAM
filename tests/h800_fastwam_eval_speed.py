@@ -1,6 +1,7 @@
 """Single-GPU frozen FastWAM rollout profiling and exact trace comparison."""
 import argparse
 import cProfile
+import contextlib
 import faulthandler
 import gc
 import hashlib
@@ -115,7 +116,7 @@ def main(args):
     e.environment = environment
     cases = [('clean','click_bell',0), ('randomized','click_bell',0), ('randomized','click_bell',19)]
     if args.long:
-        cases = [('clean','open_microwave',99), ('randomized','open_microwave',1)]
+        cases = [cases[0], ('clean','open_microwave',99), ('randomized','open_microwave',1)]
     collect = gc.collect
     for index, (phase, task, ordinal) in enumerate(cases):
         key = f'{phase}-{task}-{ordinal}'
@@ -132,13 +133,15 @@ def main(args):
             policy._prompt = policy._context = None
             gc.unfreeze()
             collect()
-            if variant == 'candidate': gc.freeze()
             gc.collect = timed('gc.collect', collect)
             profile = cProfile.Profile()
             torch.cuda.synchronize()
+            wall_started = time.perf_counter()
             try:
                 if variant == 'profile': profile.enable()
-                result = e.rollout_case(official, device, policy, case, [episode])[0]
+                scope = e.fastwam_model_gc() if variant == 'candidate' else contextlib.nullcontext()
+                with scope:
+                    result = e.rollout_case(official, device, policy, case, [episode])[0]
             finally:
                 if variant == 'profile': profile.disable()
                 gc.collect = collect
@@ -147,7 +150,8 @@ def main(args):
                 profile.dump_stats(str(root/(key+'.prof')))
                 with (root/(key+'-profile.txt')).open('w') as f:
                     pstats.Stats(profile, stream=f).sort_stats('cumulative').print_stats(65)
-            record = dict(result=result, memory_allocated=torch.cuda.memory_allocated(), **rows)
+            record = dict(result=result, wall_seconds=time.perf_counter()-wall_started,
+                          memory_allocated=torch.cuda.memory_allocated(), **rows)
             (root/(key+'-'+variant+'.json')).write_text(json.dumps(record))
             print('COMPLETE', key, variant, json.dumps(result), json.dumps(rows['timings']), flush=True)
             if variant == 'baseline': reference = record
@@ -158,6 +162,7 @@ def main(args):
                     a, b = [[{k:v for k,v in row.items() if k != 'seconds'} for row in rec[field]] for rec in [reference, record]]
                     assert a == b, field
                 summary = dict(passed=True, case=key, baseline=reference['result'], candidate=result,
+                               wall_seconds=[reference['wall_seconds'], record['wall_seconds']],
                                baseline_timings=reference['timings'], candidate_timings=rows['timings'],
                                speedup=reference['result']['seconds']/result['seconds'])
                 (root/(key+'-comparison.json')).write_text(json.dumps(summary, indent=2))

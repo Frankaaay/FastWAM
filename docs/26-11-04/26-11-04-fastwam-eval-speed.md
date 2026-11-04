@@ -16,3 +16,6 @@
 - 观察到 Random 静态场景初始化中的 40 次 `gc.collect` 合计约 26.9 秒；推理仅 0.965 秒。先验证 `gc.freeze()` 将长期驻留模型对象移出重复 GC 遍历的候选方案，保留每次原生 GC 调用，新场景对象仍正常回收；配对结束 unfreeze。仅实验脚本实现，不修改冻结 RoboTwin 树。
 - 配对新增模型输入/输出哈希、目标函数定时、CUDA 分配内存记录，恢复相同 Torch/环境 RNG，先做同进程 warmup；最终速度以无 cProfile 的 baseline/candidate 为准。
 - profile02 前两例保存完整结果，第三例退出 139，尚不能确定根因；其 cProfile 部分调用计数也有异常。因此后续配对不启用 cProfile，使用显式函数计时，并仅在初始化期间定时转储，保留致命错误栈。失败样本不作为有效性能/一致性证据。
+- paired01 `dlcdq7nrfgh67e6q` / SHA `ce15cc28f05db121bc1386b08dabb6d8a0c1b914`：Clean 60 动作 55.2627 → 27.3928 秒（2.0174x），完整输入/输出、观测、动作、qpos/qvel、环境 RNG 精确一致。40 次 GC 28.477 → 0.392 秒；被动力重复计算仅约 0.476 秒，因此不改仿真控制逻辑。
+- Random 静态 54 动作初步配对也通过：60.1828 → 30.0218 秒。继续验证动态光照和长轨迹。
+- 将同一候选实现为 evaluator 内 `fastwam_model_gc` 作用域，仅 FastWAM 的 rollout chunk 使用；开始 collect/freeze，结束或异常时 unfreeze。新场景循环引用仍可回收。GPU 配对直接调用此生产作用域，同时记录包含开始 GC 和结束清理的完整 wall 秒数；冻结 RoboTwin 树保持不变。

@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import contextlib
+import gc
 import importlib
 import json
 import os
@@ -90,6 +91,17 @@ def make_policy(manifest):
     else:
         raise ValueError('Unknown shared-plan model: ' + kind)
     return SharedPlanPolicy(**manifest['policy'])
+
+
+@contextlib.contextmanager
+def fastwam_model_gc():
+    """Exclude resident model objects from repeated planner graph-capture GC."""
+    gc.collect()
+    gc.freeze()
+    try:
+        yield
+    finally:
+        gc.unfreeze()
 
 
 class EnvironmentRng:
@@ -548,7 +560,9 @@ def main():
                         if model is None:
                             heartbeat('model_loading', force=True, task=case['task'])
                             model = make_policy(manifest)
-                        rollout_case(official, device, model, case, remaining, on_episode=save_episode)
+                        scope = fastwam_model_gc() if manifest['model'] == 'fastwam' else contextlib.nullcontext()
+                        with scope:
+                            rollout_case(official, device, model, case, remaining, on_episode=save_episode)
                 except Exception:
                     record['error'] = traceback.format_exc()
                     errors.append(record['error'])
