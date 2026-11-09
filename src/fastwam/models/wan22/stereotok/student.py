@@ -162,6 +162,20 @@ class GeometryDecoder(nn.Module):
                            first_chunk=first_chunk)
 
 
+class MetricHead(nn.Module):
+    """Stage3 shallow disparity readout, retained for complete export loading."""
+    def __init__(self, patch=16):
+        super().__init__()
+        self.patch = patch
+        self.layers = nn.Sequential(nn.Linear(48, 256), nn.GELU(), nn.Linear(256, patch * patch))
+
+    def forward(self, mean):
+        b, _, k, h, w = mean.shape
+        values = self.layers(mean.permute(0, 2, 3, 4, 1))
+        return values.reshape(b, k, h, w, self.patch, self.patch).permute(
+            0, 1, 2, 4, 3, 5).reshape(b, 1, k, h * self.patch, w * self.patch)
+
+
 def make_vae():
     from .vae2_2 import WanVAE_
     with torch.device("meta"):
