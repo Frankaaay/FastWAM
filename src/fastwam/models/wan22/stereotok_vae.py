@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from .stereotok.checkpoints import STAGE3_U8000_SHA256, load_student
+from .stereotok.checkpoints import LEGACY_STAGE3_U8000_SHA256, STAGE3_U8000_SHA256, load_student
 from .stereotok.vae2_2 import latent_scale
 
 
@@ -30,6 +30,9 @@ class StereoTokVAE(nn.Module):
                             else "4be840f97694e976714d549a4db2a53705384626"),
                         "inference_adapter_source": "783b602d128a43814af32285e60a60f270ec2703",
                         "encode": "default-frozen-native-fp16", "input_mode": input_mode}
+        if digest.hexdigest() == LEGACY_STAGE3_U8000_SHA256:
+            self.binding.update(format="stereotok-wan-training-v1", stage=3, generator_updates=8000)
+            self.binding.pop("stereotok_source")
         self.model = load_student(str(path)).to(device=device, dtype=torch.float32)
         self.train(False)
 

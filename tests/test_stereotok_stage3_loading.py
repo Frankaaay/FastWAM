@@ -31,6 +31,7 @@ class Stage3Tests(unittest.TestCase):
         loader=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='load_student')
         scope.update(torch=torch,Path=Path,hashlib=hashlib,make_vae=make_vae,
             EXPORT_FORMAT='stereotok-student-v3',SELECTED_SHA256='old',DECODER_ARCHITECTURE={},
+            LEGACY_STAGE3_U8000_SHA256='legacy',
             GeometryDecoder=lambda decoder:nn.Linear(2,2),LAS2GuidedFusion=lambda *a,**kw:nn.Linear(2,2))
         exec(compile(ast.Module(body=[loader],type_ignores=[]),'checkpoints.py','exec'),scope)
         with tempfile.TemporaryDirectory() as tmp:
@@ -46,6 +47,41 @@ class Stage3Tests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'stage'):scope['load_student'](str(path))
             payload['stage']=3;payload['state_dict'].pop('metric_head.layers.0.bias');save()
             with self.assertRaises(RuntimeError):scope['load_student'](str(path))
+
+    def test_legacy_stage3_keeps_exact_inference_weights_and_rejects_bad_contract(self):
+        def make_vae():
+            model=nn.Module();model.encoder=nn.Linear(2,2);model.decoder=nn.Linear(2,2)
+            return model
+        original=make_vae();original.fusion=nn.Linear(2,2)
+        original.decoder.geometry_branch=nn.Linear(2,2)
+        payload={'format':'stereotok-wan-training-v1','architecture':'stereo-v3',
+            'generator_updates':8000,'config':{'stage':3,'geometry':{
+                'encoder_geometry':{'mode':'early'},'fusion_repeats':[0,0],'max_disparity':112}},
+            'state_dict':{'vae.'+k:v for k,v in original.state_dict().items()}}
+        payload['state_dict'].update({'vae.semantic_head.weight':torch.ones(2),
+            'vae.latent_geometry_head.weight':torch.ones(2),'discriminator.weight':torch.ones(2)})
+        tree=ast.parse((ROOT/'src/fastwam/models/wan22/stereotok/checkpoints.py').read_text())
+        loader=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='load_student')
+        scope=dict(torch=torch,Path=Path,hashlib=hashlib,make_vae=make_vae,
+            EXPORT_FORMAT='stereotok-student-v3',SELECTED_SHA256='old',STAGE3_U8000_SHA256='clean',
+            DECODER_ARCHITECTURE={},GeometryDecoder=lambda decoder:nn.Linear(2,2),
+            LAS2GuidedFusion=lambda *a,**kw:nn.Linear(2,2))
+        exec(compile(ast.Module(body=[loader],type_ignores=[]),'checkpoints.py','exec'),scope)
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'legacy.ckpt'
+            def save():
+                torch.save(payload,path)
+                scope['LEGACY_STAGE3_U8000_SHA256']=hashlib.sha256(path.read_bytes()).hexdigest()
+            save();loaded=scope['load_student'](str(path))
+            self.assertEqual(set(loaded.state_dict()),set(original.state_dict()))
+            for k,v in original.state_dict().items():self.assertTrue(torch.equal(v,loaded.state_dict()[k]),k)
+            self.assertFalse(any(p.requires_grad for p in loaded.parameters()))
+            payload['generator_updates']=7999;save()
+            with self.assertRaisesRegex(ValueError,'8000'):scope['load_student'](str(path))
+            payload['generator_updates']=8000;payload['state_dict'].pop('vae.encoder.bias');save()
+            with self.assertRaises(RuntimeError):scope['load_student'](str(path))
+            scope['LEGACY_STAGE3_U8000_SHA256']='not-admitted'
+            with self.assertRaisesRegex(ValueError,'SHA256'):scope['load_student'](str(path))
 
 
 if __name__=='__main__':unittest.main()
