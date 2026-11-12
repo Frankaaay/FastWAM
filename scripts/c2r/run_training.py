@@ -103,8 +103,9 @@ def main():
     assert trainer.accelerator.num_processes in (4,8)
     assert trainer.batch_size*trainer.accelerator.num_processes*trainer.gradient_accumulation_steps==256
     if rank==0:
-        if trainer.wandb_run is None or trainer.wandb_run.settings.mode!='online':
-            raise RuntimeError('W&B online initialization required')
+        expected_wandb_mode = str(cfg.wandb.mode)
+        if expected_wandb_mode not in ('online', 'offline') or trainer.wandb_run is None or trainer.wandb_run.settings.mode != expected_wandb_mode:
+            raise RuntimeError(f'W&B {expected_wandb_mode} initialization required')
         (out/'run.json').write_text(json.dumps(dict(variant=args.variant,world_size=trainer.accelerator.num_processes,global_batch=256,
             total_steps=report['total_steps'],stop_step=cfg.max_steps,save_every=cfg.save_every,
             wandb_id=trainer.wandb_run.id,wandb_url=trainer.wandb_run.url,
