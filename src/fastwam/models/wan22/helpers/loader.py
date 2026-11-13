@@ -150,6 +150,7 @@ def load_wan22_ti2v_5b_components(
     load_text_encoder: bool = True,
     stereotok_checkpoint: str | None = None,
     stereotok_input_mode: str = "stereo",
+    wan_bino: bool = False,
 ):
     logger.info("Loading Wan2.2-TI2V-5B components...")
     start = time.time()
@@ -212,6 +213,9 @@ def load_wan22_ti2v_5b_components(
         )
     if stereotok_checkpoint is None:
         vae = _load_registered_model(vae_config.path, "wan_video_vae", torch_dtype=torch_dtype, device=device)
+        if wan_bino:
+            from ..wan_bino_vae import WanBinoVAE
+            vae = WanBinoVAE(vae)
     else:
         from ..stereotok_vae import StereoTokVAE
         vae = StereoTokVAE(stereotok_checkpoint, device, input_mode=stereotok_input_mode)

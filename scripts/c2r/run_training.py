@@ -16,7 +16,7 @@ from fastwam_c2r.training import C2RTrainer
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--config',required=True)
-    parser.add_argument('--variant',choices=['wan','stereotok'],required=True)
+    parser.add_argument('--variant',choices=['wan','stereotok','wan-bino'],required=True)
     parser.add_argument('--initialization',required=True,help='Shared proprio initialization published by the Wan run')
     parser.add_argument('--steps',type=int,help='Smoke-only stop limit; retains the full five-epoch LR schedule')
     parser.add_argument('--resume')
@@ -35,7 +35,9 @@ def main():
     cfg.max_steps=report['total_steps'] if args.steps is None else args.steps
     cfg.save_every=2500
     cfg.resume=args.resume
-    cfg.c2r.dataset.stereo=args.variant=='stereotok' and args.input_mode=='stereo'
+    cfg.c2r.dataset.stereo=(args.variant=='stereotok' and args.input_mode=='stereo') or args.variant=='wan-bino'
+    if args.variant=='wan-bino':
+        cfg.model.wan_bino=True
     if args.variant=='stereotok':
         cfg.model.stereotok_checkpoint=os.environ['STEREOTOK_STUDENT_CKPT']
         cfg.model.stereotok_input_mode=args.input_mode
@@ -70,7 +72,7 @@ def main():
     heads = {'proprio': model.proprio_encoder,
              'action_encoder': model.action_expert.action_encoder,
              'action_head': model.action_expert.head}
-    if args.variant=='stereotok':
+    if args.variant in ('stereotok','wan-bino'):
         payload=torch.load(reference,map_location='cpu',weights_only=True)
         if payload['contract']!=contract: raise ValueError('Initialization contract mismatch')
         for name, module in heads.items():
@@ -94,7 +96,7 @@ def main():
         else:
             reference.parent.mkdir(parents=True,exist_ok=True)
             torch.save(payload,reference)
-    if args.variant=='stereotok' and payload['fingerprints']!=fingerprints:
+    if args.variant in ('stereotok','wan-bino') and payload['fingerprints']!=fingerprints:
         raise ValueError('Trainable initialization differs between tokenizers')
     (out/f'initialization-rank{rank}.json').write_text(json.dumps(dict(contract=contract,fingerprints=fingerprints,audit=audit),indent=2)+'\n')
     dataset=C2RDataset(**OmegaConf.to_container(cfg.c2r.dataset,resolve=True))

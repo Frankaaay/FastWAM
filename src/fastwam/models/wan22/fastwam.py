@@ -117,6 +117,7 @@ class FastWAM(torch.nn.Module):
         compile_training_denoise: bool = False,
         stereotok_checkpoint: str | None = None,
         stereotok_input_mode: str = "stereo",
+        wan_bino: bool = False,
     ):
         if video_dit_config is None:
             raise ValueError("`video_dit_config` is required for FastWAM.from_wan22_pretrained().")
@@ -135,6 +136,7 @@ class FastWAM(torch.nn.Module):
             load_text_encoder=load_text_encoder,
             stereotok_checkpoint=stereotok_checkpoint,
             stereotok_input_mode=stereotok_input_mode,
+            wan_bino=wan_bino,
         )
 
         video_expert = components.dit
@@ -862,7 +864,7 @@ class FastWAM(torch.nn.Module):
 
         latent_t = (num_video_frames - 1) // self.vae.temporal_downsample_factor + 1
         latent_h = height // self.vae.upsampling_factor
-        latent_w = width // self.vae.upsampling_factor
+        latent_w = width // self.vae.upsampling_factor * getattr(self.vae, "width_factor", 1)
 
         video_generator = None if seed is None else torch.Generator(device=rand_device).manual_seed(seed)
         action_generator = None if seed is None else torch.Generator(device=rand_device).manual_seed(seed)

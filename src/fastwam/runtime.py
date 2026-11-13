@@ -93,6 +93,7 @@ def create_fastwam(
     device: str = "cuda",
     stereotok_checkpoint: str | None = None,
     stereotok_input_mode: str = "stereo",
+    wan_bino: bool = False,
 ):
     from .models.wan22.fastwam import FastWAM
 
@@ -161,6 +162,7 @@ def create_fastwam(
         compile_training_denoise=bool(compile_training_denoise),
         stereotok_checkpoint=stereotok_checkpoint,
         stereotok_input_mode=stereotok_input_mode,
+        wan_bino=bool(wan_bino),
     )
 
 
