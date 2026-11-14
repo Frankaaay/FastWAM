@@ -11,6 +11,8 @@ from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import ast
+import gc
+import weakref
 
 spec = importlib.util.spec_from_file_location('evaluation', Path(__file__).resolve().parents[1] / 'scripts/c2r/evaluate.py')
 evaluation = importlib.util.module_from_spec(spec)
@@ -22,6 +24,30 @@ launcher_spec.loader.exec_module(launcher)
 
 
 class EvaluationTests(unittest.TestCase):
+    def test_fastwam_gc_keeps_new_scene_cycles_collectible_and_restores_on_error(self):
+        class Node:
+            pass
+        resident = Node()
+        resident.cycle = resident
+        resident_ref = weakref.ref(resident)
+        enabled = gc.isenabled()
+        with self.assertRaisesRegex(RuntimeError, 'rollout failed'):
+            with evaluation.fastwam_model_gc():
+                self.assertGreater(gc.get_freeze_count(), 0)
+                scene = Node()
+                scene.cycle = scene
+                scene_ref = weakref.ref(scene)
+                del scene
+                gc.collect()
+                self.assertIsNone(scene_ref())
+                self.assertIsNotNone(resident_ref())
+                raise RuntimeError('rollout failed')
+        self.assertEqual(gc.get_freeze_count(), 0)
+        self.assertEqual(gc.isenabled(), enabled)
+        del resident
+        gc.collect()
+        self.assertIsNone(resident_ref())
+
     def test_watchdog_allows_slow_start_but_bounds_it(self):
         child = SimpleNamespace(poll=lambda: None)
         self.assertEqual(launcher.stalled_workers([(child, None, '0')], self.root, 0, 899), [])
