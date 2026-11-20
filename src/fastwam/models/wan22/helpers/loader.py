@@ -151,6 +151,7 @@ def load_wan22_ti2v_5b_components(
     stereotok_checkpoint: str | None = None,
     stereotok_input_mode: str = "stereo",
     wan_bino: bool = False,
+    wan_depth_matcher: str | None = None,
 ):
     logger.info("Loading Wan2.2-TI2V-5B components...")
     start = time.time()
@@ -213,9 +214,14 @@ def load_wan22_ti2v_5b_components(
         )
     if stereotok_checkpoint is None:
         vae = _load_registered_model(vae_config.path, "wan_video_vae", torch_dtype=torch_dtype, device=device)
+        if wan_bino and wan_depth_matcher is not None:
+            raise ValueError("Choose either the Wan-LR or the explicit-depth baseline")
         if wan_bino:
             from ..wan_bino_vae import WanBinoVAE
             vae = WanBinoVAE(vae)
+        if wan_depth_matcher is not None:
+            from ..wan_depth_vae import WanDepthVAE
+            vae = WanDepthVAE(vae, wan_depth_matcher, device)
     else:
         from ..stereotok_vae import StereoTokVAE
         vae = StereoTokVAE(stereotok_checkpoint, device, input_mode=stereotok_input_mode)

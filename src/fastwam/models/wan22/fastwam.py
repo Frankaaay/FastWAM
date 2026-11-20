@@ -118,6 +118,7 @@ class FastWAM(torch.nn.Module):
         stereotok_checkpoint: str | None = None,
         stereotok_input_mode: str = "stereo",
         wan_bino: bool = False,
+        wan_depth_matcher: str | None = None,
     ):
         if video_dit_config is None:
             raise ValueError("`video_dit_config` is required for FastWAM.from_wan22_pretrained().")
@@ -137,6 +138,7 @@ class FastWAM(torch.nn.Module):
             stereotok_checkpoint=stereotok_checkpoint,
             stereotok_input_mode=stereotok_input_mode,
             wan_bino=wan_bino,
+            wan_depth_matcher=wan_depth_matcher,
         )
 
         video_expert = components.dit
