@@ -119,6 +119,7 @@ class FastWAM(torch.nn.Module):
         stereotok_input_mode: str = "stereo",
         wan_bino: bool = False,
         wan_depth_matcher: str | None = None,
+        wan_stereo_xattn: bool = False,
     ):
         if video_dit_config is None:
             raise ValueError("`video_dit_config` is required for FastWAM.from_wan22_pretrained().")
@@ -139,6 +140,7 @@ class FastWAM(torch.nn.Module):
             stereotok_input_mode=stereotok_input_mode,
             wan_bino=wan_bino,
             wan_depth_matcher=wan_depth_matcher,
+            wan_stereo_xattn=wan_stereo_xattn,
         )
 
         video_expert = components.dit
@@ -160,6 +162,13 @@ class FastWAM(torch.nn.Module):
             mixtures={"video": video_expert, "action": action_expert},
             mot_checkpoint_mixed_attn=mot_checkpoint_mixed_attn,
         )
+        if wan_stereo_xattn:
+            from .stereo_xattn import StereoCrossAttention
+            # Trained with the policy (it lives under `mot`, the trainable/saved module); isolated RNG keeps
+            # the shared head initialization identical across tokenizer variants.
+            with torch.random.fork_rng(devices=[]):
+                torch.manual_seed(20261121)
+                mot.stereo_fusion = StereoCrossAttention().to(device=device, dtype=torch_dtype)
 
         model = cls(
             video_expert=video_expert,
@@ -276,6 +285,9 @@ class FastWAM(torch.nn.Module):
                 raise ValueError("StereoTok requires a matching right-eye mosaic")
             left = input_image.unsqueeze(0) if input_image.ndim == 3 else input_image
             right = input_image_right.unsqueeze(0) if input_image_right is not None and input_image_right.ndim == 3 else input_image_right
+            if getattr(self.vae, "stereo_fusion_input", False):
+                zl, zr = self.vae.encode_pair(left.unsqueeze(2), self.device, right_videos=right.unsqueeze(2))
+                return self.mot.stereo_fusion(zl.to(self.torch_dtype), zr.to(self.torch_dtype))
             return self._encode_video_latents(left.unsqueeze(2), tiled=tiled, right_video=right.unsqueeze(2) if right is not None else None)
         if input_image.ndim == 3:
             input_image = input_image.unsqueeze(0)
@@ -354,7 +366,15 @@ class FastWAM(torch.nn.Module):
         
         codec_dtype = torch.float32 if getattr(self.vae, "binding", None) is not None else self.torch_dtype
         input_video = video.to(device=self.device, dtype=codec_dtype, non_blocking=True)
-        input_latents = self._encode_video_latents(input_video, tiled=tiled, right_video=sample.get("video_right"))
+        right_first = None
+        if getattr(self.vae, "stereo_fusion_input", False):
+            right_video = sample.get("video_right")
+            input_latents, right_first = self.vae.encode_pair(
+                input_video, self.device,
+                right_videos=None if right_video is None else right_video.to(device=self.device, dtype=codec_dtype))
+            input_latents, right_first = input_latents.to(self.torch_dtype), right_first.to(self.torch_dtype)
+        else:
+            input_latents = self._encode_video_latents(input_video, tiled=tiled, right_video=sample.get("video_right"))
         context = sample.get("context")
         context_mask = sample.get("context_mask")
         if context is None and context_mask is None:
@@ -369,6 +389,8 @@ class FastWAM(torch.nn.Module):
         fuse_flag = False
         if getattr(self.video_expert, "fuse_vae_embedding_in_latents", False):
             first_frame_latents = input_latents[:, :, 0:1]
+            if right_first is not None:
+                first_frame_latents = self.mot.stereo_fusion(first_frame_latents, right_first)
             fuse_flag = True
 
         if context.ndim != 3 or context_mask.ndim != 2:
