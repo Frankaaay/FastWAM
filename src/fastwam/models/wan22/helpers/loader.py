@@ -153,6 +153,7 @@ def load_wan22_ti2v_5b_components(
     wan_bino: bool = False,
     wan_depth_matcher: str | None = None,
     wan_stereo_xattn: bool = False,
+    wan_geosem: dict | None = None,
 ):
     logger.info("Loading Wan2.2-TI2V-5B components...")
     start = time.time()
@@ -215,11 +216,14 @@ def load_wan22_ti2v_5b_components(
         )
     if stereotok_checkpoint is None:
         vae = _load_registered_model(vae_config.path, "wan_video_vae", torch_dtype=torch_dtype, device=device)
-        if sum((bool(wan_bino), wan_depth_matcher is not None, bool(wan_stereo_xattn))) > 1:
+        if sum((bool(wan_bino), wan_depth_matcher is not None, bool(wan_stereo_xattn), bool(wan_geosem))) > 1:
             raise ValueError("Choose one Wan stereo baseline")
         if wan_stereo_xattn:
             from ..stereo_xattn import WanPairVAE
             vae = WanPairVAE(vae)
+        if wan_geosem:
+            from ..geosem import WanGeoSemVAE
+            vae = WanGeoSemVAE(vae, wan_geosem["matcher"], wan_geosem["dino_repo"], wan_geosem["dino_checkpoint"], device)
         if wan_bino:
             from ..wan_bino_vae import WanBinoVAE
             vae = WanBinoVAE(vae)

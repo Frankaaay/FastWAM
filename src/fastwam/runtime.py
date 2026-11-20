@@ -96,6 +96,7 @@ def create_fastwam(
     wan_bino: bool = False,
     wan_depth_matcher: str | None = None,
     wan_stereo_xattn: bool = False,
+    wan_geosem=None,
 ):
     from .models.wan22.fastwam import FastWAM
 
@@ -167,6 +168,7 @@ def create_fastwam(
         wan_bino=bool(wan_bino),
         wan_depth_matcher=wan_depth_matcher,
         wan_stereo_xattn=bool(wan_stereo_xattn),
+        wan_geosem=None if not wan_geosem else dict(wan_geosem),
     )
 
 

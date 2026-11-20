@@ -120,6 +120,7 @@ class FastWAM(torch.nn.Module):
         wan_bino: bool = False,
         wan_depth_matcher: str | None = None,
         wan_stereo_xattn: bool = False,
+        wan_geosem: dict | None = None,
     ):
         if video_dit_config is None:
             raise ValueError("`video_dit_config` is required for FastWAM.from_wan22_pretrained().")
@@ -141,6 +142,7 @@ class FastWAM(torch.nn.Module):
             wan_bino=wan_bino,
             wan_depth_matcher=wan_depth_matcher,
             wan_stereo_xattn=wan_stereo_xattn,
+            wan_geosem=wan_geosem,
         )
 
         video_expert = components.dit
@@ -169,6 +171,11 @@ class FastWAM(torch.nn.Module):
             with torch.random.fork_rng(devices=[]):
                 torch.manual_seed(20261121)
                 mot.stereo_fusion = StereoCrossAttention().to(device=device, dtype=torch_dtype)
+        if wan_geosem:
+            from .geosem import GeoSemProjector
+            with torch.random.fork_rng(devices=[]):
+                torch.manual_seed(20261121)
+                mot.geosem_projector = GeoSemProjector().to(device=device, dtype=torch_dtype)
 
         model = cls(
             video_expert=video_expert,
@@ -287,7 +294,7 @@ class FastWAM(torch.nn.Module):
             right = input_image_right.unsqueeze(0) if input_image_right is not None and input_image_right.ndim == 3 else input_image_right
             if getattr(self.vae, "stereo_fusion_input", False):
                 zl, zr = self.vae.encode_pair(left.unsqueeze(2), self.device, right_videos=right.unsqueeze(2))
-                return self.mot.stereo_fusion(zl.to(self.torch_dtype), zr.to(self.torch_dtype))
+                return self._observation_fusion(zl.to(self.torch_dtype), zr.to(self.torch_dtype))
             return self._encode_video_latents(left.unsqueeze(2), tiled=tiled, right_video=right.unsqueeze(2) if right is not None else None)
         if input_image.ndim == 3:
             input_image = input_image.unsqueeze(0)
@@ -299,6 +306,13 @@ class FastWAM(torch.nn.Module):
             raise NotImplementedError("Batched VAE image encoding does not support tiled encoding.")
         image = input_image.to(device=self.device)[0].unsqueeze(1)
         return self.vae.model.encode(image.unsqueeze(0), self.vae.scale)
+
+    def _observation_fusion(self, latent, condition):
+        """Policy-side fusion of the observation frame: stereo cross-attention or the GeoSem projector."""
+        module = getattr(self.mot, "stereo_fusion", None)
+        if module is None:
+            module = self.mot.geosem_projector
+        return module(latent, condition)
 
     def _decode_latents(self, latents, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)):
         video_tensor = self.vae.decode(latents, device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
@@ -390,7 +404,7 @@ class FastWAM(torch.nn.Module):
         if getattr(self.video_expert, "fuse_vae_embedding_in_latents", False):
             first_frame_latents = input_latents[:, :, 0:1]
             if right_first is not None:
-                first_frame_latents = self.mot.stereo_fusion(first_frame_latents, right_first)
+                first_frame_latents = self._observation_fusion(first_frame_latents, right_first)
             fuse_flag = True
 
         if context.ndim != 3 or context_mask.ndim != 2:
