@@ -34,6 +34,16 @@ def panels(height, width):
     return [(0, height, 0, width)]
 
 
+def _build_dino(repo):
+    """DINOv3 ViT-B/16 backbone from the pinned local source. Only the backbone builder is imported: the hub entry
+    also imports segmentation heads whose dependencies are absent from the policy environment."""
+    import sys
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    from dinov3.hub.backbones import dinov3_vitb16
+    return dinov3_vitb16(pretrained=False)
+
+
 def _sha256(path):
     digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
@@ -81,7 +91,7 @@ class WanGeoSemVAE(nn.Module):
         self.fusion = student.fusion.to(device=device, dtype=torch.float32)
         del student
         with torch.random.fork_rng(devices=[]):
-            dino = torch.hub.load(str(dino_repo), "dinov3_vitb16", source="local", pretrained=False)
+            dino = _build_dino(dino_repo)
         dino.load_state_dict(torch.load(dino_checkpoint, map_location="cpu", weights_only=True), strict=True)
         self.dino = dino.to(device=device, dtype=torch.float32)
         self.binding = {"format": "wan2.2-vae-geosem", "encode": "per-eye-native-wan", "matcher_sha256": matcher_sha,

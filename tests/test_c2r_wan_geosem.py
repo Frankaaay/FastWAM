@@ -57,7 +57,7 @@ class GeoSemTests(unittest.TestCase):
         cls.dino = FakeDino()
         with patch.object(geosem, "_sha256", lambda p: geosem.DINO_SHA256), \
              patch.object(geosem, "load_student", lambda p: FakeStudent()), \
-             patch("torch.hub.load", lambda *a, **k: cls.dino), \
+             patch.object(geosem, "_build_dino", lambda repo: cls.dino), \
              patch("torch.load", lambda *a, **k: {}), \
              patch("subprocess.check_output", lambda *a, **k: geosem.DINO_SOURCE_SHA + "\n"):
             cls.codec = WanGeoSemVAE(cls.wan, __file__, ".", __file__, "cpu")
