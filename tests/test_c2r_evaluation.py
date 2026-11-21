@@ -24,6 +24,63 @@ launcher_spec.loader.exec_module(launcher)
 
 
 class EvaluationTests(unittest.TestCase):
+
+    def test_h100_guard_preserves_source_and_redirects_only_rt(self):
+        from unittest.mock import Mock
+        original = ('before\n' + evaluation._GUARD_ANCHOR + 'after\n').encode()
+        setter = Mock(spec=[])
+        sapien = SimpleNamespace(__file__='/packages/sapien/__init__.py',
+                                 render=SimpleNamespace(set_camera_shader_dir=setter))
+        torch = SimpleNamespace(cuda=SimpleNamespace(
+            is_available=lambda: True, get_device_name=lambda: 'NVIDIA H100 80GB HBM3'))
+        with patch.dict(sys.modules, {'torch': torch, 'sapien': sapien}), \
+                patch.object(Path, 'read_bytes', return_value=original), \
+                patch.object(Path, 'write_bytes') as write, \
+                patch('tempfile.mkdtemp', return_value='/private/guard') as mkdir, \
+                patch('shutil.copytree') as copy:
+            evaluation._install_h100_render_guard()
+            patched = write.call_args.args[0]
+            self.assertEqual(patched.replace(evaluation._GUARD.encode(), b''), original)
+            self.assertEqual(patched.count(evaluation._GUARD.encode()), 1)
+            self.assertIn(b'all(equal(ray.direction, vec3(0.0))) && all(equal(ray.attenuation, vec3(0.0)))', patched)
+            copy.assert_called_once_with(Path('/packages/sapien/vulkan_shader/rt'),
+                                         Path('/private/guard'), dirs_exist_ok=True)
+            guarded = sapien.render.set_camera_shader_dir
+            guarded('rt')
+            setter.assert_called_with(str(Path('/private/guard')))
+            guarded('raster')
+            setter.assert_called_with('raster')
+            evaluation._install_h100_render_guard()
+            self.assertIs(sapien.render.set_camera_shader_dir, guarded)
+            mkdir.assert_called_once()
+            write.assert_called_once()
+
+    def test_h100_guard_rejects_changed_or_prepatched_shader(self):
+        for shader in ('missing anchor', evaluation._GUARD_ANCHOR * 2,
+                       evaluation._GUARD_ANCHOR + evaluation._GUARD):
+            with self.subTest(shader=shader):
+                sapien = SimpleNamespace(__file__='/packages/sapien/__init__.py',
+                                         render=SimpleNamespace(set_camera_shader_dir=lambda path: None))
+                torch = SimpleNamespace(cuda=SimpleNamespace(
+                    is_available=lambda: True, get_device_name=lambda: 'NVIDIA H100'))
+                with patch.dict(sys.modules, {'torch': torch, 'sapien': sapien}), \
+                        patch.object(Path, 'read_bytes', return_value=shader.encode()), \
+                        patch('tempfile.mkdtemp') as mkdir:
+                    with self.assertRaisesRegex(RuntimeError, 'Unexpected SAPIEN'):
+                        evaluation._install_h100_render_guard()
+                    mkdir.assert_not_called()
+
+    def test_h100_guard_leaves_other_devices_untouched(self):
+        for available, name in ((False, 'NVIDIA H100'), (True, 'NVIDIA L20Y'),
+                                (True, 'NVIDIA GeForce RTX 5090')):
+            with self.subTest(available=available, name=name):
+                torch = SimpleNamespace(cuda=SimpleNamespace(
+                    is_available=lambda: available, get_device_name=lambda: name))
+                with patch.dict(sys.modules, {'torch': torch, 'sapien': None}), \
+                        patch('tempfile.mkdtemp') as mkdir:
+                    evaluation._install_h100_render_guard()
+                    mkdir.assert_not_called()
+
     def test_fastwam_gc_keeps_new_scene_cycles_collectible_and_restores_on_error(self):
         class Node:
             pass

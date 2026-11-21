@@ -230,7 +230,15 @@ def main(cfg: DictConfig):
     cmd = [
         sys.executable,
         "-u",
-        "script/eval_policy.py",
+        "-c",
+        (
+            "import sys, runpy; "
+            f"sys.path.insert(0, {str(PROJECT_ROOT)!r}); "
+            "from scripts.c2r.evaluate import _install_h100_render_guard; "
+            "_install_h100_render_guard(); "
+            "sys.argv[0] = 'script/eval_policy.py'; "
+            "runpy.run_path('script/eval_policy.py', run_name='__main__')"
+        ),
         "--config",
         f"policy/{POLICY_NAME}/deploy_policy.yml",
         "--overrides",
