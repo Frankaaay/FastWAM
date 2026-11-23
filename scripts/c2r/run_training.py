@@ -44,8 +44,8 @@ def main():
     if args.variant=='wan-xattn':
         cfg.model.wan_stereo_xattn=True
     if args.variant=='wan-depth':
-        # Disparity from the frozen LAS2-H correspondence of the same StereoTok checkpoint.
-        cfg.model.wan_depth_matcher=os.environ['STEREOTOK_STUDENT_CKPT']
+        # Metric depth from the complete, frozen LAS2-H release matcher (see wan_depth_vae).
+        cfg.model.wan_depth_matcher=os.environ['LAS2_H_CKPT']
     if args.variant=='stereotok':
         cfg.model.stereotok_checkpoint=os.environ['STEREOTOK_STUDENT_CKPT']
         cfg.model.stereotok_input_mode=args.input_mode
