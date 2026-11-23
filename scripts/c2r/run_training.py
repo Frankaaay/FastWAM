@@ -110,7 +110,7 @@ def main():
     dataset=C2RDataset(**OmegaConf.to_container(cfg.c2r.dataset,resolve=True))
     if rank==0: OmegaConf.save(cfg,out/'config.yaml',resolve=True)
     trainer=C2RTrainer(model,dataset,None,cfg=cfg)
-    assert trainer.accelerator.num_processes in (4,8)
+    assert trainer.accelerator.num_processes in (4,8,16)
     assert trainer.batch_size*trainer.accelerator.num_processes*trainer.gradient_accumulation_steps==256
     if rank==0:
         expected_wandb_mode = str(cfg.wandb.mode)
